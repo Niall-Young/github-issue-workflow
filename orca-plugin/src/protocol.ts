@@ -8,6 +8,20 @@ export type BoardFileDescriptor = {
   workspaceId?: string
 }
 
+export type AttachmentPayload = {
+  name: string
+  mimeType: string
+  size: number
+  base64: string
+}
+
+export type SavedAttachment = {
+  name: string
+  mimeType: string
+  size: number
+  path: string
+}
+
 export type NeedsYouItem =
   | {
       id: string
@@ -71,6 +85,7 @@ export type CreateIssueInput = {
   title: string
   details?: string
   followUpOf?: number | null
+  attachments?: AttachmentPayload[]
 }
 
 export type CreateIssueResult = {
@@ -78,11 +93,14 @@ export type CreateIssueResult = {
   issueNumber: number | null
   url: string
   title: string
+  savedAttachments: SavedAttachment[]
 }
 
 export type ReplyAgentInput = {
   terminalId: string
   message: string
+  repoPath?: string
+  attachments?: AttachmentPayload[]
 }
 
 export type IssueActionInput = {
@@ -107,7 +125,7 @@ declare module 'orca/host' {
     }
     'board.replyAgent': {
       input: ReplyAgentInput
-      output: { ok: true }
+      output: { ok: true; savedAttachments: SavedAttachment[] }
     }
     'board.issueAction': {
       input: IssueActionInput

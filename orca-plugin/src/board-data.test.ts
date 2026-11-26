@@ -1,9 +1,13 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { assert, test } from 'orca/testing'
 import {
   buildIssueBody,
   extractTerminalQuestion,
   mergeBoardItems,
-  parseGithubRepoFromRemote
+  parseGithubRepoFromRemote,
+  saveAttachmentsLocally
 } from './board-data'
 
 test('parseGithubRepoFromRemote handles SSH and HTTPS GitHub URLs', () => {
@@ -18,11 +22,45 @@ test('parseGithubRepoFromRemote handles SSH and HTTPS GitHub URLs', () => {
   assert.equal(parseGithubRepoFromRemote('https://gitlab.com/org/repo.git'), null)
 })
 
-test('buildIssueBody includes kind, details, and optional follow-up reference', () => {
-  const body = buildIssueBody('bug', '导出按钮无响应', '点击页面右上角导出按钮后没有下载', 42)
+test('buildIssueBody includes kind, details, follow-up, and local attachment paths', () => {
+  const body = buildIssueBody('bug', '导出按钮无响应', '点击页面右上角导出按钮后没有下载', 42, [
+    {
+      name: 'error.png',
+      mimeType: 'image/png',
+      size: 2048,
+      path: '/tmp/attachments/01-error.png'
+    }
+  ])
   assert.equal(body.includes('问题修复 (Bug)'), true)
   assert.equal(body.includes('针对 #42 的后续调整'), true)
   assert.equal(body.includes('点击页面右上角导出按钮后没有下载'), true)
+  assert.equal(body.includes('## 附件（本地截图与文件）'), true)
+  assert.equal(body.includes('/tmp/attachments/01-error.png'), true)
+})
+
+test('saveAttachmentsLocally writes decoded files into isolated state folder', () => {
+  const tempState = mkdtempSync(join(tmpdir(), 'issue-board-test-'))
+  try {
+    const content = Buffer.from('hello screenshot bytes')
+    const saved = saveAttachmentsLocally(
+      '/Users/demo/my-project',
+      [
+        {
+          name: 'bug shot.png',
+          mimeType: 'image/png',
+          size: content.byteLength,
+          base64: content.toString('base64')
+        }
+      ],
+      tempState
+    )
+    assert.equal(saved.length, 1)
+    assert.equal(existsSync(saved[0].path), true)
+    assert.equal(readFileSync(saved[0].path, 'utf8'), 'hello screenshot bytes')
+    assert.equal(saved[0].path.includes('my-project'), true)
+  } finally {
+    rmSync(tempState, { recursive: true, force: true })
+  }
 })
 
 test('extractTerminalQuestion strips ANSI codes and returns concise tail', () => {

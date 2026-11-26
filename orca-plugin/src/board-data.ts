@@ -4,13 +4,15 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import type {
+  AttachmentPayload,
   BoardSnapshot,
   CompletedItem,
   CreateIssueInput,
   CreateIssueResult,
   InProgressItem,
   IssueKind,
-  NeedsYouItem
+  NeedsYouItem,
+  SavedAttachment
 } from './protocol'
 
 const execFileAsync = promisify(execFile)
@@ -246,7 +248,78 @@ export async function fetchGithubIssues(
   }
 }
 
-export function buildIssueBody(kind: IssueKind, title: string, details?: string, followUpOf?: number | null): string {
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const MAX_ATTACHMENTS_PER_REQUEST = 8
+
+export function sanitizeAttachmentFilename(name: string, mimeType: string, index: number): string {
+  const trimmed = (name || '').trim()
+  const base = basename(trimmed).replace(/[^\w.\-\u4e00-\u9fff]+/g, '_').replace(/^_+|_+$/g, '')
+  if (base && base !== '.' && base !== '..') {
+    return base.slice(0, 80)
+  }
+  const ext =
+    mimeType === 'image/png'
+      ? '.png'
+      : mimeType === 'image/jpeg'
+        ? '.jpg'
+        : mimeType === 'image/webp'
+          ? '.webp'
+          : mimeType === 'image/gif'
+            ? '.gif'
+            : mimeType === 'application/pdf'
+              ? '.pdf'
+              : '.bin'
+  return `attachment-${index + 1}${ext}`
+}
+
+export function saveAttachmentsLocally(
+  repoPath: string,
+  attachments: AttachmentPayload[] | undefined,
+  stateRoot = getAutopilotStateRoot()
+): SavedAttachment[] {
+  if (!attachments || attachments.length === 0) return []
+  if (attachments.length > MAX_ATTACHMENTS_PER_REQUEST) {
+    throw new Error(`单次最多附加 ${MAX_ATTACHMENTS_PER_REQUEST} 个文件`)
+  }
+  const repoSlug = basename(resolve(repoPath)).replace(/[^\w.-]+/g, '_') || 'project'
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const targetDir = join(stateRoot, 'attachments', repoSlug, stamp)
+  mkdirSync(targetDir, { recursive: true })
+
+  const saved: SavedAttachment[] = []
+  attachments.forEach((item, index) => {
+    const cleanBase64 = (item.base64 || '').replace(/^data:[^;]+;base64,/, '')
+    const buf = Buffer.from(cleanBase64, 'base64')
+    if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
+      throw new Error(`附件 ${item.name || index + 1} 超过 10MB 限制`)
+    }
+    const safeName = sanitizeAttachmentFilename(item.name, item.mimeType, index)
+    const filePath = join(targetDir, `${String(index + 1).padStart(2, '0')}-${safeName}`)
+    writeFileSync(filePath, buf)
+    saved.push({
+      name: safeName,
+      mimeType: item.mimeType || 'application/octet-stream',
+      size: buf.byteLength,
+      path: filePath
+    })
+  })
+
+  return saved
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+export function buildIssueBody(
+  kind: IssueKind,
+  title: string,
+  details?: string,
+  followUpOf?: number | null,
+  savedAttachments: SavedAttachment[] = []
+): string {
   const kindLabel = kind === 'bug' ? '问题修复 (Bug)' : kind === 'polish' ? '体验优化' : '新功能需求'
   const lines: string[] = [
     `## 任务类型`,
@@ -257,6 +330,13 @@ export function buildIssueBody(kind: IssueKind, title: string, details?: string,
   ]
   if (followUpOf && Number.isInteger(followUpOf) && followUpOf > 0) {
     lines.push('', `## 关联说明`, `针对 #${followUpOf} 的后续调整/补充验收意见。`)
+  }
+  if (savedAttachments.length > 0) {
+    lines.push('', `## 附件（本地截图与文件）`, `本地 AI 助手可直接读取以下路径查看截图或参考文件：`)
+    for (const att of savedAttachments) {
+      const tag = att.mimeType.startsWith('image/') ? '截图' : '文件'
+      lines.push(`- [${tag}] \`${att.path}\` (${att.name}, ${formatBytes(att.size)})`)
+    }
   }
   lines.push(
     '',
@@ -275,6 +355,8 @@ export async function createAgentReadyIssue(
   if (!title) {
     throw new Error('请输入任务标题或问题描述')
   }
+  const savedAttachments = saveAttachmentsLocally(input.repoPath, input.attachments)
+
   // Ensure agent-ready label exists (best-effort, ignore if already present)
   await runner(
     'gh',
@@ -282,7 +364,7 @@ export async function createAgentReadyIssue(
     { cwd: input.repoPath, timeoutMs: 10_000 }
   )
 
-  const body = buildIssueBody(input.kind, title, input.details, input.followUpOf)
+  const body = buildIssueBody(input.kind, title, input.details, input.followUpOf, savedAttachments)
   const res = await runner(
     'gh',
     ['issue', 'create', '--title', title, '--body', body, '--label', 'agent-ready'],
@@ -297,7 +379,8 @@ export async function createAgentReadyIssue(
     ok: true,
     issueNumber: numMatch ? Number(numMatch[1]) : null,
     url,
-    title
+    title,
+    savedAttachments
   }
 }
 

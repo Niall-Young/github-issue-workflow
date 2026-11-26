@@ -11,7 +11,8 @@ import {
   mergeBoardItems,
   readLedgerIssues,
   resolveGitRepository,
-  resolvePluginRootDir
+  resolvePluginRootDir,
+  saveAttachmentsLocally
 } from './board-data'
 import type { BoardSnapshot, NeedsYouItem } from './protocol'
 
@@ -231,17 +232,28 @@ export default function activate(orca: OrcaWorkerApi) {
   })
 
   orca.panels.handle('board.replyAgent', async (input) => {
-    const text = input.message.trim()
-    if (!text) {
-      throw Object.assign(new Error('回复内容不能为空'), { code: 'invalid_params' })
+    const baseText = input.message.trim()
+    const savedAttachments =
+      input.attachments && input.attachments.length > 0
+        ? saveAttachmentsLocally(input.repoPath || 'reply', input.attachments)
+        : []
+
+    if (!baseText && savedAttachments.length === 0) {
+      throw Object.assign(new Error('回复内容或附件不能为空'), { code: 'invalid_params' })
     }
+
+    const attachmentNote =
+      savedAttachments.length > 0
+        ? `\n附件路径：\n${savedAttachments.map((a) => `- ${a.path}`).join('\n')}`
+        : ''
+
     await orca.host.call('terminal.sendText', {
       terminalId: input.terminalId,
-      text,
+      text: `${baseText}${attachmentNote}`.trim(),
       enter: true
     })
     void refreshStatusBarAndNotify()
-    return { ok: true }
+    return { ok: true, savedAttachments }
   })
 
   orca.panels.handle('board.issueAction', async (input) => {

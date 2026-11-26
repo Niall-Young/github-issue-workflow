@@ -29,7 +29,6 @@ import {
 import { IssueBoardTui } from './app'
 import {
   buildMainRows,
-  computeComposerHeight,
   DEFAULT_SUBMIT_MODE,
   nextIssueKind,
   nextSubmitMode,
@@ -341,8 +340,6 @@ test('renderTui keeps inline [Image #1] on a single composer line without duplic
   const inserted = appendInlineAttachment('修复这个界面', [], saved)
   const state = makeBaseState(inserted.text)
   state.composer.attachments = inserted.attachments
-
-  assert.equal(computeComposerHeight(state.composer, 110), 3)
 
   const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
   const buf = renderTui(state, 110, 30)
@@ -1046,7 +1043,7 @@ test('loadBoardSnapshot surfaces handoff unexpected exit, handoff stall, and sys
   assert.equal(ghErrSnap.needsYou.some((i) => i.kind === 'system-alert' && i.badge === 'GitHub 鉴权失效'), true)
 })
 
-test('renderTui positions native terminal cursor for empty, CJK/mixed, wrapped, and trailing-newline bottom composer without pseudo-cursor', () => {
+test('bottom composer keeps its borders fixed and the native cursor at the visible end of the draft', () => {
   const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
 
   // Empty composer: cursor at (textAreaX=3, composerTop+1=27)
@@ -1064,23 +1061,34 @@ test('renderTui positions native terminal cursor for empty, CJK/mixed, wrapped, 
   assert.deepEqual(mixedBuf.cursor, { x: 15, y: 27 })
   assert.ok(!mixedBuf.renderLines().map(stripAnsi).join('\n').includes('▏'))
 
-  // Trailing newline: height expands to 4 (2 text lines), composerTop = 25, cursor at line 2 col 0
-  const newlineState = makeBaseState('第一行\n')
-  assert.equal(computeComposerHeight(newlineState.composer, 100), 4)
-  const newlineBuf = renderTui(newlineState, 100, 30)
-  assert.deepEqual(newlineBuf.cursor, { x: 3, y: 27 })
-
-  // Exact-width fill stays within [0, width - 1]
-  const exactState = makeBaseState('a'.repeat(20))
-  assert.equal(computeComposerHeight(exactState.composer, 24), 3)
-  const exactBuf = renderTui(exactState, 24, 30)
-  assert.deepEqual(exactBuf.cursor, { x: 23, y: 27 })
-
-  // Multi-line wrapped CJK + ASCII: width=24 -> textAreaW=20, line0="测试终端原生光标定位" (20), line1="显示abc" (7)
-  const wrappedState = makeBaseState('测试终端原生光标定位显示abc')
-  assert.equal(computeComposerHeight(wrappedState.composer, 24), 4)
-  const wrappedBuf = renderTui(wrappedState, 24, 30)
-  assert.deepEqual(wrappedBuf.cursor, { x: 10, y: 27 })
+  // Keep both dividers, the prompt and the status bar fixed throughout editing.
+  const width = 24
+  const height = 30
+  const empty = renderTui(makeBaseState(''), width, height)
+  const bounds = empty.hitBoxes.find((box) => box.action === 'focus-composer')!
+  const original = empty.renderLines()
+  for (const [draft, visible] of [
+    ['a'.repeat(20), 'a'.repeat(20)],
+    ['a'.repeat(19) + '中', 'a'.repeat(18) + '中'],
+    ['中' + 'a'.repeat(19), 'a'.repeat(19)],
+    ['a'.repeat(80) + '最新abc', 'a'.repeat(13) + '最新abc'],
+    ['第一行\n第二行\n第三行\n第四行', '第四行'],
+    ['第一行\n', ''],
+    ['/', '/']
+  ]) {
+    const frame = renderTui(makeBaseState(draft), width, height)
+    const lines = frame.renderLines()
+    assert.deepEqual(frame.hitBoxes.find((box) => box.action === 'focus-composer'), bounds)
+    assert.equal(lines[bounds.y], original[bounds.y])
+    assert.equal(lines[bounds.y + 2], original[bounds.y + 2])
+    assert.equal(lines[height - 1], original[height - 1])
+    assert.equal(stripAnsi(lines[bounds.y + 1]).trimEnd(), (' ❯ ' + visible).trimEnd())
+    const caret = { x: 3 + stringDisplayWidth(visible), y: bounds.y + 1 }
+    assert.deepEqual(frame.cursor, caret)
+    assert.ok(frame.diffOutput(original, empty.cursor).output.endsWith(
+      `\x1b[${caret.y + 1};${caret.x + 1}H${ANSI.cursorShow}`
+    ))
+  }
 })
 
 test('renderTui positions native cursor in reply modal and hides cursor in non-editable states', () => {

@@ -14,6 +14,7 @@ import type {
 import type { InlineAttachment } from './attachments'
 import { filterSlashCommands, isSlashMenuOpen, type SlashCommandDef } from './commands'
 import {
+  charDisplayWidth,
   PALETTE,
   ScreenBuffer,
   stringDisplayWidth,
@@ -180,13 +181,21 @@ function prBadge(pr: PullRequestItem): { label: string; style: string } {
   return { label: 'OPEN', style: PALETTE.blue }
 }
 
-export function computeComposerHeight(composer: ComposerState, width: number): number {
-  const innerW = Math.max(6, width - 4)
-  const wrapped = composer.text
-    ? wrapTextToWidth(composer.text, innerW, 3)
-    : ['']
-  const textLines = Math.max(1, Math.min(3, wrapped.length))
-  return 2 + textLines
+export const COMPOSER_HEIGHT = 3
+
+// The composer edits at the end of the draft. Keep the insertion point visible
+// by scrolling its current logical line inside the fixed input row.
+function visibleComposerText(text: string, width: number): string {
+  const line = Array.from(text.slice(text.lastIndexOf('\n') + 1))
+  let start = line.length
+  let used = 0
+  while (start > 0) {
+    const cellWidth = charDisplayWidth(line[start - 1].codePointAt(0)!)
+    if (used + cellWidth > width) break
+    used += cellWidth
+    start--
+  }
+  return line.slice(start).join('')
 }
 
 function computeInputCursor(
@@ -277,8 +286,7 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
 
   // ── Layout Metrics ────────────────────────────────────────────────────────
   const footerY = height - 1
-  const composerH = Math.min(5, computeComposerHeight(state.composer, width))
-  const composerTop = Math.max(5, footerY - composerH)
+  const composerTop = Math.max(5, footerY - COMPOSER_HEIGHT)
   const contentTop = 2
   const maxSlashH = Math.max(0, composerTop - contentTop - 3)
   const slashH = computeSlashMenuHeight(state, maxSlashH)
@@ -359,7 +367,7 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   }
 
   // ── Bottom AI-Chat-Style Composer ─────────────────────────────────────────
-  renderBottomComposer(buf, state, 0, composerTop, width, composerH)
+  renderBottomComposer(buf, state, 0, composerTop, width, COMPOSER_HEIGHT)
 
   // ── Footer Status Bar (Codex-style active selections below composer) ──────
   renderFooterStatusBar(buf, state, width, footerY)
@@ -499,21 +507,17 @@ function renderBottomComposer(
 
   buf.writeText(promptX, y + 1, '❯', isActive ? PALETTE.accentBold : PALETTE.dim, 2)
 
-  const maxTextLines = Math.max(1, h - 2)
   if (!c.text) {
     buf.writeText(textAreaX, y + 1, '输入需求，或 / 命令…', PALETTE.dim, textAreaW)
     if (isActive) {
       buf.setCursor(textAreaX, y + 1)
     }
   } else {
-    const lines = wrapTextToWidth(c.text, textAreaW, maxTextLines)
-    lines.forEach((line, idx) => {
-      const style = c.text.startsWith('/') ? PALETTE.accent : PALETTE.text
-      writeLineWithAttachmentTokens(buf, textAreaX, y + 1 + idx, line, style, textAreaW, c.attachments)
-    })
+    const line = visibleComposerText(c.text, textAreaW)
+    const style = c.text.startsWith('/') ? PALETTE.accent : PALETTE.text
+    writeLineWithAttachmentTokens(buf, textAreaX, y + 1, line, style, textAreaW, c.attachments)
     if (isActive) {
-      const pos = computeInputCursor(lines, textAreaX, y + 1, textAreaW)
-      buf.setCursor(pos.x, pos.y)
+      buf.setCursor(textAreaX + stringDisplayWidth(line), y + 1)
     }
   }
 }

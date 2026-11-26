@@ -33,7 +33,7 @@ import {
 } from './orca-cli'
 import {
   buildMainRows,
-  computeComposerHeight,
+  COMPOSER_HEIGHT,
   DEFAULT_SUBMIT_MODE,
   nextIssueKind,
   nextSubmitMode,
@@ -263,10 +263,8 @@ export class IssueBoardTui {
     }
     if (next >= 0 && next < rows.length) {
       this.state.selectedIndex = next
-      const width = process.stdout.columns || 100
       const height = process.stdout.rows || 30
-      const composerH = Math.min(5, computeComposerHeight(this.state.composer, width))
-      const listH = Math.max(1, height - composerH - 5)
+      const listH = Math.max(1, height - COMPOSER_HEIGHT - 5)
       if (next < this.state.scrollOffset) {
         this.state.scrollOffset = Math.max(0, next - 1)
       } else if (next >= this.state.scrollOffset + listH) {

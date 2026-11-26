@@ -189,6 +189,8 @@ orca plugin check ./orca-plugin --json
 orca-board
 ```
 
+底部输入框固定为一行。长文本在框内横向滚动，按 `Shift+Enter` 后显示新的一行，提交时保留完整草稿。
+
 也可点击 Orca 底部状态栏「Issue 看板」或按 `Cmd+Shift+I` 在终端标签页中打开。详见 [`orca-plugin/README.md`](orca-plugin/README.md)。
 
 真实 GitHub 操作还需通过 CLI 端到端回读：
@@ -387,6 +389,8 @@ After installation, run a single command in **any project terminal** to render t
 ```sh
 orca-board
 ```
+
+The bottom input stays one row tall. Long lines scroll horizontally. Pressing `Shift+Enter` displays the new line and keeps the full draft for submission.
 
 You can also click **Issue 看板** in Orca's status bar or press `Cmd+Shift+I` to open the TUI in an Orca terminal tab. See [`orca-plugin/README.md`](orca-plugin/README.md).
 

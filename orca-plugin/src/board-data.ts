@@ -62,6 +62,7 @@ export type AutopilotConfigInfo = {
   label: string | null
   maxConcurrentWorkers: number | null
   maxAttempts: number | null
+  pollIntervalSeconds: number | null
   workerTimeoutSeconds: number | null
   heartbeatTimeoutSeconds: number | null
   publication: 'auto-merge' | 'pr-only' | 'never' | null
@@ -90,6 +91,9 @@ export type LedgerIssueRow = {
   merged_at: string | null
   attempt_status: string | null
   attempt_summary: string | null
+  orca_worktree_id?: string | null
+  worktree_path?: string | null
+  orca_dispatch_id?: string | null
 }
 
 export type GithubIssueRow = {
@@ -133,6 +137,7 @@ export function findAutopilotConfigForRepo(
         state_db?: string
         max_concurrent_workers?: number
         max_attempts?: number
+        poll_interval_seconds?: number
         worker_timeout_seconds?: number
         heartbeat_timeout_seconds?: number
         policy?: {
@@ -185,6 +190,8 @@ export function findAutopilotConfigForRepo(
           maxConcurrentWorkers:
             typeof raw.max_concurrent_workers === 'number' ? raw.max_concurrent_workers : null,
           maxAttempts: typeof raw.max_attempts === 'number' ? raw.max_attempts : null,
+          pollIntervalSeconds:
+            typeof raw.poll_interval_seconds === 'number' ? raw.poll_interval_seconds : null,
           workerTimeoutSeconds:
             typeof raw.worker_timeout_seconds === 'number' ? raw.worker_timeout_seconds : null,
           heartbeatTimeoutSeconds:
@@ -453,7 +460,10 @@ export async function readLedgerIssues(
       a.pr_url,
       a.merged_at,
       a.status AS attempt_status,
-      a.summary AS attempt_summary
+      a.summary AS attempt_summary,
+      a.orca_worktree_id,
+      a.worktree_path,
+      a.orca_dispatch_id
     FROM issues i
     LEFT JOIN attempts a
       ON a.node_id = i.node_id
@@ -502,10 +512,10 @@ export function parseGithubRepoFromRemote(url: string): string | null {
   return null
 }
 
-export async function fetchGithubIssues(
+export async function fetchGithubIssuesWithStatus(
   repoPath: string,
   runner: CommandRunner = defaultRunner
-): Promise<GithubIssueRow[]> {
+): Promise<{ issues: GithubIssueRow[]; error: string | null }> {
   const res = await runner(
     'gh',
     [
@@ -520,13 +530,31 @@ export async function fetchGithubIssues(
     ],
     { cwd: repoPath, timeoutMs: 15_000 }
   )
-  if (res.exitCode !== 0 || !res.stdout.trim()) return []
+  if (res.exitCode !== 0) {
+    const detail = (res.stderr || res.stdout || '').trim()
+    return {
+      issues: [],
+      error: detail || `gh issue list 执行失败 (exit ${res.exitCode})`
+    }
+  }
+  if (!res.stdout.trim()) return { issues: [], error: null }
   try {
     const parsed = JSON.parse(res.stdout)
-    return Array.isArray(parsed) ? (parsed as GithubIssueRow[]) : []
+    return {
+      issues: Array.isArray(parsed) ? (parsed as GithubIssueRow[]) : [],
+      error: null
+    }
   } catch {
-    return []
+    return { issues: [], error: '无法解析 gh issue list 输出' }
   }
+}
+
+export async function fetchGithubIssues(
+  repoPath: string,
+  runner: CommandRunner = defaultRunner
+): Promise<GithubIssueRow[]> {
+  const { issues } = await fetchGithubIssuesWithStatus(repoPath, runner)
+  return issues
 }
 
 export type GithubPullRequestRow = {
@@ -820,15 +848,71 @@ export function extractGithubIssueNumbers(
   return Array.from(numbers)
 }
 
+export function stripTerminalAnsi(rawOutput: string): string {
+  return rawOutput
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b\][^\u0007]*\u0007/g, '')
+    .replace(/\r/g, '')
+}
+
+export function hasAutopilotReceipt(rawOutput: string): boolean {
+  if (!rawOutput) return false
+  const clean = stripTerminalAnsi(rawOutput)
+  for (const rawLine of clean.split('\n')) {
+    const line = rawLine.trim()
+    if (/^AUTOPILOT_RESULT:\s*\{/.test(line) && !line.includes('<assigned run ID>')) {
+      return true
+    }
+  }
+  return false
+}
+
+export function looksLikeDuplicateOrConfirmationQuestion(rawOutput: string): boolean {
+  if (!rawOutput) return false
+  const clean = stripTerminalAnsi(rawOutput)
+  const lines = clean
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.length > 0 && !TERMINAL_CHROME_PATTERNS.some((pattern) => pattern.test(line))
+    )
+  const tail = lines.slice(-10).join('\n')
+  if (!tail) return false
+  if (
+    /(?:已创建|创建成功|已提交|created\s+issue|issue\s+created|successfully\s+created)/i.test(tail)
+  ) {
+    return false
+  }
+  const hasQuestion = /[?？]/.test(tail)
+  const hasConfirmCue =
+    /(?:重复|duplicate|已存在|already\s+exist|是否|还要|继续创建|确认|要不要|请确认|would\s+you\s+like|should\s+i)/i.test(
+      tail
+    )
+  return hasQuestion && hasConfirmCue
+}
+
 export function hasHandoffCreatedIssue(params: {
   output: string
   repository?: string | null
   githubIssues: readonly GithubIssueRow[]
   startedMs?: number
   agentUpdatedMs?: number
+  existingIssueNumbers?: ReadonlySet<number> | readonly number[]
 }): boolean {
   const mentioned = extractGithubIssueNumbers(params.output, params.repository)
   if (mentioned.length === 0) return false
+
+  const existingSet =
+    params.existingIssueNumbers instanceof Set
+      ? params.existingIssueNumbers
+      : Array.isArray(params.existingIssueNumbers)
+        ? new Set(params.existingIssueNumbers)
+        : null
+
+  if (!existingSet && looksLikeDuplicateOrConfirmationQuestion(params.output)) {
+    return false
+  }
 
   const byNumber = new Map<number, GithubIssueRow>()
   for (const issue of params.githubIssues) {
@@ -836,12 +920,13 @@ export function hasHandoffCreatedIssue(params: {
   }
 
   for (const num of mentioned) {
+    if (existingSet && existingSet.has(num)) continue
     const issue = byNumber.get(num)
     if (!issue) continue
     const createdMs = Date.parse(issue.createdAt)
     if (!Number.isFinite(createdMs)) continue
     if (typeof params.startedMs === 'number') {
-      if (createdMs >= params.startedMs - 60_000) return true
+      if (createdMs >= params.startedMs - 5_000) return true
     } else if (typeof params.agentUpdatedMs === 'number') {
       if (Math.abs(params.agentUpdatedMs - createdMs) <= 30 * 60 * 1000) return true
     } else {
@@ -852,11 +937,7 @@ export function hasHandoffCreatedIssue(params: {
 }
 
 export function extractTerminalQuestion(rawOutput: string): string {
-  // Strip ANSI escape sequences
-  const clean = rawOutput
-    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
-    .replace(/\u001b\][^\u0007]*\u0007/g, '')
-    .replace(/\r/g, '')
+  const clean = stripTerminalAnsi(rawOutput)
   const lines = clean
     .split('\n')
     .map((line) => line.trim())
@@ -871,6 +952,85 @@ export function extractTerminalQuestion(rawOutput: string): string {
   return lines.slice(-8).join('\n').slice(0, 700)
 }
 
+export function buildSystemHealthAlerts(params: {
+  repository: string | null
+  autopilotInstalled: boolean
+  autopilotLabel?: string | null
+  pollIntervalSeconds?: number | null
+  maxConcurrentWorkers?: number | null
+  githubError?: string | null
+  ledgerRows: readonly LedgerIssueRow[]
+  githubIssues: readonly GithubIssueRow[]
+  nowMs?: number
+}): Array<Extract<NeedsYouItem, { kind: 'system-alert' }>> {
+  const nowMs = params.nowMs ?? Date.now()
+  const nowIso = new Date(nowMs).toISOString()
+  const alerts: Array<Extract<NeedsYouItem, { kind: 'system-alert' }>> = []
+
+  if (params.githubError && params.repository) {
+    const errText = params.githubError.trim()
+    const isAuth =
+      /(?:not logged into|gh auth login|authentication|401|bad credentials|token|saml)/i.test(
+        errText
+      )
+    alerts.push({
+      id: 'alert-github-cli',
+      kind: 'system-alert',
+      severity: 'error',
+      badge: isAuth ? 'GitHub 鉴权失效' : 'GitHub 同步异常',
+      title: isAuth ? 'gh 登录已失效，无法同步或认领 Issue' : '无法从 GitHub 拉取 Issue 列表',
+      reason: isAuth
+        ? `请运行 gh auth login 重新登录 GitHub CLI。原始错误：${errText.slice(0, 160)}`
+        : errText.slice(0, 220),
+      updatedAt: nowIso,
+      canDismiss: true
+    })
+  }
+
+  if (params.autopilotInstalled && !params.githubError) {
+    const targetLabel = (params.autopilotLabel || 'agent-ready').toLowerCase()
+    const pollSec = Math.max(60, params.pollIntervalSeconds ?? 180)
+    const staleThresholdMs = Math.max(pollSec * 3, 600) * 1000
+    const maxWorkers = Math.max(1, params.maxConcurrentWorkers ?? 3)
+    const ledgerNumbers = new Set(params.ledgerRows.map((r) => r.issue_number))
+    const runningCount = params.ledgerRows.filter(
+      (r) => r.status === 'running' || r.status === 'claimed'
+    ).length
+
+    if (runningCount < maxWorkers) {
+      const staleUnclaimed = params.githubIssues.filter((gh) => {
+        if (gh.state !== 'OPEN') return false
+        if (ledgerNumbers.has(gh.number)) return false
+        if (!gh.labels.some((l) => l.name.toLowerCase() === targetLabel)) return false
+        const createdMs = Date.parse(gh.createdAt)
+        return Number.isFinite(createdMs) && nowMs - createdMs >= staleThresholdMs
+      })
+
+      if (staleUnclaimed.length > 0) {
+        const thresholdMin = Math.round(staleThresholdMs / 60_000)
+        const nums = staleUnclaimed
+          .slice(0, 3)
+          .map((i) => `#${i.number}`)
+          .join('、')
+        const suffix = staleUnclaimed.length > 3 ? ` 等 ${staleUnclaimed.length} 条` : ''
+        alerts.push({
+          id: 'alert-autopilot-stalled',
+          kind: 'system-alert',
+          severity: 'warning',
+          badge: '自动化异常',
+          title: 'Autopilot 可能已停止轮询',
+          reason: `${nums}${suffix} 带有 ${targetLabel} 标签已超过 ${thresholdMin} 分钟未被后台认领，请检查 Autopilot 状态或在设置中重新启用。`,
+          updatedAt: nowIso,
+          canDismiss: true,
+          canOpenSettings: true
+        })
+      }
+    }
+  }
+
+  return alerts
+}
+
 export function humanizeAttentionReason(status: string, summary: string | null): string {
   const cleaned = (summary || '').trim()
   if (cleaned) {
@@ -883,6 +1043,10 @@ export function humanizeAttentionReason(status: string, summary: string | null):
       return '当前任务被其他前置任务阻塞，或遇到了无法自动绕过的限制。'
     case 'failed':
       return '自动尝试未成功，可以点击「重试」让系统再试一次，或查看详情。'
+    case 'ready-for-review':
+      return '本地修复与自检已完成，正在等待你验收或决定后续处理。'
+    case 'pr-open':
+      return 'PR 已创建，正在等待你人工 Review 与合并。'
     default:
       return '需要你确认后续处理方式。'
   }
@@ -898,8 +1062,10 @@ export function mergeBoardItems(params: {
   ledgerRows: LedgerIssueRow[]
   githubIssues: GithubIssueRow[]
   agentQuestions: NeedsYouItem[]
+  systemAlerts?: NeedsYouItem[]
+  publication?: 'auto-merge' | 'pr-only' | 'never' | null
 }): Pick<BoardSnapshot, 'needsYou' | 'inProgress' | 'completed'> {
-  const needsYou: NeedsYouItem[] = [...params.agentQuestions]
+  const needsYou: NeedsYouItem[] = [...(params.systemAlerts ?? []), ...params.agentQuestions]
   const inProgress: InProgressItem[] = []
   const completed: CompletedItem[] = []
   const seenNumbers = new Set<number>()
@@ -934,7 +1100,14 @@ export function mergeBoardItems(params: {
       continue
     }
 
-    if (status === 'needs-human' || status === 'blocked' || status === 'failed') {
+    const needsManualReview =
+      status === 'ready-for-review' || (status === 'pr-open' && params.publication === 'pr-only')
+    if (
+      status === 'needs-human' ||
+      status === 'blocked' ||
+      status === 'failed' ||
+      needsManualReview
+    ) {
       needsYou.push({
         id: `issue-${row.issue_number}`,
         kind: 'issue-attention',
@@ -945,8 +1118,8 @@ export function mergeBoardItems(params: {
         prUrl: row.pr_url,
         rawStatus: status,
         updatedAt: row.issue_updated_at,
-        canRetry: true,
-        canDiscard: true
+        canRetry: status !== 'pr-open',
+        canDiscard: status !== 'pr-open'
       })
       continue
     }

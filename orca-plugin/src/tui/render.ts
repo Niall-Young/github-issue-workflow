@@ -704,10 +704,25 @@ function renderAttentionPane(
     const cardH = 3 + wrapped.length + 1
     if (curY + cardH > y + h && i > start) break
 
+    const cardTitle =
+      item.kind === 'agent-question'
+        ? `${item.agentName} 提问`
+        : item.kind === 'system-alert'
+          ? item.badge
+          : item.rawStatus === 'ready-for-review' || item.rawStatus === 'pr-open'
+            ? `#${item.issueNumber} 待验收`
+            : `#${item.issueNumber} 需关注`
+    const titleStyle =
+      item.kind === 'agent-question'
+        ? PALETTE.accentBold
+        : item.kind === 'system-alert' && item.severity === 'error'
+          ? PALETTE.red
+          : PALETTE.amber
+
     buf.drawBox(x, curY, w, cardH, {
       borderStyle: isSelected ? PALETTE.borderActive : PALETTE.border,
-      title: item.kind === 'agent-question' ? `${item.agentName} 提问` : `#${item.issueNumber} 需关注`,
-      titleStyle: item.kind === 'agent-question' ? PALETTE.accentBold : PALETTE.amber
+      title: cardTitle,
+      titleStyle
     })
     buf.addHitBox(x, curY, w, cardH, 'select-attention', i)
 
@@ -723,6 +738,16 @@ function renderAttentionPane(
     } else if (item.kind === 'agent-question') {
       bx += buf.drawButton(bx, btnY, '同意继续', PALETTE.accentBg, 'approve-agent', item) + 2
       buf.drawLinkButton(bx, btnY, '[回复]', PALETTE.muted, 'open-reply', item)
+    } else if (item.kind === 'system-alert') {
+      if (item.retryTitle) {
+        bx +=
+          buf.drawButton(bx, btnY, '重新提单', PALETTE.accentBg, 'retry-handoff-alert', item) + 2
+      } else if (item.canOpenSettings) {
+        bx += buf.drawButton(bx, btnY, '打开设置', PALETTE.accentBg, 'open-settings') + 2
+      }
+      if (item.canDismiss) {
+        buf.drawLinkButton(bx, btnY, '[忽略]', PALETTE.muted, 'dismiss-alert', item.id)
+      }
     } else {
       if (item.canRetry) {
         bx += buf.drawButton(bx, btnY, '重试', PALETTE.accentBg, 'issue-retry', item) + 2
@@ -730,7 +755,9 @@ function renderAttentionPane(
       if (item.canDiscard) {
         bx += buf.drawLinkButton(bx, btnY, '[放弃]', PALETTE.muted, 'issue-discard', item) + 2
       }
-      if (item.url) {
+      if (item.prUrl) {
+        buf.drawLinkButton(bx, btnY, '[打开 PR]', PALETTE.muted, 'open-url', item.prUrl)
+      } else if (item.url) {
         buf.drawLinkButton(bx, btnY, '[打开]', PALETTE.muted, 'open-url', item.url)
       }
     }

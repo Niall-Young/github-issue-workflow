@@ -1,9 +1,11 @@
 import { basename, join, resolve } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import {
+  buildSystemHealthAlerts,
   extractTerminalQuestion,
-  fetchGithubIssues,
+  fetchGithubIssuesWithStatus,
   findAutopilotConfigForRepo,
+  hasAutopilotReceipt,
   hasHandoffCreatedIssue,
   isHandoffSessionTitle,
   mergeBoardItems,
@@ -71,10 +73,14 @@ export default function activate(orca: OrcaWorkerApi) {
       return false
     })
 
-    const [ledgerRows, githubIssues] = await Promise.all([
+    const [ledgerRows, ghResult] = await Promise.all([
       autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
-      fetchGithubIssues(rootPath)
+      fetchGithubIssuesWithStatus(rootPath)
     ])
+    const githubIssues = ghResult.issues
+    const activeRepairRows = ledgerRows.filter(
+      (r) => r.status === 'running' || r.status === 'claimed' || r.attempt_status === 'running'
+    )
 
     const agentQuestions: NeedsYouItem[] = []
     for (const ws of related) {
@@ -82,12 +88,24 @@ export default function activate(orca: OrcaWorkerApi) {
         const res = await orca.host.call('agents.list', { workspaceId: ws.id })
         for (const agent of res.agents || []) {
           if (!agent.terminalId) continue
-          const isExplicitWait = agent.state === 'blocked' || agent.state === 'waiting'
+          const agentState = String(agent.state || '')
+          const isExplicitWait =
+            agentState === 'blocked' || agentState === 'waiting' || agentState === 'permission'
           const agentTitle = agent.task?.title || agent.title || ''
-          const isHandoffDone =
-            agent.state === 'done' && isHandoffSessionTitle(agentTitle)
+          const isDoneOrIdle = agentState === 'done' || agentState === 'idle'
+          const isHandoffDone = isDoneOrIdle && isHandoffSessionTitle(agentTitle)
 
-          if (!isExplicitWait && !isHandoffDone) continue
+          const matchedRepairRow = isDoneOrIdle
+            ? activeRepairRows.find(
+                (r) =>
+                  (r.orca_worktree_id && r.orca_worktree_id === ws.id) ||
+                  (r.worktree_path && resolve(r.worktree_path) === resolve(ws.path)) ||
+                  agentTitle.includes(`#${r.issue_number}`)
+              )
+            : undefined
+          const isRepairDone = Boolean(matchedRepairRow)
+
+          if (!isExplicitWait && !isHandoffDone && !isRepairDone) continue
 
           let output = ''
           try {
@@ -112,15 +130,26 @@ export default function activate(orca: OrcaWorkerApi) {
             continue
           }
 
+          if (isRepairDone && hasAutopilotReceipt(output)) {
+            continue
+          }
+
           agentQuestions.push({
             id: `agent-${agent.terminalId}`,
             kind: 'agent-question',
-            title: agentTitle || `${ws.name} 中的助手需要你确认`,
+            title: matchedRepairRow
+              ? `#${matchedRepairRow.issue_number} ${matchedRepairRow.title}`
+              : agentTitle || `${ws.name} 中的助手需要你确认`,
             question: extractTerminalQuestion(output),
             terminalId: agent.terminalId,
             workspaceId: ws.id,
             agentName: agent.agent || 'Agent',
-            state: agent.state === 'blocked' ? 'blocked' : 'waiting',
+            state:
+              agentState === 'blocked'
+                ? 'blocked'
+                : agentState === 'permission'
+                  ? 'permission'
+                  : 'waiting',
             updatedAt: new Date(agent.stateStartedAt || Date.now()).toISOString()
           })
         }
@@ -129,10 +158,23 @@ export default function activate(orca: OrcaWorkerApi) {
       }
     }
 
+    const systemAlerts = buildSystemHealthAlerts({
+      repository: autopilot?.repository || gitInfo.repository,
+      autopilotInstalled: Boolean(autopilot),
+      autopilotLabel: autopilot?.label,
+      pollIntervalSeconds: autopilot?.pollIntervalSeconds,
+      maxConcurrentWorkers: autopilot?.maxConcurrentWorkers,
+      githubError: ghResult.error,
+      ledgerRows,
+      githubIssues
+    })
+
     const merged = mergeBoardItems({
       ledgerRows,
       githubIssues,
-      agentQuestions
+      agentQuestions,
+      systemAlerts,
+      publication: autopilot?.publication ?? null
     })
     return {
       projectName: basename(rootPath),

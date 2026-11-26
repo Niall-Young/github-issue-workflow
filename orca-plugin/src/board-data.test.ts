@@ -6,12 +6,16 @@ import {
   buildAutopilotInstallArgs,
   buildHandoffPrompt,
   buildIssueBody,
+  buildSystemHealthAlerts,
   extractTerminalQuestion,
   fetchGithubPullRequests,
   findAutopilotConfigForRepo,
   findBundledHandoffSkill,
+  hasAutopilotReceipt,
+  hasHandoffCreatedIssue,
   isAutopilotRuntimeOutdated,
   listInstalledAgents,
+  looksLikeDuplicateOrConfirmationQuestion,
   mergeBoardItems,
   normalizePullRequests,
   parseGithubRepoFromRemote,
@@ -458,4 +462,157 @@ test('isAutopilotRuntimeOutdated detects stale or missing runtime copies', () =>
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('hasHandoffCreatedIssue avoids false positives on pre-existing duplicate Issue URLs', () => {
+  const now = Date.parse('2026-11-26T17:00:00Z')
+  const existingIssue = {
+    number: 42,
+    title: '已有重复 Issue',
+    state: 'OPEN' as const,
+    url: 'https://github.com/acme/demo/issues/42',
+    createdAt: new Date(now - 2 * 60_000).toISOString(),
+    updatedAt: new Date(now - 2 * 60_000).toISOString(),
+    closedAt: null,
+    labels: [{ name: 'agent-ready' }]
+  }
+
+  assert.equal(
+    hasHandoffCreatedIssue({
+      output: '检测到可能重复的 Issue：https://github.com/acme/demo/issues/42，是否还要继续创建？',
+      repository: 'acme/demo',
+      githubIssues: [existingIssue],
+      startedMs: now,
+      existingIssueNumbers: [42]
+    }),
+    false
+  )
+
+  assert.equal(
+    looksLikeDuplicateOrConfirmationQuestion(
+      '检测到可能重复的 Issue：https://github.com/acme/demo/issues/42\n是否还要继续创建？'
+    ),
+    true
+  )
+  assert.equal(
+    hasHandoffCreatedIssue({
+      output: '检测到可能重复的 Issue：https://github.com/acme/demo/issues/42\n是否还要继续创建？',
+      repository: 'acme/demo',
+      githubIssues: [existingIssue],
+      agentUpdatedMs: now
+    }),
+    false
+  )
+
+  assert.equal(
+    hasHandoffCreatedIssue({
+      output: '已创建 Issue：https://github.com/acme/demo/issues/42',
+      repository: 'acme/demo',
+      githubIssues: [existingIssue],
+      agentUpdatedMs: now
+    }),
+    true
+  )
+})
+
+test('hasAutopilotReceipt detects real receipts and ignores template placeholders', () => {
+  assert.equal(
+    hasAutopilotReceipt(
+      'AUTOPILOT_RESULT: {"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>"}'
+    ),
+    false
+  )
+  assert.equal(
+    hasAutopilotReceipt(
+      'Done!\nAUTOPILOT_RESULT: {"status":"ready-for-review","summary":"fixed","run_id":"run-1"}'
+    ),
+    true
+  )
+  assert.equal(hasAutopilotReceipt('需求不够明确，请问你想改哪个文件？'), false)
+})
+
+test('mergeBoardItems surfaces ready-for-review and pr-only pr-open in needsYou', () => {
+  const baseRow = {
+    node_id: 'n1',
+    repository: 'acme/demo',
+    issue_number: 10,
+    url: 'https://github.com/acme/demo/issues/10',
+    title: '本地验收任务',
+    created_at: '2026-11-26T10:00:00Z',
+    issue_updated_at: '2026-11-26T10:10:00Z',
+    status: 'ready-for-review',
+    attempts: 1,
+    summary: null,
+    pr_url: null,
+    merged_at: null,
+    attempt_status: 'ready-for-review',
+    attempt_summary: null
+  }
+  const prOpenRow = {
+    ...baseRow,
+    node_id: 'n2',
+    issue_number: 11,
+    url: 'https://github.com/acme/demo/issues/11',
+    title: 'PR Review 任务',
+    status: 'pr-open',
+    pr_url: 'https://github.com/acme/demo/pull/99',
+    attempt_status: 'pr-open'
+  }
+
+  const prOnlyResult = mergeBoardItems({
+    ledgerRows: [baseRow, prOpenRow],
+    githubIssues: [],
+    agentQuestions: [],
+    publication: 'pr-only'
+  })
+  assert.equal(prOnlyResult.needsYou.length, 2)
+  assert.equal(prOnlyResult.inProgress.length, 0)
+
+  const autoMergeResult = mergeBoardItems({
+    ledgerRows: [baseRow, prOpenRow],
+    githubIssues: [],
+    agentQuestions: [],
+    publication: 'auto-merge'
+  })
+  assert.equal(autoMergeResult.needsYou.length, 1)
+  assert.equal(autoMergeResult.inProgress.length, 1)
+})
+
+test('buildSystemHealthAlerts flags gh auth failures and stalled autopilot polling', () => {
+  const now = Date.parse('2026-11-26T17:00:00Z')
+  const authAlerts = buildSystemHealthAlerts({
+    repository: 'acme/demo',
+    autopilotInstalled: true,
+    githubError: 'To get started with GitHub CLI, please run:  gh auth login',
+    ledgerRows: [],
+    githubIssues: [],
+    nowMs: now
+  })
+  assert.equal(authAlerts.length, 1)
+  assert.equal(authAlerts[0]?.badge, 'GitHub 鉴权失效')
+
+  const stalledAlerts = buildSystemHealthAlerts({
+    repository: 'acme/demo',
+    autopilotInstalled: true,
+    pollIntervalSeconds: 180,
+    maxConcurrentWorkers: 3,
+    githubError: null,
+    ledgerRows: [],
+    githubIssues: [
+      {
+        number: 77,
+        title: '超过 15 分钟未认领的 Issue',
+        state: 'OPEN',
+        url: 'https://github.com/acme/demo/issues/77',
+        createdAt: new Date(now - 15 * 60_000).toISOString(),
+        updatedAt: new Date(now - 15 * 60_000).toISOString(),
+        closedAt: null,
+        labels: [{ name: 'agent-ready' }]
+      }
+    ],
+    nowMs: now
+  })
+  assert.equal(stalledAlerts.length, 1)
+  assert.equal(stalledAlerts[0]?.id, 'alert-autopilot-stalled')
+  assert.ok(stalledAlerts[0]?.reason.includes('#77'))
 })

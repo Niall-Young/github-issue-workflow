@@ -837,3 +837,146 @@ test('IssueBoardTui opens selected Issue/PR directly in browser on Enter or seco
   internal.handleEvent({ type: 'key', key: 'escape', raw: '\x1b' })
   assert.equal(internal.state.modal.type, 'none')
 })
+
+test('loadBoardSnapshot surfaces handoff unexpected exit, handoff stall, and system-alert rendering', async () => {
+  const repoPath = '/tmp/demo-fallback-repo'
+  const nowMs = Date.parse('2026-11-26T17:30:00Z')
+  const startedMs = nowMs - 12 * 60_000
+
+  const makeRunner = (opts: {
+    agents: unknown[]
+    terminals: unknown[]
+    ghExitCode?: number
+    ghStderr?: string
+  }): CommandRunner => {
+    return async (cmd, args) => {
+      if (cmd === 'git' && args.includes('--show-toplevel')) {
+        return { stdout: `${repoPath}\n`, stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'git' && args.includes('get-url')) {
+        return { stdout: 'https://github.com/acme/demo-fallback-repo.git\n', stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'gh' && args[0] === 'issue') {
+        return {
+          stdout: opts.ghExitCode ? '' : '[]',
+          stderr: opts.ghStderr || '',
+          exitCode: opts.ghExitCode ?? 0
+        }
+      }
+      if (cmd === 'gh' && args[0] === 'pr') {
+        return { stdout: '[]', stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'installed') {
+        return { stdout: JSON.stringify({ result: { agents: [] } }), stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'list') {
+        return { stdout: JSON.stringify({ result: { agents: opts.agents } }), stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'orca' && args[0] === 'terminal' && args[1] === 'list') {
+        return { stdout: JSON.stringify({ result: { terminals: opts.terminals } }), stderr: '', exitCode: 0 }
+      }
+      return { stdout: '', stderr: '', exitCode: 1 }
+    }
+  }
+
+  // 1. Handoff terminal exited unexpectedly without creating an Issue -> surfaces system-alert instead of vanishing
+  const exitedPending = new Map<string, PendingHandoff>([
+    [
+      'term_crashed',
+      {
+        terminalId: 'term_crashed',
+        repoPath,
+        title: '修复崩溃提单任务',
+        agent: 'codex',
+        startedAt: new Date(startedMs).toISOString(),
+        startedMs
+      }
+    ]
+  ])
+  const exitedSnap = await loadBoardSnapshot(
+    repoPath,
+    exitedPending,
+    makeRunner({ agents: [], terminals: [] }),
+    { nowMs }
+  )
+  assert.equal(exitedSnap.needsYou.length, 1)
+  assert.equal(exitedSnap.needsYou[0]?.kind, 'system-alert')
+  if (exitedSnap.needsYou[0]?.kind === 'system-alert') {
+    assert.equal(exitedSnap.needsYou[0].badge, '提单中断')
+    assert.equal(exitedSnap.needsYou[0].retryTitle, '修复崩溃提单任务')
+  }
+
+  // Verify renderTui renders system-alert buttons cleanly
+  const state = makeBaseState()
+  state.snapshot = exitedSnap
+  const buf = renderTui(state, 120, 32)
+  const actions = new Set(buf.hitBoxes.map((h) => h.action))
+  assert.equal(actions.has('retry-handoff-alert'), true)
+  assert.equal(actions.has('dismiss-alert'), true)
+
+  // 2. Handoff stalled in working state for > 10 minutes -> surfaces agent-question & Skill 可能卡住
+  const stalledPending = new Map<string, PendingHandoff>([
+    [
+      'term_stalled',
+      {
+        terminalId: 'term_stalled',
+        repoPath,
+        title: '卡住的提单任务',
+        agent: 'codex',
+        startedAt: new Date(startedMs).toISOString(),
+        startedMs,
+        lastActivityMs: startedMs
+      }
+    ]
+  ])
+  const stalledSnap = await loadBoardSnapshot(
+    repoPath,
+    stalledPending,
+    makeRunner({
+      agents: [
+        {
+          agent: 'codex',
+          state: 'working',
+          worktreeId: `wt::${repoPath}`,
+          paneKey: 'tab-9:leaf-9',
+          title: 'github-issue-handoff',
+          updatedAt: startedMs
+        }
+      ],
+      terminals: [
+        {
+          handle: 'term_stalled',
+          worktreeId: `wt::${repoPath}`,
+          worktreePath: repoPath,
+          tabId: 'tab-9',
+          leafId: 'leaf-9',
+          title: 'github-issue-handoff',
+          connected: true,
+          lastOutputAt: startedMs,
+          preview: 'Running git status...'
+        }
+      ]
+    }),
+    { nowMs }
+  )
+  assert.equal(stalledSnap.inProgress[0]?.statusLabel, 'Skill 可能卡住 (codex)')
+  assert.equal(stalledSnap.needsYou.length, 1)
+  assert.equal(stalledSnap.needsYou[0]?.kind, 'agent-question')
+  if (stalledSnap.needsYou[0]?.kind === 'agent-question') {
+    assert.ok(stalledSnap.needsYou[0].question.includes('无新输出'))
+  }
+
+  // 3. gh auth failure surfaces system-alert
+  const ghErrSnap = await loadBoardSnapshot(
+    repoPath,
+    new Map(),
+    makeRunner({
+      agents: [],
+      terminals: [],
+      ghExitCode: 4,
+      ghStderr: 'not logged into any GitHub hosts. Run gh auth login'
+    }),
+    { nowMs }
+  )
+  assert.equal(ghErrSnap.needsYou.some((i) => i.kind === 'system-alert' && i.badge === 'GitHub 鉴权失效'), true)
+})

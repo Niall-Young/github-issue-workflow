@@ -49,6 +49,18 @@ export type NeedsYouItem =
       canRetry: boolean
       canDiscard: boolean
     }
+  | {
+      id: string
+      kind: 'system-alert'
+      severity: 'error' | 'warning'
+      badge: string
+      title: string
+      reason: string
+      updatedAt: string
+      canDismiss: boolean
+      canOpenSettings?: boolean
+      retryTitle?: string | null
+    }
 
 export type InProgressItem = {
   id: string

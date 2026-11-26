@@ -6,15 +6,17 @@ import { basename, extname, join, resolve } from 'node:path'
 import {
   buildAutopilotInstallArgs,
   buildHandoffPrompt,
+  buildSystemHealthAlerts,
   createAgentReadyIssue,
   defaultRunner,
   extractTerminalQuestion,
-  fetchGithubIssues,
+  fetchGithubIssuesWithStatus,
   fetchGithubPullRequests,
   findAutopilotConfigForRepo,
   findBundledAutopilotAdmin,
   findBundledHandoffSkill,
   getAutopilotStateRoot,
+  hasAutopilotReceipt,
   hasHandoffCreatedIssue,
   isHandoffSessionTitle,
   listInstalledAgents,
@@ -35,6 +37,7 @@ import type {
 } from '../protocol'
 
 const HANDOFF_BOOT_GRACE_MS = 25_000
+const HANDOFF_STALL_TIMEOUT_MS = 10 * 60 * 1000
 const DISCOVERED_HANDOFF_MAX_AGE_MS = 6 * 60 * 60 * 1000
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
@@ -47,6 +50,11 @@ export type PendingHandoff = {
   agent: string
   startedAt: string
   startedMs: number
+  existingIssueNumbers?: number[]
+  lastActivityMs?: number
+  lastPreview?: string
+  exitedWithoutIssue?: boolean
+  exitedAt?: string
 }
 
 type OrcaAgentEntry = {
@@ -86,6 +94,7 @@ export type ResolvedOrcaAgent = {
   state: string
   title: string
   worktreeId: string
+  worktreePath?: string
   workspace: string
   lastAssistantMessage: string
   preview: string
@@ -157,6 +166,7 @@ export async function collectOrcaAgentState(
   agentsByKey: Map<string, ResolvedOrcaAgent>
   terminalByHandle: Map<string, OrcaTerminalEntry>
   handoffAgents: ResolvedOrcaAgent[]
+  allAgents: ResolvedOrcaAgent[]
 }> {
   const questions: NeedsYouItem[] = []
   const sessionStates = new Map<string, string>()
@@ -164,6 +174,7 @@ export async function collectOrcaAgentState(
   const terminalByHandle = new Map<string, OrcaTerminalEntry>()
   const terminalByPaneKey = new Map<string, OrcaTerminalEntry>()
   const handoffAgents: ResolvedOrcaAgent[] = []
+  const allAgents: ResolvedOrcaAgent[] = []
 
   const [agentRes, termRes] = await Promise.all([
     runner('orca', ['agent', 'list', '--json'], { timeoutMs: 6_000 }),
@@ -191,7 +202,7 @@ export async function collectOrcaAgentState(
   }
 
   if (agentRes.exitCode !== 0 || !agentRes.stdout.trim()) {
-    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents }
+    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents, allAgents }
   }
 
   let agents: OrcaAgentEntry[] = []
@@ -202,7 +213,7 @@ export async function collectOrcaAgentState(
     }
     agents = parsed.result?.agents || parsed.agents || []
   } catch {
-    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents }
+    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents, allAgents }
   }
 
   for (const agent of agents) {
@@ -223,12 +234,14 @@ export async function collectOrcaAgentState(
       state: agent.state || '',
       title: agent.title || matchedTerminal?.title || '',
       worktreeId: agent.worktreeId || matchedTerminal?.worktreeId || '',
+      worktreePath: matchedTerminal?.worktreePath,
       workspace: agent.workspace || basename(repoPath),
       lastAssistantMessage: (agent.lastAssistantMessage || '').trim(),
       preview: (matchedTerminal?.preview || '').trim(),
       updatedAt: agent.updatedAt || matchedTerminal?.lastOutputAt || Date.now(),
       terminalConnected: matchedTerminal ? matchedTerminal.connected !== false : true
     }
+    allAgents.push(resolved)
 
     for (const key of [handle, agent.terminalId, agent.paneKey, agent.orcaSessionId]) {
       if (key) {
@@ -278,27 +291,33 @@ export async function collectOrcaAgentState(
     }
   }
 
-  return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents }
+  return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents, allAgents }
 }
 
 export async function loadBoardSnapshot(
   targetPath: string,
   pendingHandoffs: Map<string, PendingHandoff>,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner = defaultRunner,
+  options?: {
+    dismissedAlertIds?: ReadonlySet<string>
+    nowMs?: number
+  }
 ): Promise<BoardSnapshot> {
-  const syncedAt = new Date().toISOString()
+  const now = options?.nowMs ?? Date.now()
+  const syncedAt = new Date(now).toISOString()
   const gitInfo = await resolveGitRepository(targetPath, runner)
   const repoPath = gitInfo.rootPath
   const repository = gitInfo.repository
   const autopilot = findAutopilotConfigForRepo(repoPath, repository)
 
-  const [ledgerRows, githubIssues, pullRequests, agentState, installedAgents] = await Promise.all([
+  const [ledgerRows, ghResult, pullRequests, agentState, installedAgents] = await Promise.all([
     autopilot ? readLedgerIssues(autopilot.dbPath, runner) : Promise.resolve([]),
-    fetchGithubIssues(repoPath, runner),
+    fetchGithubIssuesWithStatus(repoPath, runner),
     fetchGithubPullRequests(repoPath, runner),
     collectOrcaAgentState(repoPath, runner),
     listInstalledAgents(runner)
   ])
+  const githubIssues = ghResult.issues
 
   const preferredAgent = await resolvePreferredAgent(
     autopilot?.defaultAgent ?? null,
@@ -308,6 +327,7 @@ export async function loadBoardSnapshot(
 
   const questionsByHandle = new Map<string, Extract<NeedsYouItem, { kind: 'agent-question' }>>()
   const allQuestions: NeedsYouItem[] = []
+  const handoffAlerts: Array<Extract<NeedsYouItem, { kind: 'system-alert' }>> = []
   for (const q of agentState.questions) {
     allQuestions.push(q)
     if (q.kind === 'agent-question' && q.terminalId) {
@@ -315,12 +335,48 @@ export async function loadBoardSnapshot(
     }
   }
 
-  const now = Date.now()
   const activeHandoffs: InProgressItem[] = []
   const handledHandoffKeys = new Set<string>()
 
+  const pushHandoffExitAlert = (terminalId: string, entry: PendingHandoff) => {
+    entry.exitedWithoutIssue = true
+    entry.exitedAt = entry.exitedAt || new Date(now).toISOString()
+    handoffAlerts.push({
+      id: `handoff-exited-${terminalId}`,
+      kind: 'system-alert',
+      severity: 'error',
+      badge: '提单中断',
+      title: entry.title,
+      reason: '提单终端已提前关闭且未检测到新 Issue，可能因 CLI 报错、网络中断或误关终端导致。',
+      updatedAt: entry.exitedAt,
+      canDismiss: true,
+      retryTitle: entry.title
+    })
+  }
+
+  const hasMatchingNewIssueByTitle = (entry: PendingHandoff): boolean => {
+    const existingSet = entry.existingIssueNumbers ? new Set(entry.existingIssueNumbers) : null
+    const targetTitle = entry.title.trim().toLowerCase()
+    if (!targetTitle) return false
+    return githubIssues.some((gh) => {
+      if (existingSet && existingSet.has(gh.number)) return false
+      const createdMs = Date.parse(gh.createdAt)
+      if (!Number.isFinite(createdMs) || createdMs < entry.startedMs - 5_000) return false
+      return gh.title.trim().toLowerCase() === targetTitle
+    })
+  }
+
   for (const [terminalId, entry] of pendingHandoffs.entries()) {
     if (entry.repoPath !== repoPath) continue
+    if (entry.exitedWithoutIssue) {
+      if (hasMatchingNewIssueByTitle(entry)) {
+        pendingHandoffs.delete(terminalId)
+        continue
+      }
+      pushHandoffExitAlert(terminalId, entry)
+      continue
+    }
+
     const resolved =
       agentState.agentsByKey.get(entry.terminalId) ||
       (entry.paneKey ? agentState.agentsByKey.get(entry.paneKey) : undefined) ||
@@ -346,7 +402,11 @@ export async function loadBoardSnapshot(
 
     if (!state && !terminalStillOpen) {
       if (now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
-        pendingHandoffs.delete(terminalId)
+        if (hasMatchingNewIssueByTitle(entry)) {
+          pendingHandoffs.delete(terminalId)
+        } else {
+          pushHandoffExitAlert(terminalId, entry)
+        }
         continue
       }
       activeHandoffs.push({
@@ -368,9 +428,10 @@ export async function loadBoardSnapshot(
         output,
         repository: autopilot?.repository || repository,
         githubIssues,
-        startedMs: entry.startedMs
+        startedMs: entry.startedMs,
+        existingIssueNumbers: entry.existingIssueNumbers
       })
-      if (!created && effectiveHandle) {
+      if (!created && effectiveHandle && terminalStillOpen) {
         const screenText = await readTerminalText(effectiveHandle, runner)
         if (screenText) {
           output = output ? `${output}\n${screenText}` : screenText
@@ -378,12 +439,21 @@ export async function loadBoardSnapshot(
             output,
             repository: autopilot?.repository || repository,
             githubIssues,
-            startedMs: entry.startedMs
+            startedMs: entry.startedMs,
+            existingIssueNumbers: entry.existingIssueNumbers
           })
         }
       }
-      if (created || !terminalStillOpen) {
+      if (created) {
         pendingHandoffs.delete(terminalId)
+        continue
+      }
+      if (!terminalStillOpen) {
+        if (hasMatchingNewIssueByTitle(entry)) {
+          pendingHandoffs.delete(terminalId)
+        } else {
+          pushHandoffExitAlert(terminalId, entry)
+        }
         continue
       }
 
@@ -427,6 +497,51 @@ export async function loadBoardSnapshot(
       }
     }
 
+    // Track output activity to detect stalled handoff sessions
+    const latestPreview = [resolved?.lastAssistantMessage, resolved?.preview, termEntry?.preview]
+      .filter(Boolean)
+      .join('\n')
+    const reportedActivityMs = Math.max(
+      entry.lastActivityMs ?? entry.startedMs,
+      resolved?.updatedAt ?? 0,
+      termEntry?.lastOutputAt ?? 0
+    )
+    if (latestPreview) {
+      if (entry.lastPreview !== undefined && latestPreview !== entry.lastPreview) {
+        entry.lastActivityMs = Math.max(reportedActivityMs, now)
+      } else {
+        entry.lastActivityMs = reportedActivityMs
+      }
+      entry.lastPreview = latestPreview
+    } else {
+      entry.lastActivityMs = reportedActivityMs
+    }
+
+    const isStalled =
+      !waitingConfirmation &&
+      terminalStillOpen &&
+      now - (entry.lastActivityMs ?? entry.startedMs) >= HANDOFF_STALL_TIMEOUT_MS
+
+    if (isStalled && !questionsByHandle.has(effectiveHandle)) {
+      const stallMinutes = Math.floor((now - (entry.lastActivityMs ?? entry.startedMs)) / 60_000)
+      const tail = latestPreview
+        ? extractTerminalQuestion(latestPreview)
+        : '终端长时间无新输出，可以直接回复催促或检查终端状态。'
+      const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+        id: `agent-${effectiveHandle}`,
+        kind: 'agent-question',
+        title: entry.title,
+        question: `提单任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+        terminalId: effectiveHandle,
+        workspaceId: resolved?.worktreeId || '',
+        agentName: entry.agent,
+        state: 'waiting',
+        updatedAt: new Date(entry.lastActivityMs ?? now).toISOString()
+      }
+      allQuestions.push(questionItem)
+      questionsByHandle.set(effectiveHandle, questionItem)
+    }
+
     activeHandoffs.push({
       id: `handoff-${effectiveHandle}`,
       issueNumber: null,
@@ -434,7 +549,9 @@ export async function loadBoardSnapshot(
       url: '',
       statusLabel: waitingConfirmation
         ? `Skill 等待确认 (${entry.agent})`
-        : `Skill 整理提单中 (${entry.agent})`,
+        : isStalled
+          ? `Skill 可能卡住 (${entry.agent})`
+          : `Skill 整理提单中 (${entry.agent})`,
       updatedAt: entry.startedAt
     })
   }
@@ -505,6 +622,28 @@ export async function loadBoardSnapshot(
 
     const waitingConfirmation =
       agent.state === 'waiting' || agent.state === 'blocked' || agent.state === 'permission'
+    const isStalled =
+      !waitingConfirmation && now - agent.updatedAt >= HANDOFF_STALL_TIMEOUT_MS
+    if (isStalled && !questionsByHandle.has(effectiveHandle)) {
+      const stallMinutes = Math.floor((now - agent.updatedAt) / 60_000)
+      const tail = extractTerminalQuestion(
+        [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
+      )
+      const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+        id: `agent-${effectiveHandle}`,
+        kind: 'agent-question',
+        title: displayTitle,
+        question: `提单任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+        terminalId: effectiveHandle,
+        workspaceId: agent.worktreeId,
+        agentName: agent.agent,
+        state: 'waiting',
+        updatedAt: new Date(agent.updatedAt).toISOString()
+      }
+      allQuestions.push(questionItem)
+      questionsByHandle.set(effectiveHandle, questionItem)
+    }
+
     activeHandoffs.push({
       id: `handoff-${effectiveHandle}`,
       issueNumber: null,
@@ -512,15 +651,81 @@ export async function loadBoardSnapshot(
       url: '',
       statusLabel: waitingConfirmation
         ? `Skill 等待确认 (${agent.agent})`
-        : `Skill 整理提单中 (${agent.agent})`,
+        : isStalled
+          ? `Skill 可能卡住 (${agent.agent})`
+          : `Skill 整理提单中 (${agent.agent})`,
       updatedAt: new Date(agent.updatedAt).toISOString()
     })
   }
 
+  // Detect Autopilot repair workers that stopped in done/idle asking plain-text questions without a receipt
+  const activeRepairRows = ledgerRows.filter(
+    (r) => r.status === 'running' || r.status === 'claimed' || r.attempt_status === 'running'
+  )
+  if (activeRepairRows.length > 0) {
+    for (const agent of agentState.allAgents) {
+      if (!agent.terminalConnected) continue
+      if (agent.state !== 'done' && agent.state !== 'idle') continue
+      if (isHandoffSessionTitle(agent.title)) continue
+      if (questionsByHandle.has(agent.handle) || handledHandoffKeys.has(agent.handle)) continue
+
+      const matchedRow = activeRepairRows.find(
+        (r) =>
+          (r.orca_worktree_id && agent.worktreeId && r.orca_worktree_id === agent.worktreeId) ||
+          (r.worktree_path &&
+            agent.worktreePath &&
+            resolve(r.worktree_path) === resolve(agent.worktreePath)) ||
+          agent.title.includes(`#${r.issue_number}`)
+      )
+      if (!matchedRow) continue
+
+      let output = [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
+      if (!hasAutopilotReceipt(output) && agent.handle) {
+        const screenText = await readTerminalText(agent.handle, runner)
+        if (screenText) {
+          output = output ? `${output}\n${screenText}` : screenText
+        }
+      }
+      if (hasAutopilotReceipt(output)) continue
+
+      const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+        id: `agent-${agent.handle}`,
+        kind: 'agent-question',
+        title: `#${matchedRow.issue_number} ${matchedRow.title}`,
+        question: extractTerminalQuestion(output),
+        terminalId: agent.handle,
+        workspaceId: agent.worktreeId,
+        agentName: agent.agent,
+        state: 'waiting',
+        updatedAt: new Date(agent.updatedAt).toISOString()
+      }
+      allQuestions.push(questionItem)
+      questionsByHandle.set(agent.handle, questionItem)
+    }
+  }
+
+  const healthAlerts = buildSystemHealthAlerts({
+    repository: autopilot?.repository || repository,
+    autopilotInstalled: Boolean(autopilot),
+    autopilotLabel: autopilot?.label,
+    pollIntervalSeconds: autopilot?.pollIntervalSeconds,
+    maxConcurrentWorkers: autopilot?.maxConcurrentWorkers,
+    githubError: ghResult.error,
+    ledgerRows,
+    githubIssues,
+    nowMs: now
+  })
+  const dismissed = options?.dismissedAlertIds
+  const systemAlerts = [...handoffAlerts, ...healthAlerts].filter(
+    (a) => !dismissed || !dismissed.has(a.id)
+  )
+
   const merged = mergeBoardItems({
     ledgerRows,
     githubIssues,
-    agentQuestions: allQuestions
+    agentQuestions: allQuestions,
+    systemAlerts,
+    publication: autopilot?.publication ?? null
   })
 
   return {
@@ -553,6 +758,7 @@ export async function submitIssueFromTui(params: {
   details?: string
   followUpOf?: number | null
   savedAttachments?: SavedAttachment[]
+  existingIssueNumbers?: number[]
   pendingHandoffs: Map<string, PendingHandoff>
   runner?: CommandRunner
 }): Promise<CreateIssueResult> {
@@ -668,7 +874,9 @@ export async function submitIssueFromTui(params: {
     title,
     agent,
     startedAt: new Date(nowMs).toISOString(),
-    startedMs: nowMs
+    startedMs: nowMs,
+    existingIssueNumbers: params.existingIssueNumbers,
+    lastActivityMs: nowMs
   })
 
   return {

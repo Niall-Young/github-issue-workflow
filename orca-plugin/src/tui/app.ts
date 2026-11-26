@@ -54,6 +54,7 @@ export class IssueBoardTui {
   private readonly openUrl: (url: string) => Promise<void> | void
   private readonly writeOutput: (chunk: string) => void
   private readonly pendingHandoffs = new Map<string, PendingHandoff>()
+  private readonly dismissedAlertIds = new Set<string>()
   private readonly parser = new InputParser()
   private state: TuiState
   private lastBuffer: ScreenBuffer | null = null
@@ -209,7 +210,9 @@ export class IssueBoardTui {
       this.render()
     }
     try {
-      const snap = await loadBoardSnapshot(this.targetPath, this.pendingHandoffs)
+      const snap = await loadBoardSnapshot(this.targetPath, this.pendingHandoffs, undefined, {
+        dismissedAlertIds: this.dismissedAlertIds
+      })
       this.state.snapshot = snap
       this.state.loading = false
       this.normalizeSelection()
@@ -460,6 +463,43 @@ export class IssueBoardTui {
       case 'issue-discard': {
         const item = payload as Extract<NeedsYouItem, { kind: 'issue-attention' }>
         void this.handleIssueAction(item, 'discard')
+        return
+      }
+      case 'dismiss-alert': {
+        const alertId = String(payload || '')
+        if (!alertId) return
+        this.dismissedAlertIds.add(alertId)
+        if (alertId.startsWith('handoff-exited-')) {
+          this.pendingHandoffs.delete(alertId.slice('handoff-exited-'.length))
+        }
+        if (this.state.snapshot) {
+          this.state.snapshot = {
+            ...this.state.snapshot,
+            needsYou: this.state.snapshot.needsYou.filter((i) => i.id !== alertId)
+          }
+          this.normalizeSelection()
+        }
+        this.render()
+        return
+      }
+      case 'retry-handoff-alert': {
+        const item = payload as Extract<NeedsYouItem, { kind: 'system-alert' }>
+        if (item.id.startsWith('handoff-exited-')) {
+          this.pendingHandoffs.delete(item.id.slice('handoff-exited-'.length))
+        }
+        if (item.retryTitle) {
+          this.state.composer.text = item.retryTitle
+          this.state.composer.mode = 'handoff'
+          this.state.composer.slashIndex = 0
+        }
+        if (this.state.snapshot) {
+          this.state.snapshot = {
+            ...this.state.snapshot,
+            needsYou: this.state.snapshot.needsYou.filter((i) => i.id !== item.id)
+          }
+          this.normalizeSelection()
+        }
+        this.render()
         return
       }
       case 'reply-paste-image':
@@ -832,6 +872,22 @@ export class IssueBoardTui {
     c.submitting = true
     this.render()
     try {
+      const existingIssueNumbers = snap
+        ? Array.from(
+            new Set([
+              ...snap.inProgress
+                .map((i) => i.issueNumber)
+                .filter((n): n is number => typeof n === 'number'),
+              ...snap.completed.map((i) => i.issueNumber),
+              ...snap.needsYou
+                .filter(
+                  (i): i is Extract<NeedsYouItem, { kind: 'issue-attention' }> =>
+                    i.kind === 'issue-attention'
+                )
+                .map((i) => i.issueNumber)
+            ])
+          )
+        : undefined
       await submitIssueFromTui({
         repoPath,
         repository: snap?.repository ?? null,
@@ -843,6 +899,7 @@ export class IssueBoardTui {
         details,
         followUpOf,
         savedAttachments: attachments,
+        existingIssueNumbers,
         pendingHandoffs: this.pendingHandoffs
       })
       c.text = ''

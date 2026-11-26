@@ -22,7 +22,9 @@ from typing import Any, Callable
 CONFIG_VERSIONS = {2, 3}
 LEDGER_VERSION = 5
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-RECEIPT = re.compile(r"(?m)^AUTOPILOT_RESULT: (\{[^\r\n]+\})[ \t]*$")
+ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+RECEIPT = re.compile(r"(?m)^[ \t]*AUTOPILOT_RESULT: (\{[^\r\n]+\})[ \t]*$")
+RECEIPT_START = re.compile(r"^[ \t]*AUTOPILOT_RESULT: (\{.*)$")
 DEPENDENCY_LINE = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:blocked[\s_-]*by|depends[\s_-]*on|前置依赖|依赖|阻塞于)(?:\*\*)?\s*[:：]\s*(.+)$"
 )
@@ -1353,21 +1355,127 @@ def poll(config: dict[str, Any], ledger: Ledger) -> dict[str, Any]:
     return {"observed": observed, "enqueued": enqueued}
 
 
-def parse_receipt(output: str) -> dict[str, Any] | None:
-    matches = RECEIPT.findall(output)
-    for payload in reversed(matches):
-        try:
-            value = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        if (isinstance(value, dict) and value.get("status") in CHILD_STATES
-                and isinstance(value.get("summary"), str)):
-            return value
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _valid_receipt_dict(payload: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if (isinstance(value, dict) and value.get("status") in CHILD_STATES
+            and isinstance(value.get("summary"), str)):
+        return value
     return None
 
 
+def is_placeholder_receipt(receipt: dict[str, Any]) -> bool:
+    return (
+        receipt.get("run_id") == "<assigned run ID>"
+        or receipt.get("worktree_path") == "<absolute worktree path>"
+        or receipt.get("branch") == "<assigned branch>"
+    )
+
+
+def parse_receipt(output: str) -> dict[str, Any] | None:
+    cleaned = strip_ansi(output)
+    lines = cleaned.splitlines()
+    parsed: list[dict[str, Any]] = []
+    for idx, raw_line in enumerate(lines):
+        match = RECEIPT_START.match(raw_line)
+        if not match:
+            continue
+        first_chunk = match.group(1).rstrip()
+        direct = _valid_receipt_dict(first_chunk)
+        if direct is not None:
+            parsed.append(direct)
+            continue
+        # Terminal output (e.g. PTY fallback for antigravity/claude/codex) often
+        # soft-wraps long JSON receipt lines across multiple indented rows.
+        parts = [first_chunk]
+        for cont in lines[idx + 1:idx + 31]:
+            stripped = cont.strip()
+            if not stripped or "AUTOPILOT_RESULT" in stripped:
+                break
+            parts.append(stripped)
+            for joiner in ("", " "):
+                candidate = _valid_receipt_dict(joiner.join(parts))
+                if candidate is not None:
+                    parsed.append(candidate)
+                    break
+            else:
+                continue
+            break
+    if parsed:
+        return parsed[-1]
+    return None
+
+
+def recover_receipt_from_repair_ledger(
+    repository: dict[str, Any] | None,
+    attempt: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Recover a verified success receipt from the durable repair ledger when
+    a completed worker's terminal output was unavailable, truncated, or raced
+    against `worker_done`. The recovered receipt still passes `validate_attempt`.
+    """
+    if repository is None:
+        return None
+    run_id = attempt.get("run_id")
+    worktree_path = attempt.get("worktree_path")
+    branch = attempt.get("branch")
+    if not all(isinstance(v, str) and v for v in (run_id, worktree_path, branch)):
+        return None
+    worktree = Path(str(worktree_path))
+    if not worktree.is_dir():
+        return None
+    try:
+        state = repair_run_state(repository["repo_path"], str(run_id))
+    except WatcherError:
+        return None
+    if state.get("state") not in {"REVIEW", "AWAIT_PUBLICATION_APPROVAL"}:
+        return None
+    base_sha = state.get("base_sha")
+    if not isinstance(base_sha, str) or not base_sha:
+        return None
+    try:
+        head_sha = git(worktree, "rev-parse", "HEAD")
+    except WatcherError:
+        return None
+    receipts = state.get("receipts") if isinstance(state.get("receipts"), dict) else {}
+    commit_receipts = [
+        item.get("value") for item in receipts.values()
+        if isinstance(item, dict) and item.get("kind") == "commit" and isinstance(item.get("value"), str)
+    ]
+    if commit_receipts and head_sha not in commit_receipts:
+        return None
+    summary = ""
+    verification = receipts.get("verification")
+    if isinstance(verification, dict) and isinstance(verification.get("value"), str):
+        summary = verification["value"].strip()
+    if not summary:
+        try:
+            summary = git(worktree, "log", "-1", "--format=%s")
+        except WatcherError:
+            summary = "Verified repair ledger result ready for review"
+    return {
+        "status": "ready-for-review",
+        "summary": summary or "Verified repair ledger result ready for review",
+        "run_id": str(run_id),
+        "worktree_path": str(worktree_path),
+        "branch": str(branch),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+    }
+
+
 def invalid_receipt_summary(output: str) -> str:
-    candidates = [line for line in output.splitlines() if "AUTOPILOT_RESULT" in line]
+    cleaned = strip_ansi(output)
+    candidates = [
+        line.strip() for line in cleaned.splitlines()
+        if "AUTOPILOT_RESULT" in line and "<assigned run ID>" not in line
+    ]
     if not candidates:
         return "Orca worker returned no valid AUTOPILOT_RESULT receipt"
     line = candidates[-1]
@@ -2068,11 +2176,17 @@ def reconcile_workers(
                                    "--source", "auto", "--limit", "200")
                 receipt_output = string_content(output)
                 receipt = parse_receipt(receipt_output)
+                if receipt is not None and is_placeholder_receipt(receipt):
+                    receipt = None
             except WatcherError:
                 continue
             if receipt is None:
-                if not any(line.startswith("AUTOPILOT_RESULT")
-                           for line in receipt_output.splitlines()):
+                non_placeholder_lines = [
+                    line.strip() for line in strip_ansi(receipt_output).splitlines()
+                    if line.strip().startswith("AUTOPILOT_RESULT")
+                    and "<assigned run ID>" not in line
+                ]
+                if not non_placeholder_lines:
                     continue
             state = "completed"
         elif state == "failed":
@@ -2081,6 +2195,8 @@ def reconcile_workers(
                                    "--source", "auto", "--limit", "200")
                 receipt_output = string_content(output)
                 receipt = parse_receipt(receipt_output)
+                if receipt is not None and is_placeholder_receipt(receipt):
+                    receipt = None
             except WatcherError:
                 receipt = None
             if receipt is not None:
@@ -2091,13 +2207,20 @@ def reconcile_workers(
         status, summary, evidence = "failed", default_fail_summary, {}
         if state == "completed":
             if receipt is None and not receipt_output:
-                output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
-                                   "--source", "auto", "--limit", "200")
-                receipt_output = string_content(output)
-                receipt = parse_receipt(receipt_output)
+                try:
+                    output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
+                                       "--source", "auto", "--limit", "200")
+                    receipt_output = string_content(output)
+                    receipt = parse_receipt(receipt_output)
+                    if receipt is not None and is_placeholder_receipt(receipt):
+                        receipt = None
+                except WatcherError:
+                    receipt = None
             if repository is None:
                 repository = next(item for item in config["repositories"]
                                   if item["repository"] == attempt["repository"])
+            if receipt is None:
+                receipt = recover_receipt_from_repair_ledger(repository, attempt)
             status, summary, evidence = verified_receipt(receipt, repository, attempt, output=receipt_output)
         if status == "ready-for-review" and repository is not None:
             publication = config.get("policy", {}).get("publication", "auto-merge")

@@ -1546,6 +1546,105 @@ class IssueWatcherTests(unittest.TestCase):
         idx = worker_start_calls[0].index("--base-branch")
         self.assertEqual("main", worker_start_calls[0][idx + 1])
 
+    def test_parser_accepts_indented_and_terminal_wrapped_receipt(self) -> None:
+        run_id = str(uuid.uuid4())
+        worktree_path = "/Users/example/orca/workspaces/repo/issue-12-attempt-1"
+        branch = "owner/issue-12-attempt-1"
+        base_sha = "955eb21cc8c548f7d4b0cfc18b258c356ee57462"
+        head_sha = "52376ebe832ef9b056bd93f793100bbc01a43401"
+        # Simulate Antigravity CLI PTY output: 2-space margin, ANSI escapes, and
+        # hard-wrapped continuation lines across ~120 columns, preceded by the
+        # echoed prompt placeholder example.
+        terminal_output = "\n".join([
+            '  AUTOPILOT_RESULT: {"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>","worktree_path":"<absolute worktree',
+            '  path>","branch":"<assigned branch>"}',
+            "  debug: AUTOPILOT_RESULT: {\"status\":\"failed\",\"summary\":\"ordinary log\"}",
+            f'\x1b[0m  AUTOPILOT_RESULT: {{"status":"ready-for-review","summary":"Defaulted submit mode to direct and',
+            f'  verified all checks","run_id":"{run_id}","worktree_path":"/Users/example/orca/workspaces/repo/',
+            f'  issue-12-attempt-1","branch":"{branch}","base_sha":"{base_sha[:20]}',
+            f'  {base_sha[20:]}","head_sha":"{head_sha}"}}\x1b[0m',
+            "  Resume with -c",
+        ])
+        parsed = WATCHER.parse_receipt(terminal_output)
+        self.assertIsNotNone(parsed)
+        self.assertEqual("ready-for-review", parsed["status"])
+        self.assertEqual(run_id, parsed["run_id"])
+        self.assertEqual(worktree_path, parsed["worktree_path"])
+        self.assertEqual(branch, parsed["branch"])
+        self.assertEqual(base_sha, parsed["base_sha"])
+        self.assertEqual(head_sha, parsed["head_sha"])
+
+    def test_completed_worker_recovers_verified_receipt_from_repair_ledger_when_archive_unavailable(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        worktree = self.root / "orca-worktree-recover"
+        branch = "owner/issue-1-attempt-1"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True, stdout=subprocess.PIPE,
+        )
+        sha = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], check=True,
+                             text=True, stdout=subprocess.PIPE).stdout.strip()
+        evidence = self.repair_evidence(worktree, branch, sha, sha)
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=evidence["run_id"], agent_id="antigravity",
+            orca_task_id="task-recover", orca_dispatch_id="dispatch-recover",
+            orca_worktree_id=f"repo::{worktree}", worktree_path=str(worktree), branch=branch,
+        )
+
+        def fake_orca(_cfg, *args):
+            if args[:2] == ("orchestration", "worker-show"):
+                return {"ok": True, "result": {"dispatch": {"status": "completed", "outcome": "succeeded"}}}
+            if args[:2] == ("orchestration", "worker-read"):
+                raise WATCHER.WatcherError("archive_unavailable: provider_unsupported")
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(WATCHER, "orca_call", side_effect=fake_orca):
+            completed = WATCHER.reconcile_workers(config, ledger)
+
+        self.assertEqual(1, len(completed))
+        self.assertEqual("ready-for-review", completed[0]["status"], completed)
+        self.assertEqual("ready-for-review", ledger.snapshot()["issues"][0]["status"])
+
+    def test_completed_worker_ignores_prompt_placeholder_and_recovers_from_repair_ledger(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        worktree = self.root / "orca-worktree-placeholder"
+        branch = "owner/issue-1-attempt-2"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True, stdout=subprocess.PIPE,
+        )
+        sha = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], check=True,
+                             text=True, stdout=subprocess.PIPE).stdout.strip()
+        evidence = self.repair_evidence(worktree, branch, sha, sha)
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=evidence["run_id"], agent_id="antigravity",
+            orca_task_id="task-ph", orca_dispatch_id="dispatch-ph",
+            orca_worktree_id=f"repo::{worktree}", worktree_path=str(worktree), branch=branch,
+        )
+        echoed_prompt_only = "\n".join([
+            '  AUTOPILOT_RESULT: {"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>","worktree_path":"<absolute worktree',
+            '  path>","branch":"<assigned branch>"}',
+        ])
+
+        def fake_orca(_cfg, *args):
+            if args[:2] == ("orchestration", "worker-show"):
+                return {"ok": True, "result": {"dispatch": {"status": "completed", "outcome": "succeeded"}}}
+            if args[:2] == ("orchestration", "worker-read"):
+                return {"ok": True, "result": {"terminal": {"tail": echoed_prompt_only.splitlines()}}}
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(WATCHER, "orca_call", side_effect=fake_orca):
+            completed = WATCHER.reconcile_workers(config, ledger)
+
+        self.assertEqual(1, len(completed))
+        self.assertEqual("ready-for-review", completed[0]["status"], completed)
+
 
 if __name__ == "__main__":
     unittest.main()

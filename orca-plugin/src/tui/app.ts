@@ -1,10 +1,18 @@
 #!/usr/bin/env bun
 // Interactive Claude Code-style Terminal TUI for GitHub Issue Workflow.
-// Supports mouse clicks, scroll wheel, bracketed paste (drag-and-drop files),
-// macOS clipboard screenshot paste (^V), and single-key shortcuts.
+// Features an always-ready bottom composer, slash command palette (/bug, /direct,
+// /agent, /refresh, /quit, etc.), mouse clicks, scroll wheel, bracketed paste,
+// and macOS clipboard screenshot paste (^V).
 
 import { resolve } from 'node:path'
 import type { IssueKind, NeedsYouItem, SubmitMode } from '../protocol'
+import {
+  filterSlashCommands,
+  isSlashMenuOpen,
+  parseSlashCommand,
+  splitComposerText,
+  type SlashCommandId
+} from './commands'
 import { InputParser, type InputEvent } from './input'
 import {
   attachLocalFilePath,
@@ -17,10 +25,16 @@ import {
   submitIssueFromTui,
   type PendingHandoff
 } from './orca-cli'
-import { buildMainRows, renderTui, type TuiState } from './render'
+import { buildMainRows, computeComposerHeight, renderTui, type TuiState } from './render'
 import { ANSI, type ScreenBuffer } from './screen'
 
 const POLL_INTERVAL_MS = 12_000
+
+function dropLastChar(str: string): string {
+  const chars = Array.from(str)
+  chars.pop()
+  return chars.join('')
+}
 
 export class IssueBoardTui {
   private readonly targetPath: string
@@ -45,6 +59,15 @@ export class IssueBoardTui {
       attentionIndex: 0,
       attentionScroll: 0,
       busyIds: new Set(),
+      composer: {
+        text: '',
+        mode: 'handoff',
+        kind: 'feature',
+        followUpOf: null,
+        attachments: [],
+        submitting: false,
+        slashIndex: 0
+      },
       modal: { type: 'none' },
       toast: null
     }
@@ -193,7 +216,10 @@ export class IssueBoardTui {
     }
     if (next >= 0 && next < rows.length) {
       this.state.selectedIndex = next
-      const listH = Math.max(1, (process.stdout.rows || 30) - 6)
+      const width = process.stdout.columns || 100
+      const height = process.stdout.rows || 30
+      const composerH = Math.min(5, computeComposerHeight(this.state.composer, width))
+      const listH = Math.max(1, height - composerH - 5)
       if (next < this.state.scrollOffset) {
         this.state.scrollOffset = Math.max(0, next - 1)
       } else if (next >= this.state.scrollOffset + listH) {
@@ -241,21 +267,6 @@ export class IssueBoardTui {
     this.render()
   }
 
-  private openComposeModal(followUpOf: number | null = null) {
-    this.state.modal = {
-      type: 'compose',
-      mode: 'handoff',
-      kind: 'feature',
-      title: '',
-      details: '',
-      focus: 'title',
-      followUpOf,
-      attachments: [],
-      submitting: false
-    }
-    this.render()
-  }
-
   private openSettingsModal() {
     const snap = this.state.snapshot
     const def = snap?.defaultAgent || snap?.preferredAgent || 'codex'
@@ -284,9 +295,68 @@ export class IssueBoardTui {
     )
   }
 
+  private executeSlashCommand(id: SlashCommandId, arg: string) {
+    const c = this.state.composer
+    c.text = ''
+    c.slashIndex = 0
+
+    switch (id) {
+      case 'bug':
+      case 'feature':
+      case 'polish': {
+        c.kind = id as IssueKind
+        const label = id === 'bug' ? '修 Bug' : id === 'feature' ? '新功能' : '体验优化'
+        if (arg.trim()) {
+          void this.handleComposerSubmit(arg)
+        } else {
+          this.showToast('ok', `已切换提单类型：${label}`)
+        }
+        return
+      }
+      case 'handoff':
+      case 'direct': {
+        c.mode = id as SubmitMode
+        const label = id === 'handoff' ? 'Skill 规范提单' : '快速直提'
+        if (arg.trim()) {
+          void this.handleComposerSubmit(arg)
+        } else {
+          this.showToast('ok', `已切换提单方式：${label}`)
+        }
+        return
+      }
+      case 'agent':
+        this.openSettingsModal()
+        return
+      case 'refresh':
+        void this.refresh()
+        return
+      case 'issues':
+        this.dispatchAction('switch-tab', 'issues')
+        return
+      case 'prs':
+        this.dispatchAction('switch-tab', 'prs')
+        return
+      case 'autopilot':
+        void this.handleEnableAutopilot()
+        return
+      case 'paste':
+        void this.handlePasteClipboardImage()
+        return
+      case 'clear':
+        c.attachments = []
+        c.followUpOf = null
+        this.showToast('ok', '已清空输入、附件与追提关联')
+        return
+      case 'quit':
+        this.quit(0)
+        return
+    }
+  }
+
   private dispatchAction(action: string, payload?: unknown) {
     switch (action) {
       case 'noop':
+      case 'focus-composer':
         return
       case 'quit':
         this.quit(0)
@@ -330,11 +400,15 @@ export class IssueBoardTui {
         this.state.attentionIndex = Number(payload)
         this.render()
         return
-      case 'open-compose':
-        this.openComposeModal(null)
+      case 'open-followup': {
+        const num = Number(payload) || null
+        this.state.modal = { type: 'none' }
+        this.state.composer.followUpOf = num
+        this.showToast('ok', num ? `已关联追提 #${num}，请在下方直接输入补充需求` : '请在下方输入需求')
         return
-      case 'open-followup':
-        this.openComposeModal(Number(payload) || null)
+      }
+      case 'exec-slash':
+        this.executeSlashCommand(payload as SlashCommandId, '')
         return
       case 'open-settings':
         this.openSettingsModal()
@@ -375,30 +449,6 @@ export class IssueBoardTui {
         void this.handleIssueAction(item, 'discard')
         return
       }
-      case 'compose-mode':
-        if (this.state.modal.type === 'compose') {
-          this.state.modal.mode = payload as SubmitMode
-          this.render()
-        }
-        return
-      case 'compose-kind':
-        if (this.state.modal.type === 'compose') {
-          this.state.modal.kind = payload as IssueKind
-          this.render()
-        }
-        return
-      case 'compose-focus':
-        if (this.state.modal.type === 'compose') {
-          this.state.modal.focus = payload === 'details' ? 'details' : 'title'
-          this.render()
-        }
-        return
-      case 'compose-paste-image':
-        void this.handlePasteClipboardImage()
-        return
-      case 'compose-submit':
-        void this.handleComposeSubmit()
-        return
       case 'reply-paste-image':
         void this.handlePasteClipboardImage()
         return
@@ -412,7 +462,6 @@ export class IssueBoardTui {
         const id = ids[idx]
         if (!id) return
         if (this.state.modal.cursor === idx && this.state.modal.defaultAgent === id) {
-          // Clicking an already-default agent does nothing; clicking another sets default
           return
         }
         this.state.modal.cursor = idx
@@ -444,33 +493,152 @@ export class IssueBoardTui {
       return
     }
 
-    // Global shortcuts in main view
+    const c = this.state.composer
+    const slashOpen = isSlashMenuOpen(c.text)
+
+    if (ev.type === 'paste') {
+      const repoPath = this.state.snapshot?.repoPath || this.targetPath
+      try {
+        const att = attachLocalFilePath(repoPath, ev.text)
+        if (att) {
+          c.attachments.push(att)
+          this.showToast('ok', `已附加文件：${att.name}`)
+          return
+        }
+      } catch (err) {
+        this.showToast('err', err instanceof Error ? err.message : String(err))
+        return
+      }
+      c.text += ev.text
+      c.slashIndex = 0
+      this.render()
+      return
+    }
+
     if (ev.type === 'key') {
-      if (ev.key === 'up') this.moveSelection(-1)
-      else if (ev.key === 'down') this.moveSelection(1)
-      else if (ev.key === 'enter') this.openDetailForCurrent()
-      else if (ev.key === 'tab') {
+      if (ev.ctrl && ev.key === 'v') {
+        void this.handlePasteClipboardImage()
+        return
+      }
+      if (ev.ctrl && ev.key === 'u') {
+        c.text = ''
+        c.slashIndex = 0
+        this.render()
+        return
+      }
+
+      if (slashOpen) {
+        const matches = filterSlashCommands(c.text)
+        if (ev.key === 'up') {
+          if (matches.length > 0) {
+            c.slashIndex = (c.slashIndex - 1 + matches.length) % matches.length
+            this.render()
+          }
+          return
+        }
+        if (ev.key === 'down') {
+          if (matches.length > 0) {
+            c.slashIndex = (c.slashIndex + 1) % matches.length
+            this.render()
+          }
+          return
+        }
+        if (ev.key === 'tab') {
+          const picked = matches[Math.max(0, Math.min(c.slashIndex, matches.length - 1))]
+          if (picked) {
+            c.text = picked.takesArg ? `${picked.name} ` : picked.name
+            c.slashIndex = 0
+            this.render()
+          }
+          return
+        }
+        if (ev.key === 'escape') {
+          c.text = ''
+          c.slashIndex = 0
+          this.render()
+          return
+        }
+        if (ev.key === 'enter') {
+          const picked = matches[Math.max(0, Math.min(c.slashIndex, matches.length - 1))]
+          if (picked) {
+            this.executeSlashCommand(picked.id, '')
+          } else {
+            this.showToast('err', `未知命令：${c.text.trim()}（输入 / 查看可用命令）`)
+          }
+          return
+        }
+      }
+
+      if (ev.key === 'escape') {
+        if (c.text || c.attachments.length > 0 || c.followUpOf !== null) {
+          c.text = ''
+          c.attachments = []
+          c.followUpOf = null
+          c.slashIndex = 0
+          this.render()
+        }
+        return
+      }
+      if (ev.key === 'backspace') {
+        if (c.text.length > 0) {
+          c.text = dropLastChar(c.text)
+          c.slashIndex = 0
+          this.render()
+        }
+        return
+      }
+      if (ev.key === 'enter') {
+        if (ev.shift) {
+          c.text += '\n'
+          this.render()
+          return
+        }
+        const trimmed = c.text.trim()
+        if (!trimmed) {
+          this.openDetailForCurrent()
+          return
+        }
+        if (trimmed.startsWith('/')) {
+          const parsed = parseSlashCommand(trimmed)
+          if (parsed?.kind === 'command') {
+            this.executeSlashCommand(parsed.command.id, parsed.arg)
+          } else if (parsed?.kind === 'unknown') {
+            this.showToast('err', `未知命令：${parsed.name}（输入 / 查看可用命令）`)
+          }
+          return
+        }
+        void this.handleComposerSubmit()
+        return
+      }
+      if (ev.key === 'up') {
+        this.moveSelection(-1)
+        return
+      }
+      if (ev.key === 'down') {
+        this.moveSelection(1)
+        return
+      }
+      if (ev.key === 'tab' && !c.text) {
         this.dispatchAction('switch-tab', this.state.activeTab === 'issues' ? 'prs' : 'issues')
-      } else if (ev.key === 'left') {
+        return
+      }
+      if (ev.key === 'left' && !c.text) {
         this.state.activePane = 'main'
         this.render()
-      } else if (ev.key === 'right') {
+        return
+      }
+      if (ev.key === 'right' && !c.text) {
         this.state.activePane = 'attention'
         this.render()
+        return
       }
       return
     }
 
     if (ev.type === 'text') {
-      const ch = ev.text
-      if (ch === 'q') this.quit(0)
-      else if (ch === 'r') void this.refresh()
-      else if (ch === 'n') this.openComposeModal(null)
-      else if (ch === ',') this.openSettingsModal()
-      else if (ch === 'i') this.dispatchAction('switch-tab', 'issues')
-      else if (ch === 'p') this.dispatchAction('switch-tab', 'prs')
-      else if (ch === 'j') this.moveSelection(1)
-      else if (ch === 'k') this.moveSelection(-1)
+      c.text += ev.text
+      c.slashIndex = 0
+      this.render()
     }
   }
 
@@ -541,50 +709,6 @@ export class IssueBoardTui {
       return
     }
 
-    if (modal.type === 'compose') {
-      if (ev.type === 'key') {
-        if (ev.key === 'tab') {
-          modal.focus = modal.focus === 'title' ? 'details' : 'title'
-          this.render()
-        } else if (ev.ctrl && ev.key === 'v') {
-          void this.handlePasteClipboardImage()
-        } else if (ev.ctrl && ev.key === 'm') {
-          modal.mode = modal.mode === 'handoff' ? 'direct' : 'handoff'
-          this.render()
-        } else if ((ev.ctrl && ev.key === 's') || (ev.key === 'enter' && modal.focus === 'title')) {
-          void this.handleComposeSubmit()
-        } else if (ev.key === 'enter' && modal.focus === 'details') {
-          modal.details += '\n'
-          this.render()
-        } else if (ev.key === 'backspace') {
-          if (modal.focus === 'title') modal.title = modal.title.slice(0, -1)
-          else modal.details = modal.details.slice(0, -1)
-          this.render()
-        }
-      } else if (ev.type === 'paste') {
-        const repoPath = this.state.snapshot?.repoPath || this.targetPath
-        try {
-          const att = attachLocalFilePath(repoPath, ev.text)
-          if (att) {
-            modal.attachments.push(att)
-            this.showToast('ok', `已附加文件：${att.name}`)
-            return
-          }
-        } catch (err) {
-          this.showToast('err', err instanceof Error ? err.message : String(err))
-          return
-        }
-        if (modal.focus === 'title') modal.title += ev.text.replace(/\r?\n/g, ' ')
-        else modal.details += ev.text
-        this.render()
-      } else if (ev.type === 'text') {
-        if (modal.focus === 'title') modal.title += ev.text
-        else modal.details += ev.text
-        this.render()
-      }
-      return
-    }
-
     if (modal.type === 'reply') {
       if (ev.type === 'key') {
         if (ev.key === 'enter') {
@@ -592,7 +716,7 @@ export class IssueBoardTui {
         } else if (ev.ctrl && ev.key === 'v') {
           void this.handlePasteClipboardImage()
         } else if (ev.key === 'backspace') {
-          modal.text = modal.text.slice(0, -1)
+          modal.text = dropLastChar(modal.text)
           this.render()
         }
       } else if (ev.type === 'paste') {
@@ -624,22 +748,29 @@ export class IssueBoardTui {
       this.showToast('err', '剪贴板中未检测到截图（也可直接将文件拖入终端）')
       return
     }
-    if (this.state.modal.type === 'compose' || this.state.modal.type === 'reply') {
+    if (this.state.modal.type === 'reply') {
       this.state.modal.attachments.push(att)
       this.showToast('ok', `已粘贴剪贴板截图：${att.name}`)
+      return
     }
+    this.state.composer.attachments.push(att)
+    this.showToast('ok', `已粘贴剪贴板截图：${att.name}`)
   }
 
-  private async handleComposeSubmit() {
-    if (this.state.modal.type !== 'compose' || this.state.modal.submitting) return
-    const modal = this.state.modal
-    if (!modal.title.trim()) {
-      this.showToast('err', '请先输入需求标题或问题描述')
+  private async handleComposerSubmit(overrideText?: string) {
+    const c = this.state.composer
+    if (c.submitting) return
+    const rawText = overrideText !== undefined ? overrideText : c.text
+    const { title, details } = splitComposerText(rawText)
+    if (!title) {
+      this.showToast('err', '请先输入需求描述')
       return
     }
     const snap = this.state.snapshot
     const repoPath = snap?.repoPath || this.targetPath
-    modal.submitting = true
+    const attachments = [...c.attachments]
+    const followUpOf = c.followUpOf
+    c.submitting = true
     this.render()
     try {
       const res = await submitIssueFromTui({
@@ -647,15 +778,19 @@ export class IssueBoardTui {
         repository: snap?.repository ?? null,
         autopilotInstalled: Boolean(snap?.autopilotInstalled),
         defaultAgent: snap?.defaultAgent ?? null,
-        mode: modal.mode,
-        kind: modal.kind,
-        title: modal.title,
-        details: modal.details,
-        followUpOf: modal.followUpOf,
-        savedAttachments: modal.attachments,
+        mode: c.mode,
+        kind: c.kind,
+        title,
+        details,
+        followUpOf,
+        savedAttachments: attachments,
         pendingHandoffs: this.pendingHandoffs
       })
-      this.state.modal = { type: 'none' }
+      c.text = ''
+      c.attachments = []
+      c.followUpOf = null
+      c.slashIndex = 0
+      c.submitting = false
       this.showToast(
         'ok',
         res.mode === 'handoff'
@@ -664,7 +799,7 @@ export class IssueBoardTui {
       )
       void this.refresh(true)
     } catch (err) {
-      modal.submitting = false
+      c.submitting = false
       this.showToast('err', err instanceof Error ? err.message : String(err))
     }
   }

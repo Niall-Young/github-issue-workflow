@@ -121,13 +121,22 @@ export class InputParser {
         else if (code === 'H') events.push({ type: 'key', key: 'home', raw: seq })
         else if (code === 'F') events.push({ type: 'key', key: 'end', raw: seq })
         else if (code === 'Z') events.push({ type: 'key', key: 'tab', shift: true, raw: seq })
-        else if (code === '~') {
+        else if (code === 'u' && (params === '13;2' || params === '13;5')) {
+          events.push({ type: 'key', key: 'enter', shift: true, raw: seq })
+        } else if (code === '~') {
           if (params === '3') events.push({ type: 'key', key: 'delete', raw: seq })
           else if (params === '5') events.push({ type: 'key', key: 'pageup', raw: seq })
           else if (params === '6') events.push({ type: 'key', key: 'pagedown', raw: seq })
           else if (params === '1' || params === '7') events.push({ type: 'key', key: 'home', raw: seq })
           else if (params === '4' || params === '8') events.push({ type: 'key', key: 'end', raw: seq })
         }
+        continue
+      }
+
+      // Alt/Option + Enter (\x1b\r or \x1b\n) -> newline in composer
+      if (data.startsWith('\x1b\r') || data.startsWith('\x1b\n')) {
+        events.push({ type: 'key', key: 'enter', shift: true, raw: data.slice(0, 2) })
+        data = data.slice(2)
         continue
       }
 

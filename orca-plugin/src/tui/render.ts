@@ -12,6 +12,7 @@ import type {
   SavedAttachment,
   SubmitMode
 } from '../protocol'
+import { filterSlashCommands, isSlashMenuOpen, type SlashCommandDef } from './commands'
 import {
   PALETTE,
   ScreenBuffer,
@@ -26,19 +27,18 @@ export type ListRow =
   | { kind: 'completed'; item: CompletedItem }
   | { kind: 'pr'; item: PullRequestItem }
 
+export type ComposerState = {
+  text: string
+  mode: SubmitMode
+  kind: IssueKind
+  followUpOf: number | null
+  attachments: SavedAttachment[]
+  submitting: boolean
+  slashIndex: number
+}
+
 export type ModalState =
   | { type: 'none' }
-  | {
-      type: 'compose'
-      mode: SubmitMode
-      kind: IssueKind
-      title: string
-      details: string
-      focus: 'title' | 'details'
-      followUpOf: number | null
-      attachments: SavedAttachment[]
-      submitting: boolean
-    }
   | {
       type: 'settings'
       defaultAgent: string
@@ -76,8 +76,20 @@ export type TuiState = {
   attentionIndex: number
   attentionScroll: number
   busyIds: Set<string>
+  composer: ComposerState
   modal: ModalState
   toast: { kind: 'ok' | 'err'; text: string } | null
+}
+
+const MODE_LABELS: Record<SubmitMode, string> = {
+  handoff: 'Skill 规范提单',
+  direct: '快速直提'
+}
+
+const KIND_LABELS: Record<IssueKind, string> = {
+  feature: '新功能',
+  bug: '修 Bug',
+  polish: '体验优化'
 }
 
 export function formatRelativeTime(iso: string): string {
@@ -138,6 +150,16 @@ function prBadge(pr: PullRequestItem): { label: string; style: string } {
   return { label: 'OPEN', style: PALETTE.blue }
 }
 
+export function computeComposerHeight(composer: ComposerState, width: number): number {
+  const innerW = Math.max(12, width - 6)
+  const wrapped = composer.text
+    ? wrapTextToWidth(`${composer.text}▏`, innerW, 2)
+    : ['']
+  const textLines = Math.max(1, Math.min(2, wrapped.length))
+  const attachmentLine = composer.attachments.length > 0 ? 1 : 0
+  return 2 + textLines + attachmentLine
+}
+
 export function renderTui(state: TuiState, width: number, height: number): ScreenBuffer {
   const buf = new ScreenBuffer(width, height)
   const snap = state.snapshot
@@ -145,44 +167,44 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   // ── Top Header (rows 0..1) ────────────────────────────────────────────────
   const projectLabel = snap ? snap.projectName : 'Issue 看板'
   const repoLabel = snap?.repository ? ` ${snap.repository}` : ''
+  const agentName = snap?.defaultAgent || snap?.preferredAgent || 'Agent'
+  const syncText = snap ? `同步 ${formatRelativeTime(snap.syncedAt) || '刚刚'}` : '加载中…'
+  const rightStatus = `${agentName} · ${syncText}`
+  const rightStatusW = stringDisplayWidth(rightStatus)
+
   let col = 1
   col += buf.writeText(col, 0, '◆ ', PALETTE.accentBold)
   col += buf.writeText(col, 0, projectLabel, PALETTE.bright)
   if (repoLabel) {
-    col += buf.writeText(col, 0, repoLabel, PALETTE.muted, Math.max(0, width - col - 46))
+    col += buf.writeText(col, 0, repoLabel, PALETTE.muted, Math.max(0, width - col - rightStatusW - 26))
   }
   col += 2
   if (snap) {
     if (snap.autopilotInstalled) {
       col += buf.writeText(col, 0, '● 自动运行中', PALETTE.green)
     } else {
-      col += buf.drawButton(col, 0, '+ 开启自动处理', PALETTE.chipActiveBg, 'enable-autopilot')
+      col += buf.writeText(col, 0, '○ 未开启自动处理 (/autopilot)', PALETTE.amber, Math.max(0, width - col - rightStatusW - 3))
     }
   } else if (state.loading) {
     col += buf.writeText(col, 0, '◌ 同步中…', PALETTE.amber)
   }
 
-  // Right-aligned header action buttons
-  const agentLabel = `⚙ ${snap?.defaultAgent || snap?.preferredAgent || 'Agent'}`
-  const btns: Array<{ label: string; style: string; action: string }> = [
-    { label: '+ 提需求', style: PALETTE.accentBg, action: 'open-compose' },
-    { label: agentLabel, style: PALETTE.chipBg, action: 'open-settings' },
-    { label: '↻', style: PALETTE.chipBg, action: 'refresh' },
-    { label: '×', style: PALETTE.chipBg, action: 'quit' }
-  ]
-  const totalBtnW = btns.reduce((acc, b) => acc + stringDisplayWidth(b.label) + 3, 0)
-  let btnX = Math.max(col + 1, width - totalBtnW)
-  for (const b of btns) {
-    if (btnX + stringDisplayWidth(b.label) + 2 <= width) {
-      btnX += buf.drawButton(btnX, 0, b.label, b.style, b.action) + 1
-    }
+  const rightXStart = Math.max(col + 1, width - rightStatusW - 1)
+  if (rightXStart < width - 1) {
+    const agentW = buf.writeText(rightXStart, 0, agentName, PALETTE.muted)
+    buf.addHitBox(rightXStart, 0, agentW, 1, 'open-settings')
+    buf.writeText(rightXStart + agentW, 0, ` · ${syncText}`, PALETTE.dim)
   }
 
   buf.drawHLine(0, 1, width, PALETTE.border)
 
-  // ── Main Content Area (rows 2 .. height - 3) ──────────────────────────────
+  // ── Layout Metrics ────────────────────────────────────────────────────────
+  const footerY = height - 1
+  const composerH = Math.min(5, computeComposerHeight(state.composer, width))
+  const composerTop = Math.max(5, footerY - composerH)
   const contentTop = 2
-  const contentHeight = Math.max(4, height - 4)
+  const contentHeight = Math.max(3, composerTop - contentTop)
+
   const splitMode = width >= 92
   const leftW = splitMode ? Math.floor(width * 0.62) : width
   const rightX = leftW + 1
@@ -247,19 +269,23 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
     renderAttentionPane(buf, state, rightX + 1, listTop, rightW - 2, listHeight)
   }
 
-  // ── Footer (rows height - 2 .. height - 1) ────────────────────────────────
-  buf.drawHLine(0, height - 2, width, PALETTE.border)
+  // ── Bottom AI-Chat-Style Composer ─────────────────────────────────────────
+  renderBottomComposer(buf, state, 0, composerTop, width, composerH)
+
+  // ── Floating Slash Command Palette (anchored above composer) ──────────────
+  if (state.modal.type === 'none' && isSlashMenuOpen(state.composer.text)) {
+    renderSlashMenu(buf, state, width, composerTop)
+  }
+
+  // ── Footer (row height - 1) ───────────────────────────────────────────────
   if (state.toast) {
     const style = state.toast.kind === 'ok' ? PALETTE.toastOk : PALETTE.toastErr
-    buf.fillRect(0, height - 1, width, 1, style)
-    buf.writeText(1, height - 1, state.toast.text, style, width - 2)
+    buf.fillRect(0, footerY, width, 1, style)
+    buf.writeText(1, footerY, state.toast.text, style, width - 2)
   } else {
-    const syncText = snap ? `同步 ${formatRelativeTime(snap.syncedAt) || '刚刚'}` : '加载中…'
     const hints =
-      '↑↓/滚轮 移动 · 点击/Enter 打开 · n 提需求 · i/p 切换 · , 配Agent · r 刷新 · q 退出'
-    const syncW = stringDisplayWidth(syncText)
-    buf.writeText(1, height - 1, hints, PALETTE.muted, Math.max(0, width - syncW - 3))
-    buf.writeText(Math.max(1, width - syncW - 1), height - 1, syncText, PALETTE.dim)
+      'Enter 提交/执行 · / 斜杠命令 (/bug /direct /agent /refresh /quit) · ^V 贴图 · ↑↓/滚轮 浏览'
+    buf.writeText(1, footerY, hints, PALETTE.muted, width - 2)
   }
 
   // ── Active Modal Overlay ──────────────────────────────────────────────────
@@ -268,6 +294,144 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   }
 
   return buf
+}
+
+function renderBottomComposer(
+  buf: ScreenBuffer,
+  state: TuiState,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+) {
+  const c = state.composer
+  const isActive = state.modal.type === 'none'
+  const prefixTitle = c.followUpOf ? `追提 #${c.followUpOf}` : '提需求'
+  const title = `${prefixTitle} · ${MODE_LABELS[c.mode]} · ${KIND_LABELS[c.kind]}`
+
+  buf.drawBox(x, y, w, h, {
+    borderStyle: isActive ? PALETTE.borderActive : PALETTE.border,
+    title,
+    titleStyle: isActive ? PALETTE.accentBold : PALETTE.muted
+  })
+  buf.addHitBox(x, y, w, h, 'focus-composer')
+
+  // Right-side hint on top border of composer
+  const rightHint = ' / 命令 · ^V 贴图 '
+  const rightHintW = stringDisplayWidth(rightHint)
+  if (w > stringDisplayWidth(title) + rightHintW + 8) {
+    buf.writeText(x + w - rightHintW - 2, y, rightHint, PALETTE.dim, rightHintW)
+  }
+
+  const innerX = x + 2
+  const innerW = Math.max(8, w - 4)
+  const textAreaX = innerX + 2
+  const textAreaW = Math.max(6, innerW - 2)
+
+  if (c.submitting) {
+    buf.writeText(innerX, y + 1, '◌', PALETTE.amber, 2)
+    buf.writeText(textAreaX, y + 1, '正在提交需求…', PALETTE.amber, textAreaW)
+    return
+  }
+
+  buf.writeText(innerX, y + 1, '❯', isActive ? PALETTE.accentBold : PALETTE.muted, 2)
+
+  const maxTextLines = Math.max(1, h - 2 - (c.attachments.length > 0 ? 1 : 0))
+  if (!c.text) {
+    const placeholder = isActive
+      ? '▏输入需求直接提交，或输入 / 使用斜杠命令…'
+      : '输入需求直接提交，或输入 / 使用斜杠命令…'
+    buf.writeText(textAreaX, y + 1, placeholder, PALETTE.dim, textAreaW)
+  } else {
+    const displayText = isActive ? `${c.text}▏` : c.text
+    const lines = wrapTextToWidth(displayText, textAreaW, maxTextLines)
+    lines.forEach((line, idx) => {
+      const style = c.text.startsWith('/') ? PALETTE.accent : PALETTE.bright
+      buf.writeText(textAreaX, y + 1 + idx, line, style, textAreaW)
+    })
+  }
+
+  if (c.attachments.length > 0) {
+    const attRowY = y + h - 2
+    const names = c.attachments.map((a) => a.name).join(', ')
+    buf.writeText(
+      textAreaX,
+      attRowY,
+      `📎 已附 ${c.attachments.length} 个: ${names} (/clear 清除)`,
+      PALETTE.green,
+      textAreaW
+    )
+  }
+}
+
+function isCommandActive(cmd: SlashCommandDef, composer: ComposerState): boolean {
+  if (cmd.id === 'bug' || cmd.id === 'feature' || cmd.id === 'polish') {
+    return composer.kind === cmd.id
+  }
+  if (cmd.id === 'handoff' || cmd.id === 'direct') {
+    return composer.mode === cmd.id
+  }
+  return false
+}
+
+function renderSlashMenu(buf: ScreenBuffer, state: TuiState, width: number, composerTop: number) {
+  const matches = filterSlashCommands(state.composer.text)
+  const menuW = Math.min(width - 2, Math.max(54, Math.min(82, width - 4)))
+  const menuX = 1
+  const maxVisible = Math.max(1, Math.min(8, composerTop - 3))
+  const rowCount = matches.length === 0 ? 1 : Math.min(matches.length, maxVisible)
+  const menuH = rowCount + 2
+  const menuY = Math.max(2, composerTop - menuH)
+
+  buf.drawBox(menuX, menuY, menuW, menuH, {
+    borderStyle: PALETTE.borderActive,
+    fillStyle: PALETTE.modalBg,
+    title: '斜杠命令 (↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消)',
+    titleStyle: PALETTE.accentBold
+  })
+  buf.addHitBox(menuX, menuY, menuW, menuH, 'noop')
+
+  const innerX = menuX + 2
+  const innerW = menuW - 4
+
+  if (matches.length === 0) {
+    buf.writeText(innerX, menuY + 1, '无匹配命令 · 按 Esc 清空或继续输入', PALETTE.muted, innerW)
+    return
+  }
+
+  const clampedIdx = Math.max(0, Math.min(state.composer.slashIndex, matches.length - 1))
+  let start = 0
+  if (clampedIdx >= rowCount) {
+    start = clampedIdx - rowCount + 1
+  }
+
+  for (let i = 0; i < rowCount; i += 1) {
+    const idx = start + i
+    const cmd = matches[idx]
+    if (!cmd) break
+    const rowY = menuY + 1 + i
+    const isSel = idx === clampedIdx
+    const isActive = isCommandActive(cmd, state.composer)
+
+    if (isSel) {
+      buf.fillRect(menuX + 1, rowY, menuW - 2, 1, PALETTE.selBg)
+    }
+
+    const prefix = isSel ? '▸ ' : '  '
+    const nameCol = cmd.name.padEnd(11, ' ')
+    const activeTag = isActive ? ' [当前]' : ''
+    const activeW = stringDisplayWidth(activeTag)
+
+    let cx = innerX
+    cx += buf.writeText(cx, rowY, prefix, isSel ? PALETTE.selBg : PALETTE.accent)
+    cx += buf.writeText(cx, rowY, nameCol, isSel ? PALETTE.selBg : PALETTE.bright)
+    const descBudget = Math.max(4, innerW - (cx - innerX) - activeW - 1)
+    buf.writeText(cx, rowY, `${cmd.label} · ${cmd.description}`, isSel ? PALETTE.selBg : PALETTE.muted, descBudget)
+    if (isActive) {
+      buf.writeText(innerX + innerW - activeW, rowY, activeTag, isSel ? PALETTE.selBg : PALETTE.green, activeW)
+    }
+    buf.addHitBox(menuX + 1, rowY, menuW - 2, 1, 'exec-slash', cmd.id)
+  }
 }
 
 function renderMainList(
@@ -288,7 +452,7 @@ function renderMainList(
     const emptyMsg = state.loading
       ? '正在同步 GitHub 与本地任务状态…'
       : state.activeTab === 'issues'
-        ? '暂无任务 · 按 n 或点击右上角「+ 提需求」开始'
+        ? '暂无任务 · 直接在下方输入框输入需求并按 Enter 提交'
         : '暂无 Pull Request'
     buf.writeText(x, y + 1, emptyMsg, PALETTE.muted, w)
     return
@@ -447,12 +611,7 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   if (modal.type === 'none') return
 
   const mw = Math.min(Math.max(48, Math.floor(width * 0.72)), width - 4)
-  const mh =
-    modal.type === 'compose'
-      ? Math.min(18, height - 4)
-      : modal.type === 'settings'
-        ? Math.min(16, height - 4)
-        : Math.min(14, height - 4)
+  const mh = modal.type === 'settings' ? Math.min(16, height - 4) : Math.min(14, height - 4)
   const mx = Math.floor((width - mw) / 2)
   const my = Math.floor((height - mh) / 2)
 
@@ -460,7 +619,6 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   buf.addHitBox(0, 0, width, height, 'close-modal')
 
   const titleMap = {
-    compose: modal.type === 'compose' && modal.followUpOf ? `追提需求 (基于 #${modal.followUpOf})` : '提新需求 / 报问题',
     settings: '配置工作树执行 Agent',
     reply: modal.type === 'reply' ? `回复 ${modal.item.agentName}` : '回复助手',
     detail: '任务详情'
@@ -477,100 +635,6 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
 
   const ix = mx + 2
   const iw = mw - 4
-
-  if (modal.type === 'compose') {
-    let row = my + 2
-    // Mode selector
-    let cx = ix
-    cx += buf.writeText(cx, row, '方式: ', PALETTE.muted)
-    cx +=
-      buf.drawButton(
-        cx,
-        row,
-        'Skill 规范提单',
-        modal.mode === 'handoff' ? PALETTE.chipActiveBg : PALETTE.chipBg,
-        'compose-mode',
-        'handoff'
-      ) + 1
-    buf.drawButton(
-      cx,
-      row,
-      '快速直提',
-      modal.mode === 'direct' ? PALETTE.chipActiveBg : PALETTE.chipBg,
-      'compose-mode',
-      'direct'
-    )
-
-    row += 2
-    cx = ix
-    cx += buf.writeText(cx, row, '类型: ', PALETTE.muted)
-    const kinds: Array<{ id: IssueKind; label: string }> = [
-      { id: 'feature', label: '新功能' },
-      { id: 'bug', label: '修 Bug' },
-      { id: 'polish', label: '体验优化' }
-    ]
-    for (const k of kinds) {
-      cx +=
-        buf.drawButton(
-          cx,
-          row,
-          k.label,
-          modal.kind === k.id ? PALETTE.chipActiveBg : PALETTE.chipBg,
-          'compose-kind',
-          k.id
-        ) + 1
-    }
-
-    row += 2
-    buf.writeText(ix, row, '标题（必填）:', modal.focus === 'title' ? PALETTE.accent : PALETTE.muted)
-    row += 1
-    const titleStyle = modal.focus === 'title' ? PALETTE.inputFocusBg : PALETTE.inputBg
-    buf.fillRect(ix, row, iw, 1, titleStyle)
-    const titleDisplay = modal.title + (modal.focus === 'title' ? '▏' : '')
-    buf.writeText(ix + 1, row, titleDisplay || '用大白话描述想做什么…', modal.title ? titleStyle : PALETTE.dim, iw - 2)
-    buf.addHitBox(ix, row, iw, 1, 'compose-focus', 'title')
-
-    row += 2
-    buf.writeText(ix, row, '补充说明（可选，Tab 切换焦点）:', modal.focus === 'details' ? PALETTE.accent : PALETTE.muted)
-    row += 1
-    const detStyle = modal.focus === 'details' ? PALETTE.inputFocusBg : PALETTE.inputBg
-    buf.fillRect(ix, row, iw, 2, detStyle)
-    const detLines = wrapTextToWidth(modal.details + (modal.focus === 'details' ? '▏' : ''), iw - 2, 2)
-    if (detLines.length === 0) {
-      buf.writeText(ix + 1, row, '背景、复现步骤或拖拽文件到此终端…', PALETTE.dim, iw - 2)
-    } else {
-      detLines.forEach((l, idx) => buf.writeText(ix + 1, row + idx, l, detStyle, iw - 2))
-    }
-    buf.addHitBox(ix, row, iw, 2, 'compose-focus', 'details')
-
-    row += 3
-    let ax = ix
-    ax += buf.drawButton(ax, row, '+ 粘贴截图 (^V)', PALETTE.chipBg, 'compose-paste-image') + 1
-    if (modal.attachments.length > 0) {
-      buf.writeText(
-        ax,
-        row,
-        `已附 ${modal.attachments.length} 个: ${modal.attachments.map((a) => a.name).join(', ')}`,
-        PALETTE.green,
-        Math.max(0, ix + iw - ax)
-      )
-    } else {
-      buf.writeText(ax, row, '支持拖入文件路径或 ^V 贴截图', PALETTE.dim, Math.max(0, ix + iw - ax))
-    }
-
-    const footerY = my + mh - 2
-    let fx = ix
-    fx +=
-      buf.drawButton(
-        fx,
-        footerY,
-        modal.submitting ? '提交中…' : '提交 (Enter)',
-        PALETTE.accentBg,
-        'compose-submit'
-      ) + 1
-    buf.drawButton(fx, footerY, '取消 (Esc)', PALETTE.chipBg, 'close-modal')
-    return
-  }
 
   if (modal.type === 'settings') {
     const installed = state.snapshot?.installedAgents ?? []

@@ -36,9 +36,11 @@ class WorkflowUpdateTests(unittest.TestCase):
 
     def release_asset(self) -> tuple[dict, bytes, bytes]:
         output = self.root / "dist"
-        archive, checksum = BUILD.build("v0.1.0", "a" * 40, output)
+        version = (ROOT / "github-issue-workflow-update" / "VERSION").read_text().strip()
+        tag = f"v{version}"
+        archive, checksum = BUILD.build(tag, "a" * 40, output)
         release = {
-            "tag": "v0.1.0", "version": "0.1.0", "archive_name": archive.name,
+            "tag": tag, "version": version, "archive_name": archive.name,
             "archive_url": "https://example.test/archive",
             "checksum_url": "https://example.test/checksum",
         }
@@ -59,7 +61,7 @@ class WorkflowUpdateTests(unittest.TestCase):
         expected = UPDATE.parse_checksum(checksum, release["archive_name"])
         self.assertEqual(hashlib.sha256(archive).hexdigest(), expected)
         bundle = UPDATE.unpack_and_validate(archive, self.root / "unpacked", release)
-        self.assertEqual("0.1.0", (bundle / "github-issue-workflow-update" / "VERSION").read_text().strip())
+        self.assertEqual(release["version"], (bundle / "github-issue-workflow-update" / "VERSION").read_text().strip())
         self.assertTrue((bundle / "github-issue-autopilot" / "scripts" / "autopilot_admin.py").is_file())
 
     def test_unpack_rejects_path_traversal(self) -> None:
@@ -90,14 +92,14 @@ class WorkflowUpdateTests(unittest.TestCase):
             result = UPDATE.apply(skills)
         self.assertEqual("updated", result["status"])
         self.assertEqual(2, result["autopilot_refreshed"])
-        self.assertEqual("0.1.0", UPDATE.installed_version(skills))
+        self.assertEqual(release["version"], UPDATE.installed_version(skills))
         self.assertNotIn("local github-issue-handoff",
                          (skills / "github-issue-handoff" / "SKILL.md").read_text())
 
     def test_apply_reinstalls_same_version_to_remove_local_drift(self) -> None:
         release, archive, checksum = self.release_asset()
         skills = self.legacy_skills()
-        (skills / "github-issue-workflow-update" / "VERSION").write_text("0.1.0\n")
+        (skills / "github-issue-workflow-update" / "VERSION").write_text(release["version"] + "\n")
         with mock.patch.object(UPDATE, "latest_release", return_value=release), mock.patch.object(
             UPDATE, "request_bytes", side_effect=[archive, checksum]
         ), mock.patch.object(UPDATE, "run_runtime_refresh", side_effect=[

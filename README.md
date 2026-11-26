@@ -171,7 +171,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
-python3 scripts/build_release.py --tag v0.1.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+python3 scripts/build_release.py --tag "v$(cat github-issue-workflow-update/VERSION)" --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 orca plugin validate ./orca-plugin --json
 orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json
@@ -372,7 +372,7 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
-python3 scripts/build_release.py --tag v0.1.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+python3 scripts/build_release.py --tag "v$(cat github-issue-workflow-update/VERSION)" --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 orca plugin validate ./orca-plugin --json
 orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json

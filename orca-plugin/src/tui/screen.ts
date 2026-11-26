@@ -45,6 +45,11 @@ export type HitBox = {
   payload?: unknown
 }
 
+export type CursorPosition = {
+  x: number
+  y: number
+}
+
 export function charDisplayWidth(codePoint: number): number {
   if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) return 0
   // Zero-width combining / variation selectors / ZWJ
@@ -146,6 +151,7 @@ export class ScreenBuffer {
   readonly height: number
   private cells: Cell[][]
   readonly hitBoxes: HitBox[] = []
+  private _cursor: CursorPosition | null = null
 
   constructor(width: number, height: number) {
     this.width = Math.max(20, width)
@@ -153,6 +159,21 @@ export class ScreenBuffer {
     this.cells = Array.from({ length: this.height }, () =>
       Array.from({ length: this.width }, () => ({ ch: ' ', style: '' }))
     )
+  }
+
+  get cursor(): CursorPosition | null {
+    return this._cursor
+  }
+
+  setCursor(x: number, y: number) {
+    this._cursor = {
+      x: Math.max(0, Math.min(this.width - 1, Math.floor(x))),
+      y: Math.max(0, Math.min(this.height - 1, Math.floor(y)))
+    }
+  }
+
+  clearCursor() {
+    this._cursor = null
   }
 
   addHitBox(x: number, y: number, w: number, h: number, action: string, payload?: unknown) {
@@ -329,14 +350,38 @@ export class ScreenBuffer {
     return lines
   }
 
-  diffOutput(previousLines: string[] | null): { output: string; lines: string[] } {
+  diffOutput(
+    previousLines: string[] | null,
+    previousCursor?: CursorPosition | null
+  ): { output: string; lines: string[]; cursor: CursorPosition | null } {
     const lines = this.renderLines()
-    let out = ''
+    let changedRows = ''
     for (let row = 0; row < lines.length; row += 1) {
       if (!previousLines || previousLines[row] !== lines[row]) {
-        out += `\x1b[${row + 1};1H${lines[row]}`
+        changedRows += `\x1b[${row + 1};1H${lines[row]}`
       }
     }
-    return { output: out, lines }
+
+    const cursor = this._cursor ? { x: this._cursor.x, y: this._cursor.y } : null
+    let out = ''
+
+    if (changedRows) {
+      out += ANSI.cursorHide + changedRows
+      if (cursor) {
+        out += `\x1b[${cursor.y + 1};${cursor.x + 1}H${ANSI.cursorShow}`
+      }
+    } else {
+      const cursorChanged =
+        previousCursor === undefined ||
+        (previousCursor === null) !== (cursor === null) ||
+        (previousCursor !== null &&
+          cursor !== null &&
+          (previousCursor.x !== cursor.x || previousCursor.y !== cursor.y))
+      if (cursorChanged) {
+        out += cursor ? `\x1b[${cursor.y + 1};${cursor.x + 1}H${ANSI.cursorShow}` : ANSI.cursorHide
+      }
+    }
+
+    return { output: out, lines, cursor }
   }
 }

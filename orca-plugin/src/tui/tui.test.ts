@@ -27,6 +27,8 @@ import {
 import {
   collectOrcaAgentState,
   loadBoardSnapshot,
+  parseAgentLaunchResult,
+  submitIssueFromTui,
   type PendingHandoff
 } from './orca-cli'
 import { IssueBoardTui } from './app'
@@ -1327,4 +1329,240 @@ test('IssueBoardTui emits atomic synchronized frames on initial render and keeps
     }
     rmSync(tmpDir, { recursive: true, force: true })
   }
+})
+
+test('parseAgentLaunchResult handles modern outcome.handle, nested launch.outcome, and legacy shapes', () => {
+  assert.deepEqual(
+    parseAgentLaunchResult(
+      JSON.stringify({
+        ok: true,
+        result: {
+          outcome: {
+            kind: 'terminal',
+            handle: 'term_modern_1',
+            paneKey: 'tab-1:leaf-1',
+            orcaSessionId: 'sess-1'
+          }
+        }
+      })
+    ),
+    {
+      terminalId: 'term_modern_1',
+      paneKey: 'tab-1:leaf-1',
+      orcaSessionId: 'sess-1'
+    }
+  )
+
+  assert.deepEqual(
+    parseAgentLaunchResult(
+      JSON.stringify({
+        ok: true,
+        result: {
+          launch: {
+            outcome: {
+              kind: 'terminal',
+              handle: 'term_nested_2'
+            },
+            terminal: { tabId: 'tab-2', leafId: 'leaf-2' }
+          }
+        }
+      })
+    ),
+    {
+      terminalId: 'term_nested_2',
+      paneKey: 'tab-2:leaf-2',
+      orcaSessionId: undefined
+    }
+  )
+
+  assert.deepEqual(
+    parseAgentLaunchResult(
+      JSON.stringify({
+        ok: true,
+        result: { agentTerminalHandle: 'term_legacy_3' }
+      })
+    ),
+    {
+      terminalId: 'term_legacy_3',
+      paneKey: undefined,
+      orcaSessionId: undefined
+    }
+  )
+
+  assert.deepEqual(parseAgentLaunchResult('not-json'), {})
+})
+
+test('handoff tracking avoids false exit alert for outcome.handle launches, synthetic fallback adoption, and transient Orca CLI errors', async () => {
+  const repoPath = '/tmp/demo-handoff-tracking'
+  const pendingHandoffs = new Map<string, PendingHandoff>()
+  const launchedHandle = 'term_live_handoff'
+  const launchedPaneKey = 'tab-live:leaf-live'
+  const launchedSessionId = 'sess-live-handoff'
+
+  const baseRunner = (opts: { orcaReachable?: boolean; includeLiveAgent?: boolean }): CommandRunner => {
+    return async (cmd, args) => {
+      if (cmd === 'git' && args.includes('--show-toplevel')) {
+        return { stdout: `${repoPath}\n`, stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'git' && args.includes('get-url')) {
+        return { stdout: 'https://github.com/acme/demo-handoff-tracking.git\n', stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'gh' && (args[0] === 'issue' || args[0] === 'pr')) {
+        return { stdout: '[]', stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'installed') {
+        return {
+          stdout: JSON.stringify({ result: { agents: [{ id: 'antigravity', default: true }] } }),
+          stderr: '',
+          exitCode: 0
+        }
+      }
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'launch') {
+        return {
+          stdout: JSON.stringify({
+            ok: true,
+            result: {
+              outcome: {
+                kind: 'terminal',
+                handle: launchedHandle
+              },
+              receipt: { detail: 'started terminal' }
+            }
+          }),
+          stderr: '',
+          exitCode: 0
+        }
+      }
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'list') {
+        if (opts.orcaReachable === false) {
+          return { stdout: '', stderr: 'runtime_unavailable', exitCode: 1 }
+        }
+        return {
+          stdout: JSON.stringify({
+            result: {
+              agents:
+                opts.includeLiveAgent === false
+                  ? []
+                  : [
+                      {
+                        orcaSessionId: launchedSessionId,
+                        kind: 'terminal',
+                        agent: 'antigravity',
+                        state: 'working',
+                        worktreeId: `wt::${repoPath}`,
+                        repo: 'demo-handoff-tracking',
+                        paneKey: launchedPaneKey,
+                        title: '请严格按照 github issue handoff Skill',
+                        updatedAt: Date.now()
+                      }
+                    ]
+            }
+          }),
+          stderr: '',
+          exitCode: 0
+        }
+      }
+      if (cmd === 'orca' && args[0] === 'terminal' && args[1] === 'list') {
+        if (opts.orcaReachable === false) {
+          return { stdout: '', stderr: 'runtime_unavailable', exitCode: 1 }
+        }
+        return {
+          stdout: JSON.stringify({
+            result: {
+              terminals:
+                opts.includeLiveAgent === false
+                  ? []
+                  : [
+                      {
+                        handle: launchedHandle,
+                        worktreeId: `wt::${repoPath}`,
+                        worktreePath: repoPath,
+                        tabId: 'tab-live',
+                        leafId: 'leaf-live',
+                        title: '请严格按照 github issue handoff Skill',
+                        connected: true,
+                        lastOutputAt: Date.now(),
+                        preview: 'Running gh issue list...'
+                      }
+                    ]
+            }
+          }),
+          stderr: '',
+          exitCode: 0
+        }
+      }
+      return { stdout: '', stderr: '', exitCode: 1 }
+    }
+  }
+
+  // 1. Launch with outcome.handle -> tracked cleanly even past 25s grace window
+  const created = await submitIssueFromTui({
+    repoPath,
+    repository: 'acme/demo-handoff-tracking',
+    autopilotInstalled: true,
+    defaultAgent: 'antigravity',
+    mode: 'handoff',
+    kind: 'bug',
+    title: '切换为 handoff 没有任何下方变化',
+    pendingHandoffs,
+    runner: baseRunner({})
+  })
+  assert.equal(created.terminalId, launchedHandle)
+  const entry = pendingHandoffs.get(launchedHandle)
+  assert.ok(entry)
+
+  const snapAfterGrace = await loadBoardSnapshot(
+    repoPath,
+    pendingHandoffs,
+    baseRunner({}),
+    { nowMs: entry.startedMs + 60_000 }
+  )
+  assert.equal(
+    snapAfterGrace.needsYou.some((i) => i.kind === 'system-alert' && i.badge === '提单中断'),
+    false
+  )
+  assert.equal(snapAfterGrace.inProgress.length, 1)
+  assert.equal(snapAfterGrace.inProgress[0]?.title, '切换为 handoff 没有任何下方变化')
+  assert.equal(snapAfterGrace.inProgress[0]?.statusLabel, 'Skill 整理提单中 (antigravity)')
+
+  // 2. Transient Orca CLI failure past 25s grace window -> must not falsely mark exited
+  const snapDuringOutage = await loadBoardSnapshot(
+    repoPath,
+    pendingHandoffs,
+    baseRunner({ orcaReachable: false }),
+    { nowMs: entry.startedMs + 90_000 }
+  )
+  assert.equal(
+    snapDuringOutage.needsYou.some((i) => i.kind === 'system-alert' && i.badge === '提单中断'),
+    false
+  )
+  assert.equal(entry.exitedWithoutIssue, undefined)
+
+  // 3. Synthetic handoff-* fallback adopts an unclaimed live handoff agent instead of false-alarming
+  const syntheticPending = new Map<string, PendingHandoff>([
+    [
+      'handoff-synthetic-1',
+      {
+        terminalId: 'handoff-synthetic-1',
+        repoPath,
+        title: '兜底认领正在运行的提单任务',
+        agent: 'antigravity',
+        startedAt: new Date(Date.now() - 60_000).toISOString(),
+        startedMs: Date.now() - 60_000
+      }
+    ]
+  ])
+  const adoptedSnap = await loadBoardSnapshot(
+    repoPath,
+    syntheticPending,
+    baseRunner({}),
+    { nowMs: Date.now() }
+  )
+  assert.equal(
+    adoptedSnap.needsYou.some((i) => i.kind === 'system-alert' && i.badge === '提单中断'),
+    false
+  )
+  assert.equal(adoptedSnap.inProgress.length, 1)
+  assert.equal(adoptedSnap.inProgress[0]?.title, '兜底认领正在运行的提单任务')
+  assert.equal(syntheticPending.get('handoff-synthetic-1')?.terminalId, launchedHandle)
 })

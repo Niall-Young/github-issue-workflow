@@ -157,6 +157,88 @@ async function readTerminalText(
   return ''
 }
 
+export type ParsedAgentLaunch = {
+  terminalId?: string
+  paneKey?: string
+  orcaSessionId?: string
+}
+
+type LaunchOutcomeLike = {
+  kind?: string
+  handle?: string
+  terminalId?: string
+  paneKey?: string
+  tabId?: string
+  leafId?: string
+  sessionId?: string
+  orcaSessionId?: string
+}
+
+type LaunchContainerLike = {
+  handle?: string
+  terminalId?: string
+  agentTerminalHandle?: string
+  paneKey?: string
+  tabId?: string
+  leafId?: string
+  sessionId?: string
+  orcaSessionId?: string
+  terminal?: { handle?: string; tabId?: string; leafId?: string }
+  outcome?: LaunchOutcomeLike
+}
+
+export function parseAgentLaunchResult(stdout: string): ParsedAgentLaunch {
+  if (!stdout.trim()) return {}
+  try {
+    const parsed = JSON.parse(stdout) as {
+      result?: LaunchContainerLike & { launch?: LaunchContainerLike }
+    }
+    const r = parsed.result
+    if (!r) return {}
+    const launch = r.launch
+    const outcome = r.outcome || launch?.outcome
+    const terminalObj = r.terminal || launch?.terminal
+
+    const orcaSessionId =
+      r.orcaSessionId ||
+      outcome?.orcaSessionId ||
+      outcome?.sessionId ||
+      r.sessionId ||
+      launch?.orcaSessionId ||
+      launch?.sessionId ||
+      undefined
+
+    const terminalId =
+      outcome?.handle ||
+      outcome?.terminalId ||
+      r.terminalId ||
+      r.terminal?.handle ||
+      r.agentTerminalHandle ||
+      r.handle ||
+      launch?.terminalId ||
+      launch?.terminal?.handle ||
+      launch?.agentTerminalHandle ||
+      launch?.handle ||
+      orcaSessionId ||
+      undefined
+
+    const paneKey =
+      r.paneKey ||
+      outcome?.paneKey ||
+      launch?.paneKey ||
+      (terminalObj?.tabId && terminalObj?.leafId
+        ? `${terminalObj.tabId}:${terminalObj.leafId}`
+        : undefined) ||
+      (outcome?.tabId && outcome?.leafId ? `${outcome.tabId}:${outcome.leafId}` : undefined) ||
+      (r.tabId && r.leafId ? `${r.tabId}:${r.leafId}` : undefined) ||
+      (launch?.tabId && launch?.leafId ? `${launch.tabId}:${launch.leafId}` : undefined)
+
+    return { terminalId, paneKey, orcaSessionId }
+  } catch {
+    return {}
+  }
+}
+
 export async function collectOrcaAgentState(
   repoPath: string,
   runner: CommandRunner = defaultRunner
@@ -167,6 +249,7 @@ export async function collectOrcaAgentState(
   terminalByHandle: Map<string, OrcaTerminalEntry>
   handoffAgents: ResolvedOrcaAgent[]
   allAgents: ResolvedOrcaAgent[]
+  orcaReachable: boolean
 }> {
   const questions: NeedsYouItem[] = []
   const sessionStates = new Map<string, string>()
@@ -180,6 +263,7 @@ export async function collectOrcaAgentState(
     runner('orca', ['agent', 'list', '--json'], { timeoutMs: 6_000 }),
     runner('orca', ['terminal', 'list', '--json'], { timeoutMs: 6_000 })
   ])
+  const orcaReachable = agentRes.exitCode === 0 && termRes.exitCode === 0
 
   if (termRes.exitCode === 0 && termRes.stdout.trim()) {
     try {
@@ -202,7 +286,15 @@ export async function collectOrcaAgentState(
   }
 
   if (agentRes.exitCode !== 0 || !agentRes.stdout.trim()) {
-    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents, allAgents }
+    return {
+      questions,
+      sessionStates,
+      agentsByKey,
+      terminalByHandle,
+      handoffAgents,
+      allAgents,
+      orcaReachable
+    }
   }
 
   let agents: OrcaAgentEntry[] = []
@@ -213,7 +305,15 @@ export async function collectOrcaAgentState(
     }
     agents = parsed.result?.agents || parsed.agents || []
   } catch {
-    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents, allAgents }
+    return {
+      questions,
+      sessionStates,
+      agentsByKey,
+      terminalByHandle,
+      handoffAgents,
+      allAgents,
+      orcaReachable
+    }
   }
 
   for (const agent of agents) {
@@ -291,7 +391,15 @@ export async function collectOrcaAgentState(
     }
   }
 
-  return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents, allAgents }
+  return {
+    questions,
+    sessionStates,
+    agentsByKey,
+    terminalByHandle,
+    handoffAgents,
+    allAgents,
+    orcaReachable
+  }
 }
 
 export async function loadBoardSnapshot(
@@ -377,12 +485,34 @@ export async function loadBoardSnapshot(
       continue
     }
 
-    const resolved =
+    let resolved =
       agentState.agentsByKey.get(entry.terminalId) ||
       (entry.paneKey ? agentState.agentsByKey.get(entry.paneKey) : undefined) ||
       (entry.orcaSessionId ? agentState.agentsByKey.get(entry.orcaSessionId) : undefined)
-    const effectiveHandle = resolved?.handle || entry.terminalId
-    const termEntry = agentState.terminalByHandle.get(effectiveHandle)
+    let effectiveHandle = resolved?.handle || entry.terminalId
+    let termEntry = agentState.terminalByHandle.get(effectiveHandle)
+
+    // Fallback: if launch returned an unrecognized schema and fell back to a synthetic id,
+    // adopt an unclaimed live handoff agent started around the same time instead of false-alarming.
+    if (!resolved && !termEntry && entry.terminalId.startsWith('handoff-')) {
+      const adopted = agentState.handoffAgents.find(
+        (a) =>
+          a.terminalConnected &&
+          a.updatedAt >= entry.startedMs - 5_000 &&
+          !handledHandoffKeys.has(a.handle) &&
+          !(a.paneKey && handledHandoffKeys.has(a.paneKey)) &&
+          !(a.orcaSessionId && handledHandoffKeys.has(a.orcaSessionId))
+      )
+      if (adopted) {
+        resolved = adopted
+        effectiveHandle = adopted.handle || entry.terminalId
+        termEntry = agentState.terminalByHandle.get(effectiveHandle)
+        if (adopted.handle) entry.terminalId = adopted.handle
+        if (adopted.paneKey) entry.paneKey = adopted.paneKey
+        if (adopted.orcaSessionId) entry.orcaSessionId = adopted.orcaSessionId
+      }
+    }
+
     const state = resolved?.state
     const terminalStillOpen = Boolean(
       (termEntry && termEntry.connected !== false) ||
@@ -401,7 +531,7 @@ export async function loadBoardSnapshot(
     }
 
     if (!state && !terminalStillOpen) {
-      if (now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
+      if (agentState.orcaReachable && now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
         if (hasMatchingNewIssueByTitle(entry)) {
           pendingHandoffs.delete(terminalId)
         } else {
@@ -838,32 +968,10 @@ export async function submitIssueFromTui(params: {
     )
   }
 
-  let terminalId = `handoff-${Date.now()}`
-  let paneKey: string | undefined
-  let orcaSessionId: string | undefined
-  try {
-    const parsed = JSON.parse(launchRes.stdout) as {
-      result?: {
-        terminalId?: string
-        paneKey?: string
-        terminal?: { handle?: string; tabId?: string; leafId?: string }
-        orcaSessionId?: string
-      }
-    }
-    terminalId =
-      parsed.result?.terminalId ||
-      parsed.result?.terminal?.handle ||
-      parsed.result?.orcaSessionId ||
-      terminalId
-    orcaSessionId = parsed.result?.orcaSessionId
-    paneKey =
-      parsed.result?.paneKey ||
-      (parsed.result?.terminal?.tabId && parsed.result?.terminal?.leafId
-        ? `${parsed.result.terminal.tabId}:${parsed.result.terminal.leafId}`
-        : undefined)
-  } catch {
-    // keep synthetic id
-  }
+  const parsedLaunch = parseAgentLaunchResult(launchRes.stdout)
+  const terminalId = parsedLaunch.terminalId || `handoff-${Date.now()}`
+  const paneKey = parsedLaunch.paneKey
+  const orcaSessionId = parsedLaunch.orcaSessionId
 
   const nowMs = Date.now()
   params.pendingHandoffs.set(terminalId, {

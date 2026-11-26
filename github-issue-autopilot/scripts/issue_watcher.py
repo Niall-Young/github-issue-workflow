@@ -169,6 +169,10 @@ def load_config(path: Path) -> dict[str, Any]:
         raise WatcherError("policy.pre_merge_commands must be an array of non-empty command strings")
     policy["pre_merge_commands"] = pre_merge_commands
     policy["require_ci"] = bool(policy.get("require_ci", True))
+    max_conflict_resolutions = int(policy.get("max_conflict_resolutions", 2))
+    if max_conflict_resolutions < 0:
+        raise WatcherError("policy.max_conflict_resolutions must be non-negative")
+    policy["max_conflict_resolutions"] = max_conflict_resolutions
     if policy.get("max_risk", "medium") not in {"low", "medium"}:
         raise WatcherError("policy.max_risk must be low or medium")
     config["policy"] = policy
@@ -623,6 +627,68 @@ class Ledger:
                FROM attempts JOIN issues USING(node_id)
                WHERE attempts.status='pr-open' ORDER BY issues.created_at, issues.issue_number"""
         )]
+
+    def conflict_resolution_count(self, node_id: str) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE node_id=? AND kind='pr_conflict_requeued'",
+            (node_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def conflict_context_for_attempt(self, node_id: str, attempt: int) -> dict[str, Any] | None:
+        if attempt <= 1:
+            return None
+        rows = self.connection.execute(
+            "SELECT detail FROM events WHERE node_id=? AND kind='pr_conflict_requeued' ORDER BY id DESC",
+            (node_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                detail = json.loads(row["detail"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(detail, dict) and int(detail.get("attempt", -1)) == attempt - 1:
+                return detail
+        return None
+
+    def requeue_pr_conflict(
+        self,
+        node_id: str,
+        attempt: int,
+        pr_number: int | None,
+        pr_url: str,
+        head_branch: str,
+        base_branch: str,
+        head_sha: str,
+        summary: str,
+        round_number: int,
+    ) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self.connection.execute(
+                "UPDATE attempts SET status='rejected', pid=NULL, summary=? WHERE node_id=? AND attempt_number=?",
+                (summary, node_id, attempt),
+            )
+            if not cursor.rowcount:
+                raise WatcherError("attempt not found")
+            self.connection.execute(
+                """UPDATE issues SET status='retry-pending', lease_started_at=NULL, lease_owner=NULL,
+                   pid=NULL, summary=?, returncode=NULL, log_path=NULL WHERE node_id=?""",
+                (summary, node_id),
+            )
+            self._event(node_id, "pr_conflict_requeued", {
+                "attempt": attempt,
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "head_branch": head_branch,
+                "base_branch": base_branch,
+                "head_sha": head_sha,
+                "round": round_number,
+            })
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def finish(self, node_id: str, attempt: int, status: str,
                validate_orca: bool = False, **fields: Any) -> None:
@@ -1513,6 +1579,38 @@ def verified_receipt(receipt: dict[str, Any] | None, repository: dict[str, Any],
 
 def prompt_for(run: dict[str, Any], config: dict[str, Any]) -> str:
     publication = config.get("policy", {}).get("publication", "auto-merge")
+    conflict_ctx = run.get("conflict_context")
+    if isinstance(conflict_ctx, dict) and conflict_ctx.get("pr_url"):
+        pr_url = str(conflict_ctx["pr_url"])
+        head_branch = str(conflict_ctx.get("head_branch") or "")
+        base_branch = str(conflict_ctx.get("base_branch") or "main")
+        round_num = int(conflict_ctx.get("round") or 1)
+        return (
+            f"Use $github-issue-repair {run['url']} in GitHub Issue Autopilot PR conflict-resolution mode "
+            f"(attempt {run['attempt_number']}, conflict resolution round {round_num}). "
+            f"Use repair run ID {run['run_id']} and the current Orca-managed worktree and branch. "
+            f"An existing PR ({pr_url}) on branch `{head_branch}` has merge conflicts with `{base_branch}`. "
+            f"Do not re-implement the Issue from scratch. Instead: "
+            f"1) run `git fetch origin`; "
+            f"2) align your current isolated worktree branch with `origin/{head_branch}` (for example `git reset --hard origin/{head_branch}`) "
+            f"and record that commit as your repair run `base_sha`; "
+            f"3) merge `origin/{base_branch}` into your current branch (`git merge origin/{base_branch}`), "
+            f"resolve all merge conflicts while preserving both the Issue #{run['issue_number']} changes and the latest `{base_branch}` changes, "
+            f"and commit the conflict resolution cleanly; "
+            f"4) run targeted and relevant broader tests plus an independent review of the resolved diff, "
+            f"and transition the repair ledger to AWAIT_PUBLICATION_APPROVAL. "
+            f"Update the active Orca worktree comment at conflict-resolution and test checkpoints. "
+            f"The coordinator will push your verified commit to `{head_branch}` to update {pr_url} and auto-merge once checks pass. "
+            "Do not push, create a new PR, merge, close, comment, or relabel Issues yourself. "
+            "Finish with exactly one single-line receipt using the literal prefix `AUTOPILOT_RESULT: `. "
+            "Example (replace the placeholders):\n"
+            "AUTOPILOT_RESULT: "
+            '{"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>",'
+            '"worktree_path":"<absolute worktree path>","branch":"<assigned branch>"}\n'
+            "Then send the Orca worker_done required by the injected dispatch. Success uses ready-for-review and includes "
+            "summary, run_id, absolute worktree_path, branch, base_sha, and head_sha. Other statuses are needs-human, "
+            "blocked, or failed."
+        )
     if publication == "auto-merge":
         handoff_note = (
             "The coordinator will push your verified commit, open a PR, verify PR checks, and auto-merge "
@@ -1666,6 +1764,9 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
         return {"url": run["url"], "status": "blocked"}
     repair_run_id = str(uuid.uuid4())
     run["run_id"] = repair_run_id
+    conflict_ctx = ledger.conflict_context_for_attempt(run["node_id"], attempt)
+    if conflict_ctx is not None:
+        run["conflict_context"] = conflict_ctx
     try:
         current = {item["id"]: item for item in list_issues(repository, github_login())}
         issue = current.get(run["node_id"])
@@ -1673,6 +1774,8 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
             ledger.finish(run["node_id"], attempt, "blocked", summary="Issue is no longer open or eligible",
                           run_id=repair_run_id)
             return {"url": run["url"], "status": "blocked"}
+        if conflict_ctx is not None:
+            command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
         candidate_task_id = create_orca_task(config, run_id, run)
         ledger.ensure_orca_identity_available(
             run["node_id"], attempt, "orca_task_id", candidate_task_id
@@ -1681,13 +1784,17 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
         agent = select_agent(issue, config)
         base_branch = preferred_worktree_base_branch(repository["repo_path"])
         base_args = ("--base-branch", base_branch) if base_branch else ()
+        start_comment = (
+            f"Resolving PR #{conflict_ctx.get('pr_number')} conflicts ({agent})"
+            if conflict_ctx is not None else f"Starting {agent}"
+        )
         response = orca_call(
             config, "orchestration", "worker-start", "--run", run_id, "--task", task_id,
             "--worktree", "new-child", "--repo", f"path:{repository['repo_path']}",
             *base_args,
             "--name", f"issue-{run['issue_number']}-attempt-{attempt}",
             "--display-name", f"#{run['issue_number']} {run['title']}",
-            "--comment", f"Starting {agent}", "--agent", agent, "--setup", config["orca"]["setup"],
+            "--comment", start_comment, "--agent", agent, "--setup", config["orca"]["setup"],
             "--timeout-ms", "60000",
         )
         dispatch_id = nested_value(response, ("result", "dispatch", "id"),
@@ -1911,7 +2018,7 @@ def publish_attempt_pr(
 def github_pr_view(pr_url: str) -> dict[str, Any]:
     result = command([
         "gh", "pr", "view", pr_url, "--json",
-        "number,url,state,mergeable,mergeStateStatus,statusCheckRollup,headRefOid",
+        "number,url,state,mergeable,mergeStateStatus,statusCheckRollup,headRefOid,baseRefName,headRefName",
     ])
     if result.returncode:
         raise WatcherError(result.stderr.strip() or f"gh pr view failed for {pr_url}")
@@ -1922,6 +2029,89 @@ def github_pr_view(pr_url: str) -> dict[str, Any]:
     if not isinstance(value, dict) or not value.get("state"):
         raise WatcherError("gh pr view returned an unexpected payload")
     return value
+
+
+def try_clean_merge_pr_conflict(
+    worktree: Path,
+    head_branch: str,
+    base_branch: str,
+    pre_merge_commands: list[str],
+) -> str | None:
+    """Attempt a clean deterministic merge of origin/<base_branch> into the PR worktree.
+    Returns the new HEAD SHA if the merge, pre-merge checks, and push all succeed;
+    otherwise aborts/resets cleanly and returns None so an AI worker can resolve conflicts.
+    """
+    if not head_branch or not base_branch or not worktree.is_dir():
+        return None
+    try:
+        if git(worktree, "status", "--porcelain"):
+            return None
+        old_head = git(worktree, "rev-parse", "HEAD")
+    except WatcherError:
+        return None
+    fetch = command(["git", "-C", str(worktree), "fetch", "origin", base_branch])
+    if fetch.returncode != 0:
+        return None
+    merge = command(["git", "-C", str(worktree), "merge", "--no-edit", f"origin/{base_branch}"])
+    if merge.returncode != 0:
+        command(["git", "-C", str(worktree), "merge", "--abort"])
+        return None
+    if pre_merge_commands and run_pre_merge_commands(worktree, pre_merge_commands) is not None:
+        command(["git", "-C", str(worktree), "reset", "--hard", old_head])
+        return None
+    push = command(["git", "-C", str(worktree), "push", "origin", f"HEAD:refs/heads/{head_branch}"])
+    if push.returncode != 0:
+        command(["git", "-C", str(worktree), "reset", "--hard", old_head])
+        return None
+    try:
+        return git(worktree, "rev-parse", "HEAD")
+    except WatcherError:
+        return None
+
+
+def publish_conflict_resolution_pr(
+    config: dict[str, Any],
+    repository: dict[str, Any],
+    attempt: dict[str, Any],
+    conflict_ctx: dict[str, Any],
+) -> dict[str, Any]:
+    worktree = Path(str(attempt["worktree_path"]))
+    head_branch = str(conflict_ctx.get("head_branch") or "")
+    base_branch = str(conflict_ctx.get("base_branch") or "main")
+    pr_url = str(conflict_ctx.get("pr_url") or "")
+    pr_number = conflict_ctx.get("pr_number")
+    if not head_branch or not pr_url:
+        raise WatcherError("conflict resolution context is missing PR branch or URL")
+    fetch = command(["git", "-C", str(worktree), "fetch", "origin", base_branch])
+    if fetch.returncode != 0:
+        raise WatcherError(fetch.stderr.strip() or f"git fetch origin {base_branch} failed")
+    ancestor = command([
+        "git", "-C", str(worktree), "merge-base", "--is-ancestor", f"origin/{base_branch}", "HEAD",
+    ])
+    if ancestor.returncode != 0:
+        raise WatcherError(
+            f"conflict resolution commit does not incorporate latest origin/{base_branch}"
+        )
+    push = command(["git", "-C", str(worktree), "push", "origin", f"HEAD:refs/heads/{head_branch}"])
+    if push.returncode != 0:
+        expected_sha = str(conflict_ctx.get("head_sha") or "")
+        lease = (
+            f"--force-with-lease=refs/heads/{head_branch}:{expected_sha}"
+            if expected_sha else "--force-with-lease"
+        )
+        push = command([
+            "git", "-C", str(worktree), "push", lease, "origin", f"HEAD:refs/heads/{head_branch}",
+        ])
+        if push.returncode != 0:
+            raise WatcherError(
+                push.stderr.strip() or push.stdout.strip()
+                or f"git push to existing PR branch {head_branch} failed"
+            )
+    if not isinstance(pr_number, int):
+        pr_view = github_pr_view(pr_url)
+        pr_number = int(pr_view["number"])
+        pr_url = str(pr_view["url"])
+    return {"pr_number": pr_number, "pr_url": pr_url}
 
 
 def evaluate_pr_checks(rollup: Any) -> tuple[str, str]:
@@ -2016,7 +2206,62 @@ def reconcile_pull_requests(
         mergeable = str(pr.get("mergeable") or "").upper()
         merge_status = str(pr.get("mergeStateStatus") or "").upper()
         if mergeable == "CONFLICTING" or merge_status == "DIRTY":
-            summary = f"PR has merge conflicts ({pr_url}); manual resolution or retry required"
+            max_conflicts = int(policy.get("max_conflict_resolutions", 2))
+            conflict_count = ledger.conflict_resolution_count(attempt["node_id"])
+            base_branch = str(pr.get("baseRefName") or "main")
+            head_branch = str(pr.get("headRefName") or attempt.get("branch") or "")
+            if max_conflicts > 0 and conflict_count < max_conflicts and head_branch:
+                command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
+                worktree_value = attempt.get("worktree_path")
+                clean_head = (
+                    try_clean_merge_pr_conflict(
+                        Path(str(worktree_value)), head_branch, base_branch, pre_merge_commands
+                    )
+                    if isinstance(worktree_value, str) and worktree_value else None
+                )
+                if clean_head:
+                    summary = f"PR cleanly merged origin/{base_branch} and pushed update ({pr_url})"
+                    ledger._update(
+                        attempt["node_id"], attempt["attempt_number"], "pr-open",
+                        {"head_sha": clean_head, "summary": summary}, "pr_conflict_auto_merged",
+                    )
+                    updated.append({
+                        "url": attempt["url"], "status": "pr-open", "pr_url": pr_url, "summary": summary,
+                    })
+                    continue
+                round_number = conflict_count + 1
+                summary = (
+                    f"PR has merge conflicts against {base_branch} ({pr_url}); "
+                    f"queued automatic conflict resolution ({round_number}/{max_conflicts})"
+                )
+                ledger.requeue_pr_conflict(
+                    attempt["node_id"],
+                    int(attempt["attempt_number"]),
+                    attempt.get("pr_number") or pr.get("number"),
+                    pr_url,
+                    head_branch,
+                    base_branch,
+                    str(pr.get("headRefOid") or attempt.get("head_sha") or ""),
+                    summary,
+                    round_number,
+                )
+                if attempt.get("orca_worktree_id"):
+                    try:
+                        orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
+                                  "--workspace-status", "in-review", "--comment", f"conflict-requeued: {summary[:170]}")
+                    except WatcherError:
+                        pass
+                updated.append({
+                    "url": attempt["url"], "status": "retry-pending", "pr_url": pr_url, "summary": summary,
+                })
+                continue
+            if max_conflicts > 0 and conflict_count >= max_conflicts:
+                summary = (
+                    f"PR still has merge conflicts after {conflict_count} automatic resolution "
+                    f"attempt(s) ({pr_url}); manual resolution required"
+                )
+            else:
+                summary = f"PR has merge conflicts ({pr_url}); manual resolution or retry required"
             patch_path = export_failure_patch(repository["repo_path"], ledger.path, attempt)
             extra = {"failure_patch_path": patch_path} if patch_path else {}
             ledger.finish(attempt["node_id"], attempt["attempt_number"], "needs-human",
@@ -2236,15 +2481,26 @@ def reconcile_workers(
                     summary = failure
                 else:
                     merged_attempt = {**attempt, **evidence}
+                    conflict_ctx = ledger.conflict_context_for_attempt(
+                        attempt["node_id"], int(attempt["attempt_number"])
+                    )
                     try:
-                        pr_info = publish_attempt_pr(config, repository, merged_attempt, summary)
+                        if conflict_ctx is not None:
+                            pr_info = publish_conflict_resolution_pr(
+                                config, repository, merged_attempt, conflict_ctx
+                            )
+                        else:
+                            pr_info = publish_attempt_pr(config, repository, merged_attempt, summary)
                     except WatcherError as exc:
                         status = "needs-human"
                         summary = f"automatic PR publication failed: {exc}"
                     else:
                         status = "pr-open"
                         evidence = {**evidence, **pr_info}
-                        summary = f"PR opened ({pr_info['pr_url']}): {summary}"
+                        if conflict_ctx is not None:
+                            summary = f"PR conflict resolved and updated ({pr_info['pr_url']}): {summary}"
+                        else:
+                            summary = f"PR opened ({pr_info['pr_url']}): {summary}"
         if status in {"failed", "needs-human", "blocked"} and repository is not None:
             patch_path = export_failure_patch(repository["repo_path"], ledger.path, attempt)
             if patch_path:

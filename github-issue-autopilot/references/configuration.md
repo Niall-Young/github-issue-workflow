@@ -31,6 +31,7 @@ Version 3 has this shape:
     "merge_method": "squash",
     "pre_merge_commands": [],
     "require_ci": true,
+    "max_conflict_resolutions": 2,
     "max_risk": "medium"
   },
   "repositories": [
@@ -68,7 +69,7 @@ Version 3 has this shape:
 
 After a worker finishes self-testing and independent review and emits a verified `AUTOPILOT_RESULT`, `policy.publication` controls the handoff:
 
-- `auto-merge` (default): the coordinator runs any configured `policy.pre_merge_commands`, pushes the branch, opens a GitHub PR (`pr-open`), monitors GitHub PR status checks (`require_ci: true`) and mergeability, and automatically merges the PR (`merge_method`: `squash` / `merge` / `rebase`), closes the Issue, cleans up the worktree, and marks the Issue `merged` (immediately unblocking dependent Issues). CI failures or merge conflicts stop visibly at `needs-human` with a `.patch` archive instead of force-merging.
+- `auto-merge` (default): the coordinator runs any configured `policy.pre_merge_commands`, pushes the branch, opens a GitHub PR (`pr-open`), monitors GitHub PR status checks (`require_ci: true`) and mergeability, and automatically merges the PR (`merge_method`: `squash` / `merge` / `rebase`), closes the Issue, cleans up the worktree, and marks the Issue `merged` (immediately unblocking dependent Issues). When an open PR becomes `CONFLICTING`/`DIRTY`, the coordinator first tries a clean merge of the latest base branch in the existing worktree and otherwise automatically queues a bounded conflict-resolution worker (up to `policy.max_conflict_resolutions`, default `2`; `0` disables) that resolves conflicts, verifies tests, and updates the existing PR branch in place. CI failures or conflicts remaining after exhausting `max_conflict_resolutions` stop visibly at `needs-human` with a `.patch` archive instead of force-merging.
 - `pr-only`: pushes the branch and opens the PR (`pr-open`), leaving merging to a human.
 - `never`: stops at local `ready-for-review` for manual `accept`.
 

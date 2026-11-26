@@ -1393,6 +1393,183 @@ class IssueWatcherTests(unittest.TestCase):
                 self.assertEqual("needs-human", updated[0]["status"])
                 self.assertIn(expected_text, updated[0]["summary"])
 
+    def test_pr_conflict_auto_requeues_and_updates_existing_pr(self) -> None:
+        config = self.config()
+        config["policy"]["publication"] = "auto-merge"
+        config["policy"]["max_conflict_resolutions"] = 2
+        ledger = self.ledger(attempts=2)
+        issue = self.issue("I_conflict", 12)
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        wt1 = str(self.root / "wt-issue-12-a1")
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"],
+            run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task_c1", orca_dispatch_id="disp_c1",
+            orca_worktree_id=f"repo::{wt1}", worktree_path=wt1,
+            branch="Niall-Young/issue-12-attempt-1",
+        )
+        ledger.finish(
+            claimed["node_id"], claimed["attempt_number"], "pr-open",
+            pr_number=14, pr_url="https://github.com/owner/repo/pull/14",
+            head_sha="1111111", summary="PR opened",
+        )
+
+        conflict_pr = {
+            "number": 14, "url": "https://github.com/owner/repo/pull/14",
+            "state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+            "statusCheckRollup": [], "headRefOid": "1111111",
+            "baseRefName": "main", "headRefName": "Niall-Young/issue-12-attempt-1",
+        }
+        with mock.patch.object(WATCHER, "github_pr_view", return_value=conflict_pr), \
+             mock.patch.object(WATCHER, "command", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+             mock.patch.object(WATCHER, "try_clean_merge_pr_conflict", return_value=None), \
+             mock.patch.object(WATCHER, "orca_call", return_value={"ok": True, "result": {}}):
+            updated = WATCHER.reconcile_pull_requests(config, ledger)
+
+        self.assertEqual(1, len(updated))
+        self.assertEqual("retry-pending", updated[0]["status"])
+        self.assertEqual("https://github.com/owner/repo/pull/14", updated[0]["pr_url"])
+        self.assertEqual(1, ledger.conflict_resolution_count(claimed["node_id"]))
+
+        next_run = ledger.claim_next()
+        self.assertIsNotNone(next_run)
+        self.assertEqual(2, next_run["attempt_number"])
+        ctx = ledger.conflict_context_for_attempt(next_run["node_id"], 2)
+        self.assertIsNotNone(ctx)
+        self.assertEqual("Niall-Young/issue-12-attempt-1", ctx["head_branch"])
+        self.assertEqual("main", ctx["base_branch"])
+        next_run["run_id"] = str(uuid.uuid4())
+        next_run["conflict_context"] = ctx
+        prompt = WATCHER.prompt_for(next_run, config)
+        self.assertIn("PR conflict-resolution mode", prompt)
+        self.assertIn("origin/Niall-Young/issue-12-attempt-1", prompt)
+        self.assertIn("origin/main", prompt)
+
+        wt2 = str(self.root / "wt-issue-12-a2")
+        ledger.assign_orca(
+            next_run["node_id"], 2,
+            run_id=next_run["run_id"], agent_id="codex",
+            orca_task_id="task_c2", orca_dispatch_id="disp_c2",
+            orca_worktree_id=f"repo::{wt2}", worktree_path=wt2,
+            branch="Niall-Young/issue-12-attempt-2",
+        )
+        receipt = {
+            "status": "ready-for-review", "summary": "Resolved merge conflicts with main",
+            "run_id": next_run["run_id"], "worktree_path": wt2,
+            "branch": "Niall-Young/issue-12-attempt-2",
+            "base_sha": "1111111", "head_sha": "2222222",
+        }
+        def fake_orca(_cfg, *args):
+            if args[:2] == ("orchestration", "worker-show"):
+                return {"ok": True, "result": {"dispatchId": "disp_c2", "state": "completed"}}
+            if args[:2] == ("orchestration", "worker-read"):
+                return {"ok": True, "result": {"output": f"AUTOPILOT_RESULT: {json.dumps(receipt)}\n"}}
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(WATCHER, "orca_call", side_effect=fake_orca), \
+             mock.patch.object(WATCHER, "validate_attempt"), \
+             mock.patch.object(WATCHER, "publish_attempt_pr") as create_pr, \
+             mock.patch.object(WATCHER, "publish_conflict_resolution_pr", return_value={
+                 "pr_number": 14, "pr_url": "https://github.com/owner/repo/pull/14",
+             }) as update_pr:
+            completed = WATCHER.reconcile_workers(config, ledger)
+
+        create_pr.assert_not_called()
+        update_pr.assert_called_once()
+        self.assertEqual("pr-open", completed[0]["status"])
+        self.assertEqual("https://github.com/owner/repo/pull/14", completed[0]["pr_url"])
+        self.assertIn("PR conflict resolved and updated", completed[0]["summary"])
+
+    def test_pr_conflict_clean_merge_fast_path_and_budget_exhaustion(self) -> None:
+        config = self.config()
+        config["policy"]["publication"] = "auto-merge"
+        config["policy"]["max_conflict_resolutions"] = 1
+        ledger = self.ledger(attempts=2)
+        issue = self.issue("I_clean", 15)
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        wt = str(self.root / "wt-issue-15-a1")
+        ledger.assign_orca(
+            claimed["node_id"], 1,
+            run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task_f1", orca_dispatch_id="disp_f1",
+            orca_worktree_id=f"repo::{wt}", worktree_path=wt,
+            branch="Niall-Young/issue-15-attempt-1",
+        )
+        ledger.finish(
+            claimed["node_id"], 1, "pr-open",
+            pr_number=20, pr_url="https://github.com/owner/repo/pull/20",
+            head_sha="aaaaaaa", summary="PR opened",
+        )
+        conflict_pr = {
+            "number": 20, "url": "https://github.com/owner/repo/pull/20",
+            "state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+            "statusCheckRollup": [], "headRefOid": "aaaaaaa",
+            "baseRefName": "main", "headRefName": "Niall-Young/issue-15-attempt-1",
+        }
+        # Clean merge succeeds -> stays pr-open without burning a requeue round.
+        with mock.patch.object(WATCHER, "github_pr_view", return_value=conflict_pr), \
+             mock.patch.object(WATCHER, "command", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+             mock.patch.object(WATCHER, "try_clean_merge_pr_conflict", return_value="bbbbbbb"):
+            updated = WATCHER.reconcile_pull_requests(config, ledger)
+        self.assertEqual("pr-open", updated[0]["status"])
+        self.assertEqual(0, ledger.conflict_resolution_count(claimed["node_id"]))
+
+        # Real conflict exhausts budget of 1 -> first requeues, second stops at needs-human.
+        with mock.patch.object(WATCHER, "github_pr_view", return_value=conflict_pr), \
+             mock.patch.object(WATCHER, "command", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+             mock.patch.object(WATCHER, "try_clean_merge_pr_conflict", return_value=None), \
+             mock.patch.object(WATCHER, "orca_call", return_value={"ok": True, "result": {}}):
+            first = WATCHER.reconcile_pull_requests(config, ledger)
+        self.assertEqual("retry-pending", first[0]["status"])
+
+        second_run = ledger.claim_next()
+        ledger.finish(
+            second_run["node_id"], second_run["attempt_number"], "pr-open",
+            pr_number=20, pr_url="https://github.com/owner/repo/pull/20",
+            head_sha="ccccccc", summary="PR updated",
+        )
+        with mock.patch.object(WATCHER, "github_pr_view", return_value=conflict_pr), \
+             mock.patch.object(WATCHER, "orca_call", return_value={"ok": True, "result": {}}):
+            second = WATCHER.reconcile_pull_requests(config, ledger)
+        self.assertEqual("needs-human", second[0]["status"])
+        self.assertIn("after 1 automatic resolution attempt(s)", second[0]["summary"])
+
+    def test_publish_conflict_resolution_pr_checks_base_ancestry_and_pushes(self) -> None:
+        config = self.config()
+        repo = config["repositories"][0]
+        attempt = {"worktree_path": str(self.root / "wt")}
+        ctx = {
+            "pr_number": 14,
+            "pr_url": "https://github.com/owner/repo/pull/14",
+            "head_branch": "Niall-Young/issue-12-attempt-2",
+            "base_branch": "main",
+            "head_sha": "oldsha",
+        }
+        # Rejects when origin/main is not an ancestor of HEAD.
+        with mock.patch.object(WATCHER, "command", side_effect=[
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 1, "", ""),
+        ]):
+            with self.assertRaisesRegex(WATCHER.WatcherError, "origin/main"):
+                WATCHER.publish_conflict_resolution_pr(config, repo, attempt, ctx)
+
+        # Falls back to --force-with-lease when fast-forward push fails (rebased branch).
+        calls: list[list[str]] = []
+        def fake_cmd(argv, cwd=None):
+            calls.append(argv)
+            if len(calls) in (1, 2):
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if len(calls) == 3:
+                return subprocess.CompletedProcess(argv, 1, "", "non-fast-forward")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(WATCHER, "command", side_effect=fake_cmd):
+            info = WATCHER.publish_conflict_resolution_pr(config, repo, attempt, ctx)
+        self.assertEqual({"pr_number": 14, "pr_url": "https://github.com/owner/repo/pull/14"}, info)
+        self.assertIn("--force-with-lease=refs/heads/Niall-Young/issue-12-attempt-2:oldsha", calls[3])
+
     def test_reconcile_preserves_autopilot_result_when_worker_exits_failed(self) -> None:
         config = self.config()
         ledger = self.ledger(attempts=2)

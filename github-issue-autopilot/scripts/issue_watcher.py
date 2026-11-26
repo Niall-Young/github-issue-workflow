@@ -2182,16 +2182,30 @@ def _resolve_local_base_branch(repo: Path, base_branch: str | None = None) -> st
     return None
 
 
+def _extract_merge_tree_conflicts(output: str) -> list[str]:
+    conflicts: list[str] = []
+    for line in output.splitlines():
+        match = re.search(r"CONFLICT \([^)]*\):.*?\bin\s+(.+)$", line.strip())
+        if match:
+            path = match.group(1).strip()
+            if path and path not in conflicts:
+                conflicts.append(path)
+    return conflicts
+
+
 def sync_local_base_branch(
     repo: Path,
     base_branch: str | None = None,
     *,
     fetch: bool = True,
 ) -> dict[str, Any]:
-    """Deterministically fast-forward local base_branch to origin/<base_branch>.
+    """Deterministically sync local base_branch with origin/<base_branch>.
 
-    Never uses AI, never force-resets, never overwrites uncommitted changes, and
-    never clobbers diverged local commits.
+    Fast-forwards when local is strictly behind, and automatically rebases
+    diverged local commits when the working tree is clean and a read-only
+    merge-tree preflight proves there are zero conflicts. Never uses AI, never
+    force-resets, never overwrites uncommitted changes, and never leaves a
+    conflicted rebase in progress.
     """
     if not repo.is_dir():
         return {"status": "skipped", "reason": "repository path not found"}
@@ -2223,16 +2237,57 @@ def sync_local_base_branch(
         return {"status": "skipped", "branch": branch, "reason": "non-integer rev-list counts"}
     if behind == 0:
         return {"status": "up-to-date", "branch": branch, "ahead": ahead, "behind": 0}
+    current_result = command(["git", "-C", str(repo), "branch", "--show-current"])
+    current_branch = current_result.stdout.strip() if current_result.returncode == 0 else ""
     if ahead > 0:
+        if current_branch != branch:
+            return {
+                "status": "diverged",
+                "branch": branch,
+                "ahead": ahead,
+                "behind": behind,
+                "conflict": False,
+                "reason": f"local {branch} has {ahead} unpushed commit(s) and is {behind} behind origin/{branch} while {current_branch or 'detached HEAD'} is checked out",
+            }
+        dirty = command(["git", "-C", str(repo), "status", "--porcelain"])
+        if dirty.returncode != 0 or dirty.stdout.strip() or _git_operation_in_progress(repo):
+            return {
+                "status": "dirty-skipped",
+                "branch": branch,
+                "ahead": ahead,
+                "behind": behind,
+                "reason": "working tree has uncommitted changes or an in-progress git operation",
+            }
+        preflight = command(["git", "-C", str(repo), "merge-tree", "--write-tree", "HEAD", remote_ref])
+        if preflight.returncode != 0:
+            conflict_files = _extract_merge_tree_conflicts(f"{preflight.stdout}\n{preflight.stderr}")
+            return {
+                "status": "diverged",
+                "branch": branch,
+                "ahead": ahead,
+                "behind": behind,
+                "conflict": True,
+                "conflict_files": conflict_files,
+                "reason": f"local {branch} has {ahead} unpushed commit(s) that conflict with origin/{branch}",
+            }
+        rebased = command(["git", "-C", str(repo), "rebase", remote_ref])
+        if rebased.returncode == 0:
+            return {
+                "status": "synced",
+                "branch": branch,
+                "ahead": ahead,
+                "behind": behind,
+                "mode": "auto-rebase",
+            }
+        command(["git", "-C", str(repo), "rebase", "--abort"])
         return {
             "status": "diverged",
             "branch": branch,
             "ahead": ahead,
             "behind": behind,
-            "reason": f"local {branch} has {ahead} unpushed commit(s) and is {behind} behind origin/{branch}",
+            "conflict": True,
+            "reason": rebased.stderr.strip() or rebased.stdout.strip() or "auto-rebase aborted due to conflict",
         }
-    current_result = command(["git", "-C", str(repo), "branch", "--show-current"])
-    current_branch = current_result.stdout.strip() if current_result.returncode == 0 else ""
     if current_branch == branch:
         dirty = command(["git", "-C", str(repo), "status", "--porcelain"])
         if dirty.returncode != 0 or dirty.stdout.strip() or _git_operation_in_progress(repo):

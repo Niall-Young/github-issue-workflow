@@ -795,7 +795,10 @@ function renderAttentionPane(
       bx += buf.drawButton(bx, btnY, '同意继续', PALETTE.accentBg, 'approve-agent', item) + 2
       buf.drawLinkButton(bx, btnY, '[回复]', PALETTE.muted, 'open-reply', item)
     } else if (item.kind === 'system-alert') {
-      if (item.retryTitle) {
+      if (item.syncBranch) {
+        bx +=
+          buf.drawButton(bx, btnY, '一键自动合并', PALETTE.accentBg, 'sync-diverged-branch', item) + 2
+      } else if (item.retryTitle) {
         bx +=
           buf.drawButton(bx, btnY, '重新提单', PALETTE.accentBg, 'retry-handoff-alert', item) + 2
       } else if (item.canOpenSettings) {

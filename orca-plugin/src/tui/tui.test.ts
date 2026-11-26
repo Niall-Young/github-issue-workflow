@@ -18,9 +18,11 @@ import {
 } from './commands'
 import { InputParser } from './input'
 import {
+  buildSystemHealthAlerts,
   extractGithubIssueNumbers,
   extractTerminalQuestion,
   hasHandoffCreatedIssue,
+  inspectLocalBranchSync,
   isHandoffSessionTitle,
   type CommandRunner
 } from '../board-data'
@@ -31,6 +33,7 @@ import {
   parseAgentLaunchResult,
   stopAutopilot,
   submitIssueFromTui,
+  syncDivergedBranchFromTui,
   type PendingHandoff
 } from './orca-cli'
 import { IssueBoardTui } from './app'
@@ -1665,4 +1668,89 @@ test('detectAutopilotRunning and stopAutopilot call orca automation and admin st
   assert.equal(calls[0]?.args[1], 'stop')
   assert.equal(calls[0]?.args[2], '--repo-path')
   assert.equal(calls[0]?.args[3], '/tmp/demo-app')
+})
+
+test('inspectLocalBranchSync and diverged branch alert render one-click sync button and launch agent on conflict', async () => {
+  const divergedRunner: CommandRunner = async (cmd, args) => {
+    if (cmd === 'git' && args.includes('--show-current')) {
+      return { exitCode: 0, stdout: 'main\n', stderr: '' }
+    }
+    if (cmd === 'git' && args.includes('--verify')) {
+      return { exitCode: 0, stdout: 'abc123\n', stderr: '' }
+    }
+    if (cmd === 'git' && args.includes('--left-right')) {
+      return { exitCode: 0, stdout: '2\t2\n', stderr: '' }
+    }
+    if (cmd === 'git' && args.includes('merge-tree')) {
+      return { exitCode: 1, stdout: 'CONFLICT (content): Merge conflict in README.md\n', stderr: '' }
+    }
+    if (cmd === 'git' && args.includes('--porcelain')) {
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+  }
+
+  const sync = await inspectLocalBranchSync('/tmp/demo-app', divergedRunner)
+  assert.deepEqual(sync, {
+    branch: 'main',
+    ahead: 2,
+    behind: 2,
+    hasConflict: true,
+    dirty: false
+  })
+
+  const alerts = buildSystemHealthAlerts({
+    repository: 'owner/demo-app',
+    autopilotInstalled: true,
+    branchSync: sync,
+    ledgerRows: [],
+    githubIssues: []
+  })
+  const branchAlert = alerts.find((a) => a.id === 'alert-branch-diverged')
+  assert.ok(branchAlert)
+  assert.equal(branchAlert.badge, '分支冲突')
+  assert.deepEqual(branchAlert.syncBranch, sync)
+
+  const state = makeBaseState('')
+  state.snapshot = {
+    ...makeSampleSnapshot(),
+    needsYou: [branchAlert]
+  }
+  const buf = renderTui(state, 120, 30)
+  const syncBox = buf.hitBoxes.find((b) => b.action === 'sync-diverged-branch')
+  assert.ok(syncBox, 'expected 一键自动合并 hitbox for diverged branch alert')
+
+  // Conflict-free clean branch uses deterministic rebase directly without launching an agent
+  const rebaseCalls: string[] = []
+  const cleanRes = await syncDivergedBranchFromTui({
+    repoPath: '/tmp/demo-app',
+    syncBranch: { branch: 'main', ahead: 1, behind: 1, hasConflict: false, dirty: false },
+    defaultAgent: 'codex',
+    runner: async (cmd, args) => {
+      rebaseCalls.push(`${cmd} ${args.join(' ')}`)
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+  })
+  assert.equal(cleanRes.mode, 'auto-rebase')
+  assert.ok(rebaseCalls.some((c) => c.includes('git -C /tmp/demo-app rebase origin/main')))
+
+  // Conflicting branch launches an Orca agent to resolve conflicts and push
+  const agentCalls: Array<{ cmd: string; args: string[] }> = []
+  const conflictRes = await syncDivergedBranchFromTui({
+    repoPath: '/tmp/demo-app',
+    syncBranch: sync!,
+    defaultAgent: 'codex',
+    runner: async (cmd, args) => {
+      agentCalls.push({ cmd, args })
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'launch') {
+        return { exitCode: 0, stdout: '{"ok":true}', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+  })
+  assert.equal(conflictRes.mode, 'agent-launched')
+  const launch = agentCalls.find((c) => c.cmd === 'orca' && c.args[1] === 'launch')
+  assert.ok(launch)
+  assert.ok(launch.args.includes('--agent'))
+  assert.ok(launch.args.includes('codex'))
 })

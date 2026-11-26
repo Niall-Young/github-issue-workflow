@@ -18,6 +18,7 @@ import {
   getAutopilotStateRoot,
   hasAutopilotReceipt,
   hasHandoffCreatedIssue,
+  inspectLocalBranchSync,
   isHandoffSessionTitle,
   listInstalledAgents,
   mergeBoardItems,
@@ -29,6 +30,7 @@ import {
 } from '../board-data'
 import type {
   BoardSnapshot,
+  BranchSyncStatus,
   CreateIssueResult,
   InProgressItem,
   IssueKind,
@@ -451,14 +453,15 @@ export async function loadBoardSnapshot(
   const repository = gitInfo.repository
   const autopilot = findAutopilotConfigForRepo(repoPath, repository)
 
-  const [ledgerRows, ghResult, pullRequests, agentState, installedAgents, autopilotRunning] =
+  const [ledgerRows, ghResult, pullRequests, agentState, installedAgents, autopilotRunning, branchSync] =
     await Promise.all([
       autopilot ? readLedgerIssues(autopilot.dbPath, runner) : Promise.resolve([]),
       fetchGithubIssuesWithStatus(repoPath, runner),
       fetchGithubPullRequests(repoPath, runner),
       collectOrcaAgentState(repoPath, runner),
       listInstalledAgents(runner),
-      detectAutopilotRunning(autopilot, runner)
+      detectAutopilotRunning(autopilot, runner),
+      inspectLocalBranchSync(repoPath, runner)
     ])
   const githubIssues = ghResult.issues
 
@@ -876,6 +879,7 @@ export async function loadBoardSnapshot(
     pollIntervalSeconds: autopilot?.pollIntervalSeconds,
     maxConcurrentWorkers: autopilot?.maxConcurrentWorkers,
     githubError: ghResult.error,
+    branchSync,
     ledgerRows,
     githubIssues,
     nowMs: now
@@ -1140,6 +1144,77 @@ export async function stopAutopilot(params: {
     throw new Error(res.stderr.trim() || res.stdout.trim() || '暂停自动处理循环失败')
   }
   return '已暂停自动处理循环（保留状态，可随时重新开启）'
+}
+
+export async function syncDivergedBranchFromTui(params: {
+  repoPath: string
+  syncBranch: BranchSyncStatus
+  defaultAgent: string | null
+  runner?: CommandRunner
+}): Promise<{ mode: 'auto-rebase' | 'agent-launched'; message: string }> {
+  const runner = params.runner ?? defaultRunner
+  const { branch, hasConflict, dirty } = params.syncBranch
+  const remoteRef = `origin/${branch}`
+
+  if (!hasConflict && !dirty) {
+    const fetchRes = await runner('git', ['-C', params.repoPath, 'fetch', 'origin'], {
+      timeoutMs: 15_000
+    })
+    if (fetchRes.exitCode === 0) {
+      const rebaseRes = await runner('git', ['-C', params.repoPath, 'rebase', remoteRef], {
+        timeoutMs: 20_000
+      })
+      if (rebaseRes.exitCode === 0) {
+        return {
+          mode: 'auto-rebase',
+          message: `已自动将本地 ${branch} 变基同步到 ${remoteRef}`
+        }
+      }
+      await runner('git', ['-C', params.repoPath, 'rebase', '--abort'], { timeoutMs: 5_000 })
+    }
+  }
+
+  const agent = await resolvePreferredAgent(params.defaultAgent, runner)
+  const prompt = [
+    `当前仓库（${params.repoPath}）的本地分支 \`${branch}\` 与远端 \`${remoteRef}\` 分叉（本地领先 ${params.syncBranch.ahead} 个提交、落后 ${params.syncBranch.behind} 个提交）。`,
+    '请帮用户全自动安全同步，不要丢弃用户的任何未提交改动或本地提交：',
+    '1. 先检查 `git status` 与 `git log --left-right --oneline HEAD...origin/' + branch + '`。',
+    '2. 若有未提交改动先妥善保存（如 `git stash push -u`），再执行 `git fetch origin` 与 `git rebase origin/' + branch + '`（若不适合 rebase 可改用 `git merge origin/' + branch + '`）。',
+    '3. 逐一解决所有冲突，同时保留本地与远端的有效改动。',
+    '4. 冲突解完后恢复之前的暂存改动（如有），并运行仓库测试验证通过。',
+    '5. 若工作区干净且测试全部通过，把同步后的 `' + branch + '` 推送到 `origin`，让后续自动同步恢复正常；若遇到需要人工拍板的语义冲突，向用户简明说明。'
+  ].join('\n')
+
+  const launchRes = await runner(
+    'orca',
+    [
+      'agent',
+      'launch',
+      '--agent',
+      agent,
+      '--worktree',
+      `path:${params.repoPath}`,
+      '--surface',
+      'terminal',
+      '--prompt',
+      prompt,
+      '--json'
+    ],
+    { cwd: params.repoPath, timeoutMs: 25_000 }
+  )
+
+  if (launchRes.exitCode !== 0) {
+    throw new Error(
+      launchRes.stderr.trim() ||
+        launchRes.stdout.trim() ||
+        '无法启动 Agent 自动解冲突，请确认 Orca 正在运行'
+    )
+  }
+
+  return {
+    mode: 'agent-launched',
+    message: `已启动 ${agent} 自动合并 ${branch} 并解决冲突`
+  }
 }
 
 export async function openUrlInBrowser(

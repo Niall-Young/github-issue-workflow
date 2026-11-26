@@ -1911,11 +1911,30 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("feat/user-work", current_branch)
         self.assertEqual("in progress\n", (self.repo / "wip.txt").read_text(encoding="utf-8"))
 
-    def test_sync_local_base_branch_refuses_diverged_local_commits(self) -> None:
+    def test_sync_local_base_branch_auto_rebases_clean_conflict_free_diverged_commits(self) -> None:
         _, remote_head = self._setup_remote_with_ahead_commit()
         (self.repo / "local-only.txt").write_text("mine\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(self.repo), "add", "local-only.txt"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-m", "local diverged"], check=True,
+                       stdout=subprocess.PIPE)
+
+        result = WATCHER.sync_local_base_branch(self.repo, "main", fetch=True)
+        self.assertEqual("synced", result["status"])
+        self.assertEqual("auto-rebase", result["mode"])
+        self.assertEqual(1, result["ahead"])
+        self.assertEqual(1, result["behind"])
+        self.assertEqual("from remote PR\n", (self.repo / "remote-merged.txt").read_text(encoding="utf-8"))
+        self.assertEqual("mine\n", (self.repo / "local-only.txt").read_text(encoding="utf-8"))
+        parent = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD~1"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual(remote_head, parent)
+
+    def test_sync_local_base_branch_refuses_conflicting_diverged_local_commits(self) -> None:
+        _, remote_head = self._setup_remote_with_ahead_commit()
+        (self.repo / "remote-merged.txt").write_text("conflicting local edit\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "remote-merged.txt"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-m", "local conflict"], check=True,
                        stdout=subprocess.PIPE)
         local_before = subprocess.run(
             ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
@@ -1923,6 +1942,8 @@ class IssueWatcherTests(unittest.TestCase):
 
         result = WATCHER.sync_local_base_branch(self.repo, "main", fetch=True)
         self.assertEqual("diverged", result["status"])
+        self.assertTrue(result.get("conflict"))
+        self.assertIn("remote-merged.txt", result.get("conflict_files", []))
         self.assertEqual(1, result["ahead"])
         self.assertEqual(1, result["behind"])
         local_after = subprocess.run(
@@ -1930,6 +1951,7 @@ class IssueWatcherTests(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(local_before, local_after)
         self.assertNotEqual(remote_head, local_after)
+        self.assertFalse(WATCHER._git_operation_in_progress(self.repo))
 
     def test_reconcile_pull_requests_syncs_local_main_after_merge_and_respects_disable_flag(self) -> None:
         _, remote_head = self._setup_remote_with_ahead_commit()

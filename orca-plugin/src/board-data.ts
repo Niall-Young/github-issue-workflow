@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import type {
   AttachmentPayload,
   BoardSnapshot,
+  BranchSyncStatus,
   CompletedItem,
   CreateIssueInput,
   CreateIssueResult,
@@ -955,6 +956,53 @@ export function extractTerminalQuestion(rawOutput: string): string {
   return lines.slice(-8).join('\n').slice(0, 700)
 }
 
+export async function inspectLocalBranchSync(
+  repoPath: string,
+  runner: CommandRunner = defaultRunner
+): Promise<BranchSyncStatus | null> {
+  const branchRes = await runner('git', ['-C', repoPath, 'branch', '--show-current'], {
+    timeoutMs: 3_000
+  })
+  if (branchRes.exitCode !== 0) return null
+  const branch = branchRes.stdout.trim()
+  if (!branch) return null
+
+  const remoteRef = `refs/remotes/origin/${branch}`
+  const verifyRes = await runner('git', ['-C', repoPath, 'rev-parse', '--verify', remoteRef], {
+    timeoutMs: 3_000
+  })
+  if (verifyRes.exitCode !== 0) return null
+
+  const countRes = await runner(
+    'git',
+    ['-C', repoPath, 'rev-list', '--left-right', '--count', `HEAD...${remoteRef}`],
+    { timeoutMs: 3_000 }
+  )
+  if (countRes.exitCode !== 0) return null
+  const parts = countRes.stdout.trim().split(/\s+/)
+  if (parts.length !== 2) return null
+  const ahead = Number(parts[0])
+  const behind = Number(parts[1])
+  if (!Number.isFinite(ahead) || !Number.isFinite(behind) || ahead <= 0 || behind <= 0) {
+    return null
+  }
+
+  const [mergeTreeRes, statusRes] = await Promise.all([
+    runner('git', ['-C', repoPath, 'merge-tree', '--write-tree', 'HEAD', remoteRef], {
+      timeoutMs: 5_000
+    }),
+    runner('git', ['-C', repoPath, 'status', '--porcelain'], { timeoutMs: 3_000 })
+  ])
+
+  return {
+    branch,
+    ahead,
+    behind,
+    hasConflict: mergeTreeRes.exitCode !== 0,
+    dirty: statusRes.exitCode !== 0 || statusRes.stdout.trim().length > 0
+  }
+}
+
 export function buildSystemHealthAlerts(params: {
   repository: string | null
   autopilotInstalled: boolean
@@ -962,6 +1010,7 @@ export function buildSystemHealthAlerts(params: {
   pollIntervalSeconds?: number | null
   maxConcurrentWorkers?: number | null
   githubError?: string | null
+  branchSync?: BranchSyncStatus | null
   ledgerRows: readonly LedgerIssueRow[]
   githubIssues: readonly GithubIssueRow[]
   nowMs?: number
@@ -969,6 +1018,25 @@ export function buildSystemHealthAlerts(params: {
   const nowMs = params.nowMs ?? Date.now()
   const nowIso = new Date(nowMs).toISOString()
   const alerts: Array<Extract<NeedsYouItem, { kind: 'system-alert' }>> = []
+
+  if (params.branchSync && params.branchSync.ahead > 0 && params.branchSync.behind > 0) {
+    const sync = params.branchSync
+    alerts.push({
+      id: 'alert-branch-diverged',
+      kind: 'system-alert',
+      severity: sync.hasConflict ? 'error' : 'warning',
+      badge: sync.hasConflict ? '分支冲突' : '分支分叉',
+      title: `本地 ${sync.branch} 与远端分叉（领先 ${sync.ahead} / 落后 ${sync.behind}）`,
+      reason: sync.hasConflict
+        ? '本地未推送提交与远端新合并代码存在冲突，直接推送会被拒绝。点击「一键自动合并」交由 Agent 自动解冲突并同步。'
+        : sync.dirty
+          ? '本地有未提交改动，后台暂未自动同步。点击「一键自动合并」交由 Agent 安全合并并同步。'
+          : '本地与远端无文件冲突，点击「一键自动合并」即可自动变基同步。',
+      updatedAt: nowIso,
+      canDismiss: true,
+      syncBranch: sync
+    })
+  }
 
   if (params.githubError && params.repository) {
     const errText = params.githubError.trim()

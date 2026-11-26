@@ -24,6 +24,14 @@ export type SavedAttachment = {
   path: string
 }
 
+export type BranchSyncStatus = {
+  branch: string
+  ahead: number
+  behind: number
+  hasConflict: boolean
+  dirty: boolean
+}
+
 export type NeedsYouItem =
   | {
       id: string
@@ -60,6 +68,7 @@ export type NeedsYouItem =
       canDismiss: boolean
       canOpenSettings?: boolean
       retryTitle?: string | null
+      syncBranch?: BranchSyncStatus | null
     }
 
 export type InProgressItem = {

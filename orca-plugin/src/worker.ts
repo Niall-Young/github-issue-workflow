@@ -7,6 +7,7 @@ import {
   findAutopilotConfigForRepo,
   hasAutopilotReceipt,
   hasHandoffCreatedIssue,
+  inspectLocalBranchSync,
   isHandoffSessionTitle,
   mergeBoardItems,
   readLedgerIssues,
@@ -73,9 +74,10 @@ export default function activate(orca: OrcaWorkerApi) {
       return false
     })
 
-    const [ledgerRows, ghResult] = await Promise.all([
+    const [ledgerRows, ghResult, branchSync] = await Promise.all([
       autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
-      fetchGithubIssuesWithStatus(rootPath)
+      fetchGithubIssuesWithStatus(rootPath),
+      inspectLocalBranchSync(rootPath)
     ])
     const githubIssues = ghResult.issues
     const activeRepairRows = ledgerRows.filter(
@@ -165,6 +167,7 @@ export default function activate(orca: OrcaWorkerApi) {
       pollIntervalSeconds: autopilot?.pollIntervalSeconds,
       maxConcurrentWorkers: autopilot?.maxConcurrentWorkers,
       githubError: ghResult.error,
+      branchSync,
       ledgerRows,
       githubIssues
     })

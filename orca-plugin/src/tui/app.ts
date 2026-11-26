@@ -30,6 +30,7 @@ import {
   saveAgentConfig,
   stopAutopilot,
   submitIssueFromTui,
+  syncDivergedBranchFromTui,
   type PendingHandoff
 } from './orca-cli'
 import {
@@ -534,6 +535,11 @@ export class IssueBoardTui {
         this.render()
         return
       }
+      case 'sync-diverged-branch': {
+        const item = payload as Extract<NeedsYouItem, { kind: 'system-alert' }>
+        void this.handleSyncDivergedBranch(item)
+        return
+      }
       case 'reply-paste-image':
         void this.handlePasteClipboardImage()
         return
@@ -989,6 +995,29 @@ export class IssueBoardTui {
     this.render()
     try {
       await runIssueAdminAction(repoPath, item.url, action)
+      void this.refresh(true)
+    } catch (err) {
+      this.showError(err instanceof Error ? err.message : String(err))
+    } finally {
+      this.state.busyIds.delete(item.id)
+      this.render()
+    }
+  }
+
+  private async handleSyncDivergedBranch(
+    item: Extract<NeedsYouItem, { kind: 'system-alert' }>
+  ) {
+    if (!item.syncBranch || this.state.busyIds.has(item.id)) return
+    const snap = this.state.snapshot
+    const repoPath = snap?.repoPath || this.targetPath
+    this.state.busyIds.add(item.id)
+    this.render()
+    try {
+      await syncDivergedBranchFromTui({
+        repoPath,
+        syncBranch: item.syncBranch,
+        defaultAgent: snap?.defaultAgent ?? snap?.preferredAgent ?? null
+      })
       void this.refresh(true)
     } catch (err) {
       this.showError(err instanceof Error ? err.message : String(err))

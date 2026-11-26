@@ -1393,6 +1393,77 @@ class IssueWatcherTests(unittest.TestCase):
                 self.assertEqual("needs-human", updated[0]["status"])
                 self.assertIn(expected_text, updated[0]["summary"])
 
+    def test_reconcile_preserves_autopilot_result_when_worker_exits_failed(self) -> None:
+        config = self.config()
+        ledger = self.ledger(attempts=2)
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        run_id = str(uuid.uuid4())
+        worktree_path = str(self.root / "wt-issue-1")
+        branch = "Niall-Young/issue-1-attempt-1"
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"],
+            run_id=run_id, agent_id="codex",
+            orca_task_id="task_1", orca_dispatch_id="ctx_failed_receipt",
+            orca_worktree_id=f"repo::{worktree_path}",
+            worktree_path=worktree_path, branch=branch,
+        )
+        receipt_line = "AUTOPILOT_RESULT: " + json.dumps({
+            "status": "needs-human",
+            "summary": "页面代码不在当前分支，请确认目标仓库路径。",
+            "run_id": run_id,
+            "worktree_path": worktree_path,
+            "branch": branch,
+        }, ensure_ascii=False)
+
+        def fake_orca(_cfg, *args):
+            if args[:2] == ("orchestration", "worker-show"):
+                return {"ok": True, "result": {"dispatchId": "ctx_failed_receipt", "state": "failed"}}
+            if args[:2] == ("orchestration", "worker-read"):
+                return {"ok": True, "result": {"output": f"log line\n{receipt_line}\n"}}
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(WATCHER, "orca_call", side_effect=fake_orca):
+            completed = WATCHER.reconcile_workers(config, ledger)
+
+        self.assertEqual(1, len(completed))
+        self.assertEqual("needs-human", completed[0]["status"])
+        self.assertEqual("页面代码不在当前分支，请确认目标仓库路径。", completed[0]["summary"])
+        snapshot = ledger.snapshot()
+        self.assertEqual("needs-human", snapshot["issues"][0]["status"])
+        self.assertEqual("页面代码不在当前分支，请确认目标仓库路径。", snapshot["issues"][0]["summary"])
+
+    def test_reconcile_reports_last_error_when_failed_worker_has_no_receipt(self) -> None:
+        config = self.config()
+        ledger = self.ledger(attempts=2)
+        ledger.enqueue(self.issue())
+        claimed = ledger.claim_next()
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"],
+            run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task_2", orca_dispatch_id="ctx_failed_no_receipt",
+            orca_worktree_id="repo::/tmp/wt-2",
+            worktree_path="/tmp/wt-2", branch="Niall-Young/issue-1-attempt-1",
+        )
+
+        def fake_orca(_cfg, *args):
+            if args[:2] == ("orchestration", "worker-show"):
+                return {"ok": True, "result": {
+                    "dispatchId": "ctx_failed_no_receipt",
+                    "state": "failed",
+                    "lastError": "agent_crashed",
+                }}
+            if args[:2] == ("orchestration", "worker-read"):
+                return {"ok": True, "result": {"output": "fatal crash"}}
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(WATCHER, "orca_call", side_effect=fake_orca):
+            completed = WATCHER.reconcile_workers(config, ledger)
+
+        self.assertEqual(1, len(completed))
+        self.assertEqual("failed", completed[0]["status"])
+        self.assertEqual("Orca worker failed (agent_crashed)", completed[0]["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

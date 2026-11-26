@@ -212,11 +212,66 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 5px 10px;
   border-bottom: 1px solid var(--tui-border);
   background: var(--tui-surface-alt);
   font-weight: 600;
   flex-shrink: 0;
+}
+
+.tui-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tui-tab {
+  appearance: none;
+  font-family: var(--tui-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tui-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+
+.tui-tab:hover {
+  color: var(--tui-fg);
+  background: var(--tui-surface);
+}
+
+.tui-tab.active {
+  color: var(--tui-accent);
+  border-color: var(--tui-accent);
+  background: color-mix(in srgb, var(--tui-accent) 12%, var(--tui-surface));
+}
+
+.tui-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border: 1px solid var(--tui-border);
+  font-size: 11px;
+  color: var(--tui-muted);
+  white-space: nowrap;
+}
+
+.tui-badge.ok {
+  color: var(--tui-green);
+  border-color: color-mix(in srgb, var(--tui-green) 45%, var(--tui-border));
+}
+
+.tui-badge.warn {
+  color: var(--tui-amber);
+  border-color: color-mix(in srgb, var(--tui-amber) 45%, var(--tui-border));
+}
+
+.tui-badge.err {
+  color: var(--tui-red);
+  border-color: color-mix(in srgb, var(--tui-red) 45%, var(--tui-border));
 }
 
 .tui-pane-body {

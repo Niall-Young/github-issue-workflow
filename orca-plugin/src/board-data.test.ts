@@ -6,11 +6,14 @@ import {
   buildHandoffPrompt,
   buildIssueBody,
   extractTerminalQuestion,
+  fetchGithubPullRequests,
   findBundledHandoffSkill,
   mergeBoardItems,
+  normalizePullRequests,
   parseGithubRepoFromRemote,
   resolvePreferredAgent,
-  saveAttachmentsLocally
+  saveAttachmentsLocally,
+  summarizePrChecks
 } from './board-data'
 
 test('parseGithubRepoFromRemote handles SSH and HTTPS GitHub URLs', () => {
@@ -237,4 +240,78 @@ test('findBundledHandoffSkill locates sibling SKILL.md and issue-templates.md', 
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('summarizePrChecks and normalizePullRequests classify CI and sort OPEN PRs first', async () => {
+  assert.equal(summarizePrChecks([]), 'none')
+  assert.equal(summarizePrChecks([{ status: 'COMPLETED', conclusion: 'SUCCESS' }]), 'passing')
+  assert.equal(summarizePrChecks([{ status: 'IN_PROGRESS' }]), 'pending')
+  assert.equal(
+    summarizePrChecks([
+      { status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { status: 'COMPLETED', conclusion: 'FAILURE' }
+    ]),
+    'failing'
+  )
+
+  const normalized = normalizePullRequests([
+    {
+      number: 10,
+      title: '已合并的旧 PR',
+      state: 'MERGED',
+      isDraft: false,
+      url: 'https://github.com/owner/repo/pull/10',
+      headRefName: 'fix/old',
+      baseRefName: 'main',
+      author: { login: 'alice' },
+      mergeable: 'UNKNOWN',
+      reviewDecision: 'APPROVED',
+      statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      updatedAt: '2026-11-26T06:00:00Z',
+      mergedAt: '2026-11-26T06:00:00Z'
+    },
+    {
+      number: 12,
+      title: '正在运行的 PR',
+      state: 'OPEN',
+      isDraft: true,
+      url: 'https://github.com/owner/repo/pull/12',
+      headRefName: 'feat/new',
+      baseRefName: 'main',
+      author: { login: 'bob' },
+      mergeable: 'MERGEABLE',
+      reviewDecision: null,
+      statusCheckRollup: [{ status: 'IN_PROGRESS' }],
+      updatedAt: '2026-11-26T05:00:00Z',
+      mergedAt: null
+    }
+  ])
+
+  assert.equal(normalized.length, 2)
+  assert.equal(normalized[0].number, 12)
+  assert.equal(normalized[0].ciStatus, 'pending')
+  assert.equal(normalized[0].isDraft, true)
+  assert.equal(normalized[1].number, 10)
+  assert.equal(normalized[1].ciStatus, 'passing')
+
+  const fetched = await fetchGithubPullRequests('/tmp/repo', async () => ({
+    stdout: JSON.stringify([
+      {
+        number: 15,
+        title: 'PR from gh',
+        state: 'OPEN',
+        url: 'https://github.com/owner/repo/pull/15',
+        headRefName: 'issue-9',
+        baseRefName: 'main',
+        author: { login: 'dev' },
+        statusCheckRollup: [],
+        updatedAt: '2026-11-26T07:00:00Z'
+      }
+    ]),
+    stderr: '',
+    exitCode: 0
+  }))
+  assert.equal(fetched.length, 1)
+  assert.equal(fetched[0].number, 15)
+  assert.equal(fetched[0].ciStatus, 'none')
 })

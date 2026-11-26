@@ -187,7 +187,8 @@ export default function activate(orca: OrcaWorkerApi) {
         error: '请先在 Orca 左侧选择一个 Git 项目工作区。',
         needsYou: [],
         inProgress: [],
-        completed: []
+        completed: [],
+        pullRequests: []
       }
     }
 
@@ -196,9 +197,10 @@ export default function activate(orca: OrcaWorkerApi) {
     const repository = input?.repository || gitInfo.repository
     const autopilot = findAutopilotConfigForRepo(repoPath, repository)
 
-    const [ledgerRows, githubIssues, agentState] = await Promise.all([
+    const [ledgerRows, githubIssues, pullRequests, agentState] = await Promise.all([
       autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
       fetchGithubIssues(repoPath),
+      fetchGithubPullRequests(repoPath),
       collectAgentState(projectId, repoPath, workspaces)
     ])
 
@@ -219,7 +221,8 @@ export default function activate(orca: OrcaWorkerApi) {
       error: null,
       needsYou: merged.needsYou,
       inProgress: [...activeHandoffs, ...merged.inProgress],
-      completed: merged.completed
+      completed: merged.completed,
+      pullRequests
     }
   }
 

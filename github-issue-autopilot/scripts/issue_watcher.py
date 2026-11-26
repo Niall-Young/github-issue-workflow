@@ -2025,8 +2025,8 @@ def reconcile_workers(
             continue
         receipt = None
         receipt_output = ""
-        if (state == "failed" and
-                find_named_string(show, {"lastError", "last_error"}) == "agent_prompt_stalled"):
+        last_error = find_named_string(show, {"lastError", "last_error"})
+        if state == "failed" and last_error == "agent_prompt_stalled":
             try:
                 output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
                                    "--source", "auto", "--limit", "200")
@@ -2039,7 +2039,20 @@ def reconcile_workers(
                            for line in receipt_output.splitlines()):
                     continue
             state = "completed"
-        status, summary, evidence = "failed", "Orca worker failed or stopped", {}
+        elif state == "failed":
+            try:
+                output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
+                                   "--source", "auto", "--limit", "200")
+                receipt_output = string_content(output)
+                receipt = parse_receipt(receipt_output)
+            except WatcherError:
+                receipt = None
+            if receipt is not None:
+                state = "completed"
+        default_fail_summary = (
+            f"Orca worker failed ({last_error})" if last_error else "Orca worker failed or stopped"
+        )
+        status, summary, evidence = "failed", default_fail_summary, {}
         if state == "completed":
             if receipt is None and not receipt_output:
                 output = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,

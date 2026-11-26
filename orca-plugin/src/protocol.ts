@@ -43,6 +43,7 @@ export type NeedsYouItem =
       title: string
       reason: string
       url: string
+      prUrl?: string | null
       rawStatus: string
       updatedAt: string
       canRetry: boolean
@@ -54,6 +55,7 @@ export type InProgressItem = {
   issueNumber: number | null
   title: string
   url: string
+  prUrl?: string | null
   statusLabel: string
   updatedAt: string
 }
@@ -68,6 +70,24 @@ export type CompletedItem = {
   completedAt: string
 }
 
+export type PullRequestCheckState = 'passing' | 'failing' | 'pending' | 'none'
+
+export type PullRequestItem = {
+  number: number
+  title: string
+  state: 'OPEN' | 'MERGED' | 'CLOSED'
+  isDraft: boolean
+  url: string
+  headRefName: string
+  baseRefName: string
+  author: string | null
+  mergeable: string | null
+  reviewDecision: string | null
+  ciStatus: PullRequestCheckState
+  updatedAt: string
+  mergedAt: string | null
+}
+
 export type BoardSnapshot = {
   projectName: string
   repository: string | null
@@ -79,6 +99,7 @@ export type BoardSnapshot = {
   needsYou: NeedsYouItem[]
   inProgress: InProgressItem[]
   completed: CompletedItem[]
+  pullRequests: PullRequestItem[]
 }
 
 export type CreateIssueInput = {

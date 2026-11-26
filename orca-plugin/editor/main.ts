@@ -3,6 +3,7 @@ import type {
   BoardSnapshot,
   IssueKind,
   NeedsYouItem,
+  PullRequestItem,
   SubmitMode
 } from '../src/protocol'
 import { BOARD_STYLES } from './styles'
@@ -30,6 +31,7 @@ type UIState = {
   submitting: boolean
   enablingAutopilot: boolean
   busyItemIds: Set<string>
+  activeTab: 'issues' | 'prs'
   kind: IssueKind
   submitMode: SubmitMode
   titleDraft: string
@@ -49,6 +51,7 @@ const state: UIState = {
   submitting: false,
   enablingAutopilot: false,
   busyItemIds: new Set(),
+  activeTab: 'issues',
   kind: 'feature',
   submitMode: 'handoff',
   titleDraft: '',
@@ -610,19 +613,148 @@ function renderComposer(): HTMLElement {
   return box
 }
 
+function renderPullRequestRow(pr: PullRequestItem): HTMLElement {
+  const row = el('div', 'tui-row')
+  const main = el('div', 'tui-row-main')
+  const line = el('div', 'tui-row-line')
+
+  const glyphClass =
+    pr.state === 'MERGED'
+      ? 'tui-glyph-ok'
+      : pr.state === 'OPEN'
+        ? pr.isDraft
+          ? 'tui-row-num'
+          : 'tui-glyph-run'
+        : 'tui-row-num'
+  const glyph = pr.state === 'MERGED' ? '✓' : pr.state === 'OPEN' ? '⎇' : '×'
+
+  line.append(
+    el('span', glyphClass, glyph),
+    el('span', 'tui-row-num', `#${pr.number}`),
+    el('span', 'tui-row-title', pr.title)
+  )
+  main.append(line)
+
+  const branchText =
+    pr.headRefName && pr.baseRefName
+      ? `${pr.headRefName} → ${pr.baseRefName}`
+      : pr.headRefName || pr.baseRefName
+  const subParts: string[] = []
+  if (branchText) subParts.push(branchText)
+  if (pr.author) subParts.push(`@${pr.author}`)
+  if (pr.state === 'MERGED') subParts.push('已合并')
+  else if (pr.state === 'CLOSED') subParts.push('已关闭')
+  if (subParts.length > 0) {
+    main.append(el('div', 'tui-row-sub', subParts.join(' · ')))
+  }
+
+  const meta = el('div', 'tui-row-meta')
+  if (pr.state === 'OPEN') {
+    if (pr.isDraft) {
+      meta.append(el('span', 'tui-badge', 'DRAFT'))
+    }
+    if (pr.mergeable === 'CONFLICTING') {
+      meta.append(el('span', 'tui-badge err', '有冲突'))
+    }
+    if (pr.ciStatus === 'passing') {
+      meta.append(el('span', 'tui-badge ok', 'CI ✓'))
+    } else if (pr.ciStatus === 'failing') {
+      meta.append(el('span', 'tui-badge err', 'CI ✗'))
+    } else if (pr.ciStatus === 'pending') {
+      meta.append(el('span', 'tui-badge warn', 'CI ◌'))
+    }
+  }
+  const rel = formatRelativeTime(pr.mergedAt || pr.updatedAt)
+  if (rel) meta.append(el('span', undefined, rel))
+  if (pr.url) {
+    const openBtn = el('button', 'tui-btn tui-btn-link', pr.state === 'OPEN' ? '[打开 PR]' : '[查看]')
+    openBtn.addEventListener('click', () => openExternalUrl(pr.url))
+    meta.append(openBtn)
+  }
+
+  row.append(main, meta)
+  return row
+}
+
 function renderLeftPane(snap: BoardSnapshot | null): HTMLElement {
   const pane = el('section', 'tui-pane')
   const inProgress = snap?.inProgress ?? []
   const completed = snap?.completed ?? []
+  const pullRequests = snap?.pullRequests ?? []
+  const openPrs = pullRequests.filter((pr) => pr.state === 'OPEN')
+  const closedPrs = pullRequests.filter((pr) => pr.state !== 'OPEN')
 
   const head = el('div', 'tui-pane-head')
-  head.append(
-    el('span', undefined, '▸ 任务'),
-    el('span', 'tui-repo', `进行中 ${inProgress.length} · 已完成 ${completed.length}`)
+  const tabs = el('div', 'tui-tabs')
+  const issueTab = el(
+    'button',
+    `tui-tab${state.activeTab === 'issues' ? ' active' : ''}`,
+    `▸ Issues (${inProgress.length + completed.length})`
   )
+  issueTab.type = 'button'
+  issueTab.addEventListener('click', () => {
+    state.activeTab = 'issues'
+    render()
+  })
+
+  const prTab = el(
+    'button',
+    `tui-tab${state.activeTab === 'prs' ? ' active' : ''}`,
+    `⎇ PRs (${openPrs.length}/${pullRequests.length})`
+  )
+  prTab.type = 'button'
+  prTab.addEventListener('click', () => {
+    state.activeTab = 'prs'
+    render()
+  })
+  tabs.append(issueTab, prTab)
+
+  const summaryText =
+    state.activeTab === 'issues'
+      ? `进行中 ${inProgress.length} · 已完成 ${completed.length}`
+      : `打开中 ${openPrs.length} · 历史 ${closedPrs.length}`
+  head.append(tabs, el('span', 'tui-repo', summaryText))
   pane.append(head)
 
   const body = el('div', 'tui-pane-body')
+
+  if (state.activeTab === 'prs') {
+    const openWrap = el('div')
+    const openHead = el('div', 'tui-sec-title')
+    openHead.append(el('span', undefined, `打开中 PR (${openPrs.length})`))
+    openWrap.append(openHead)
+
+    if (openPrs.length === 0) {
+      openWrap.append(el('div', 'tui-empty', '当前没有打开中的 Pull Request'))
+    } else {
+      const rows = el('div', 'tui-rows')
+      for (const pr of openPrs) {
+        rows.append(renderPullRequestRow(pr))
+      }
+      openWrap.append(rows)
+    }
+    body.append(openWrap)
+
+    const histWrap = el('div')
+    const histHead = el('div', 'tui-sec-title')
+    histHead.append(el('span', undefined, `已合并 / 已关闭 PR (${closedPrs.length})`))
+    histWrap.append(histHead)
+
+    if (closedPrs.length === 0) {
+      histWrap.append(el('div', 'tui-empty', '已合并或关闭的 PR 会显示在这里'))
+    } else {
+      const rows = el('div', 'tui-rows')
+      for (const pr of closedPrs) {
+        rows.append(renderPullRequestRow(pr))
+      }
+      histWrap.append(rows)
+    }
+    body.append(histWrap)
+
+    pane.append(body)
+    return pane
+  }
+
   body.append(renderComposer())
 
   // In progress
@@ -650,6 +782,11 @@ function renderLeftPane(snap: BoardSnapshot | null): HTMLElement {
       meta.append(el('span', undefined, item.statusLabel))
       const rel = formatRelativeTime(item.updatedAt)
       if (rel) meta.append(el('span', undefined, rel))
+      if (item.prUrl) {
+        const prBtn = el('button', 'tui-btn tui-btn-link', '[PR]')
+        prBtn.addEventListener('click', () => openExternalUrl(item.prUrl!))
+        meta.append(prBtn)
+      }
       if (item.url) {
         const openBtn = el('button', 'tui-btn tui-btn-link', '[打开]')
         openBtn.addEventListener('click', () => openExternalUrl(item.url))
@@ -686,10 +823,14 @@ function renderLeftPane(snap: BoardSnapshot | null): HTMLElement {
       const meta = el('div', 'tui-row-meta')
       const rel = formatRelativeTime(item.completedAt)
       if (rel) meta.append(el('span', undefined, rel))
-      const targetUrl = item.prUrl || item.url
-      if (targetUrl) {
-        const viewBtn = el('button', 'tui-btn tui-btn-link', '[查看]')
-        viewBtn.addEventListener('click', () => openExternalUrl(targetUrl))
+      if (item.prUrl) {
+        const prBtn = el('button', 'tui-btn tui-btn-link', '[PR]')
+        prBtn.addEventListener('click', () => openExternalUrl(item.prUrl!))
+        meta.append(prBtn)
+      }
+      if (item.url) {
+        const viewBtn = el('button', 'tui-btn tui-btn-link', '[Issue]')
+        viewBtn.addEventListener('click', () => openExternalUrl(item.url))
         meta.append(viewBtn)
       }
       const followBtn = el('button', 'tui-btn tui-btn-link', '[再提一条]')
@@ -845,6 +986,11 @@ function renderRightPane(snap: BoardSnapshot | null): HTMLElement {
         discardBtn.addEventListener('click', () => void handleIssueAction(item, 'discard'))
         actions.append(discardBtn)
       }
+      if (item.prUrl) {
+        const prBtn = el('button', 'tui-btn tui-btn-link', '[PR]')
+        prBtn.addEventListener('click', () => openExternalUrl(item.prUrl!))
+        actions.append(prBtn)
+      }
       if (item.url) {
         const linkBtn = el('button', 'tui-btn tui-btn-link', '[GitHub]')
         linkBtn.addEventListener('click', () => openExternalUrl(item.url))
@@ -865,6 +1011,7 @@ function renderFooter(): HTMLElement {
   const left = el('div', 'tui-group')
   const hints: Array<[string, string]> = [
     ['n', '提需求'],
+    ['i/p', '切Issues/PR'],
     ['r', '刷新'],
     ['1/2/3', '切换类型'],
     ['⌘V', '贴截图'],
@@ -912,7 +1059,19 @@ document.addEventListener('keydown', (e) => {
 
   if (e.key === 'n') {
     e.preventDefault()
+    if (state.activeTab !== 'issues') {
+      state.activeTab = 'issues'
+      render()
+    }
     titleInputRef?.focus()
+  } else if (e.key === 'i') {
+    e.preventDefault()
+    state.activeTab = 'issues'
+    render()
+  } else if (e.key === 'p') {
+    e.preventDefault()
+    state.activeTab = 'prs'
+    render()
   } else if (e.key === 'r') {
     e.preventDefault()
     void fetchSnapshot(false)

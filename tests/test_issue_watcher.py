@@ -432,6 +432,70 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("dispatch-1", attempt["orca_dispatch_id"])
         self.assertEqual({}, list_issues.call_args.kwargs)
 
+    def test_dispatch_accepts_concise_worker_start_receipt_with_local_workspace(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        worktree = self.root / "concise-issue-1"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", "owner/issue-1-attempt-1",
+             str(worktree), "HEAD"], check=True, stdout=subprocess.PIPE,
+        )
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-concise"
+        ), mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {
+                "dispatchId": "ctx_concise", "taskId": "task-concise",
+                "workspace": f"repo::{worktree}",
+            }},
+            {"ok": True, "result": {}},
+        ]) as orca_call:
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+        self.assertEqual("running", result["status"])
+        self.assertEqual(2, len(orca_call.call_args_list))
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("ctx_concise", attempt["orca_dispatch_id"])
+        self.assertEqual(f"repo::{worktree}", attempt["orca_worktree_id"])
+        self.assertEqual(str(worktree), attempt["worktree_path"])
+        self.assertEqual("owner/issue-1-attempt-1", attempt["branch"])
+
+    def test_dispatch_falls_back_to_orca_worktree_show_for_concise_workspace(self) -> None:
+        config = self.config()
+        ledger = self.ledger()
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        missing_path = self.root / "not-local-issue-1"
+        eligible = dict(issue, author={"login": "owner"}, labels=[])
+        with mock.patch.object(WATCHER, "github_login", return_value="owner"), mock.patch.object(
+            WATCHER, "list_issues", return_value=[eligible]
+        ), mock.patch.object(
+            WATCHER, "create_orca_task", return_value="task-show"
+        ), mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {
+                "dispatchId": "ctx_show", "taskId": "task-show",
+                "workspace": f"repo::{missing_path}",
+            }},
+            {"ok": True, "result": {"worktree": {
+                "id": f"repo::{missing_path}", "path": str(missing_path),
+                "branch": "refs/heads/owner/issue-1-attempt-1",
+            }}},
+            {"ok": True, "result": {}},
+        ]) as orca_call:
+            result = WATCHER.dispatch_one(config, ledger, "run-1", claimed)
+        self.assertEqual("running", result["status"])
+        self.assertEqual(("worktree", "show"), orca_call.call_args_list[1].args[1:3])
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual("ctx_show", attempt["orca_dispatch_id"])
+        self.assertEqual(f"repo::{missing_path}", attempt["orca_worktree_id"])
+        self.assertEqual(str(missing_path), attempt["worktree_path"])
+        self.assertEqual("owner/issue-1-attempt-1", attempt["branch"])
+
     def test_orca_identities_cannot_be_reused_by_another_attempt_or_issue(self) -> None:
         ledger = self.ledger()
         ledger.enqueue(self.issue())

@@ -1077,10 +1077,14 @@ def find_worktree(value: Any) -> dict[str, Any]:
 
 def find_worktree_id(value: Any) -> str | None:
     if isinstance(value, dict):
-        for key in ("worktreeId", "worktree_id"):
+        for key in ("worktreeId", "worktree_id", "workspace"):
             identity = value.get(key)
             if isinstance(identity, str) and "::" in identity:
                 return identity
+            if isinstance(identity, dict):
+                nested_id = identity.get("id") or identity.get("worktreeId")
+                if isinstance(nested_id, str) and "::" in nested_id:
+                    return nested_id
         if value.get("kind") == "worktree":
             identity = value.get("id")
             if isinstance(identity, str) and "::" in identity:
@@ -1485,6 +1489,34 @@ def create_blocked_worktree(config: dict[str, Any], repository: dict[str, Any], 
     return worktree if isinstance(worktree, dict) else {}
 
 
+def resolve_worker_worktree(config: dict[str, Any], response: dict[str, Any]) -> dict[str, Any] | None:
+    worktree = nested_value(
+        response,
+        ("result", "worktree"),
+        ("result", "worker", "worktree"),
+        ("result", "placement", "worktree"),
+    )
+    if isinstance(worktree, dict):
+        return worktree
+    worktree_id = find_worktree_id(response)
+    if not worktree_id:
+        return None
+    candidate_path = Path(worktree_id.split("::", 1)[1])
+    if candidate_path.is_dir():
+        try:
+            branch = git(candidate_path, "branch", "--show-current")
+        except WatcherError:
+            branch = ""
+        if branch:
+            return {"id": worktree_id, "path": str(candidate_path), "branch": branch}
+    try:
+        shown = orca_call(config, "worktree", "show", "--worktree", f"id:{worktree_id}")
+    except WatcherError:
+        return None
+    resolved = nested_value(shown, ("result", "worktree"), ("result",))
+    return resolved if isinstance(resolved, dict) else None
+
+
 def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[str, Any]) -> dict[str, Any]:
     attempt = run["attempt_number"]
     repository = next((item for item in config["repositories"] if item["repository"] == run["repository"]), None)
@@ -1516,12 +1548,11 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
         )
         dispatch_id = nested_value(response, ("result", "dispatch", "id"),
                                    ("result", "dispatchId"), ("result", "worker", "dispatchId"))
-        worktree = nested_value(response, ("result", "worktree"), ("result", "worker", "worktree"),
-                                ("result", "placement", "worktree"))
         if not isinstance(dispatch_id, str) or not dispatch_id:
             raise OrcaEvidenceError("Orca worker receipt omitted its Dispatch identity")
         ledger.ensure_orca_identity_available(run["node_id"], attempt, "orca_dispatch_id", dispatch_id)
         dispatch_identity_verified = True
+        worktree = resolve_worker_worktree(config, response)
         if not isinstance(worktree, dict):
             raise OrcaEvidenceError("Orca worker receipt omitted its worktree identity")
         worktree_id = worktree.get("id") or worktree.get("worktreeId")

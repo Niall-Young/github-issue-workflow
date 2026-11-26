@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import type { BoardSnapshot, SavedAttachment } from '../protocol'
 import {
@@ -1214,4 +1217,114 @@ test('ScreenBuffer diffOutput keeps cursor accurate across partial updates, unch
   buf3.setCursor(8, 10)
   const f5 = buf3.diffOutput(f4.lines, f4.cursor)
   assert.equal(f5.output, `\x1b[11;9H${ANSI.cursorShow}`)
+})
+
+test('ScreenBuffer diffOutput avoids bottom-right corner writes with CSI K to prevent wrap scrolling', () => {
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+  const width = 100
+  const height = 30
+
+  for (const errorNotice of [null, '剪贴板中未检测到截图']) {
+    const state = makeBaseState('')
+    state.errorNotice = errorNotice
+    const buf = renderTui(state, width, height)
+    const { output } = buf.diffOutput(null, null)
+
+    const lastRowMarker = `\x1b[${height};1H`
+    const startIdx = output.indexOf(lastRowMarker)
+    assert.ok(startIdx >= 0, 'expected last row output')
+    const afterMarker = output.slice(startIdx + lastRowMarker.length)
+    const nextCursorMove = afterMarker.indexOf('\x1b[28;')
+    assert.ok(nextCursorMove > 0, 'expected cursor restore after last row')
+    const lastRowChunk = afterMarker.slice(0, nextCursorMove)
+
+    assert.ok(
+      lastRowChunk.endsWith(ANSI.clearToLineEnd),
+      'last row should end with CSI K instead of padding to bottom-right corner'
+    )
+    const visibleWidth = stringDisplayWidth(stripAnsi(lastRowChunk))
+    assert.ok(
+      visibleWidth < width,
+      `last row visible width (${visibleWidth}) must stay strictly below terminal width (${width})`
+    )
+  }
+})
+
+test('IssueBoardTui emits atomic synchronized frames on initial render and keeps composer fixed on image paste', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'orca-tui-paste-test-'))
+  const prevStateRoot = process.env.GITHUB_ISSUE_AUTOPILOT_STATE_ROOT
+  process.env.GITHUB_ISSUE_AUTOPILOT_STATE_ROOT = join(tmpDir, 'state')
+
+  try {
+    const sampleImg = join(tmpDir, 'shot.png')
+    writeFileSync(sampleImg, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+
+    const chunks: string[] = []
+    const app = new IssueBoardTui(tmpDir, {
+      writeOutput: (chunk) => chunks.push(chunk)
+    })
+    const internal = app as unknown as {
+      state: TuiState
+      lastBuffer: ScreenBuffer | null
+      render: (forceClear?: boolean) => void
+      handleEvent: (ev: { type: 'paste'; text: string }) => void
+      showError: (text: string) => void
+    }
+    internal.state.snapshot = makeSampleSnapshot()
+    internal.state.loading = false
+
+    // 1. Initial forceClear render must be a single atomic synchronized write (no split clearScreen)
+    internal.render(true)
+    assert.equal(chunks.length, 1)
+    assert.ok(chunks[0].startsWith(ANSI.syncStart))
+    assert.ok(chunks[0].endsWith(ANSI.syncEnd))
+    assert.ok(chunks[0].includes(ANSI.clearScreen))
+    const initialBounds = internal.lastBuffer!.hitBoxes.find((b) => b.action === 'focus-composer')
+    const initialCursor = internal.lastBuffer!.cursor
+    assert.ok(initialBounds)
+    assert.ok(initialCursor)
+    const composerInputRow1Based = initialBounds.y + 2
+
+    // 2. Bracketed paste (Cmd+V local image path) inserts [Image #1] and only updates the composer input row
+    chunks.length = 0
+    internal.handleEvent({ type: 'paste', text: sampleImg })
+    assert.equal(internal.state.composer.text, '[Image #1]')
+    assert.equal(internal.state.composer.attachments.length, 1)
+    assert.equal(chunks.length, 1)
+    assert.ok(chunks[0].startsWith(ANSI.syncStart))
+    assert.ok(chunks[0].endsWith(ANSI.syncEnd))
+    assert.ok(!chunks[0].includes(ANSI.clearScreen))
+    assert.ok(chunks[0].includes(`\x1b[${composerInputRow1Based};1H`))
+    assert.ok(!chunks[0].includes(`\x1b[${initialBounds.y + 1};1H`))
+    assert.ok(!chunks[0].includes(`\x1b[${initialBounds.y + 3};1H`))
+    assert.deepEqual(
+      internal.lastBuffer!.hitBoxes.find((b) => b.action === 'focus-composer'),
+      initialBounds
+    )
+    assert.equal(internal.lastBuffer!.cursor?.y, initialCursor.y)
+    assert.equal(
+      internal.lastBuffer!.cursor?.x,
+      initialCursor.x + stringDisplayWidth('[Image #1]')
+    )
+
+    // 3. Error notice on footer (e.g. Ctrl+V when clipboard has no image) updates only footer safely with CSI K
+    chunks.length = 0
+    internal.showError('剪贴板中未检测到截图')
+    assert.equal(chunks.length, 1)
+    assert.ok(chunks[0].startsWith(ANSI.syncStart))
+    assert.ok(chunks[0].endsWith(ANSI.syncEnd))
+    assert.ok(chunks[0].includes(ANSI.clearToLineEnd))
+    assert.deepEqual(
+      internal.lastBuffer!.hitBoxes.find((b) => b.action === 'focus-composer'),
+      initialBounds
+    )
+    assert.equal(internal.lastBuffer!.cursor?.y, initialCursor.y)
+  } finally {
+    if (prevStateRoot === undefined) {
+      delete process.env.GITHUB_ISSUE_AUTOPILOT_STATE_ROOT
+    } else {
+      process.env.GITHUB_ISSUE_AUTOPILOT_STATE_ROOT = prevStateRoot
+    }
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
 })

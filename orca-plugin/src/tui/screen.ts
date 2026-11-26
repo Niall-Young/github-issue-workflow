@@ -4,6 +4,8 @@
 export const ANSI = {
   altScreenOn: '\x1b[?1049h',
   altScreenOff: '\x1b[?1049l',
+  autoWrapOff: '\x1b[?7l',
+  autoWrapOn: '\x1b[?7h',
   cursorHide: '\x1b[?25l',
   cursorShow: '\x1b[?25h',
   mouseOn: '\x1b[?1000h\x1b[?1006h',
@@ -11,6 +13,9 @@ export const ANSI = {
   bracketedPasteOn: '\x1b[?2004h',
   bracketedPasteOff: '\x1b[?2004l',
   clearScreen: '\x1b[2J\x1b[H',
+  clearToLineEnd: '\x1b[K',
+  syncStart: '\x1b[?2026h',
+  syncEnd: '\x1b[?2026l',
   reset: '\x1b[0m'
 } as const
 
@@ -350,6 +355,36 @@ export class ScreenBuffer {
     return lines
   }
 
+  private renderOutputLine(row: number): string {
+    const cells = this.cells[row]
+    let end = this.width
+    while (end > 0) {
+      const cell = cells[end - 1]
+      if (!cell.wideTrail && cell.ch === ' ' && cell.style === '') {
+        end -= 1
+      } else {
+        break
+      }
+    }
+
+    let line = ''
+    let activeStyle = ''
+    for (let col = 0; col < end; col += 1) {
+      const cell = cells[col]
+      if (cell.wideTrail) continue
+      if (cell.style !== activeStyle) {
+        line += ANSI.reset + cell.style
+        activeStyle = cell.style
+      }
+      line += cell.ch
+    }
+    if (activeStyle) line += ANSI.reset
+    if (end < this.width) {
+      line += ANSI.clearToLineEnd
+    }
+    return line
+  }
+
   diffOutput(
     previousLines: string[] | null,
     previousCursor?: CursorPosition | null
@@ -358,7 +393,7 @@ export class ScreenBuffer {
     let changedRows = ''
     for (let row = 0; row < lines.length; row += 1) {
       if (!previousLines || previousLines[row] !== lines[row]) {
-        changedRows += `\x1b[${row + 1};1H${lines[row]}`
+        changedRows += `\x1b[${row + 1};1H${this.renderOutputLine(row)}`
       }
     }
 

@@ -37,7 +37,7 @@ def release_files() -> dict[str, Path]:
     return result
 
 
-def build(tag: str, commit: str, output: Path) -> tuple[Path, Path]:
+def build(tag: str, commit: str, output: Path, *, full: bool = False) -> tuple[Path, Path]:
     match = TAG_PATTERN.fullmatch(tag)
     if not match:
         raise SystemExit("tag must use vMAJOR.MINOR.PATCH")
@@ -48,6 +48,23 @@ def build(tag: str, commit: str, output: Path) -> tuple[Path, Path]:
     if source_version != version:
         raise SystemExit(f"tag {tag} does not match updater VERSION {source_version}")
     files = release_files()
+    root_name = f"{PRODUCT}-{tag}"
+    if full:
+        root_name = f"{PRODUCT}-full-{tag}"
+        plugin = ROOT / "orca-plugin"
+        plugin_manifest = json.loads((plugin / "orca-plugin.json").read_text())
+        if plugin_manifest["version"] != version:
+            raise SystemExit(f"tag {tag} does not match Orca plugin version")
+        board_files = [
+            ROOT / "LICENSE", ROOT / "README.md", ROOT / "ROADMAP.md", ROOT / "scripts/orca-board",
+            plugin / "orca-plugin.json", plugin / "README.md", plugin / "tsconfig.json",
+            plugin / plugin_manifest["main"], plugin / "src/tui/app.ts",
+            *(plugin / "src").rglob("*.ts"),
+        ]
+        for path in board_files:
+            if not path.is_file():
+                raise SystemExit(f"missing {path.relative_to(ROOT)}")
+            files[path.relative_to(ROOT).as_posix()] = path
     manifest = {
         "schema_version": 1,
         "product": PRODUCT,
@@ -58,7 +75,6 @@ def build(tag: str, commit: str, output: Path) -> tuple[Path, Path]:
         "files": {relative: hashlib.sha256(path.read_bytes()).hexdigest()
                   for relative, path in files.items()},
     }
-    root_name = f"{PRODUCT}-{tag}"
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"{root_name}.tar.gz"
     timestamp = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
@@ -92,8 +108,9 @@ def main() -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--output", type=Path, default=Path("dist"))
     args = parser.parse_args()
-    archive, checksum = build(args.tag, args.commit, args.output)
-    print(json.dumps({"archive": str(archive), "checksum": str(checksum)}, indent=2))
+    for full in (False, True):
+        archive, checksum = build(args.tag, args.commit, args.output, full=full)
+        print(json.dumps({"archive": str(archive), "checksum": str(checksum)}))
     return 0
 
 

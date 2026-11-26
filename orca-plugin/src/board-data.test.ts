@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assert, test } from 'orca/testing'
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
 import {
   buildAutopilotInstallArgs,
   buildHandoffPrompt,

@@ -112,9 +112,8 @@ def ensure_plugin_ready(
         if err:
             raise RuntimeError(f"无法连接 Orca，请确认 Orca 已打开：{err}")
 
-    if plugin is None:
-        if not plugin_dir.exists():
-            raise RuntimeError(f"未找到插件目录：{plugin_dir}")
+    bundled_version = json.loads((plugin_dir / "orca-plugin.json").read_text())["version"]
+    if plugin is None or (plugin.get("isDev") and plugin.get("version") != bundled_version):
         load_res = runner(["orca", "plugin", "dev", "load", str(plugin_dir)])
         if load_res.returncode != 0:
             combined = f"{load_res.stdout}\n{load_res.stderr}"
@@ -240,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     ensure_plugin_ready()
                     print("Orca 状态栏插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开 TUI）。")
-                except RuntimeError as exc:
+                except (RuntimeError, FileNotFoundError) as exc:
                     print(f"提示：Orca 状态栏插件跳过（{exc}），不影响终端直接运行 `orca-board`。")
             print("以后在任意项目目录直接运行 `orca-board` 即可启动终端 Issue 看板。")
             return 0

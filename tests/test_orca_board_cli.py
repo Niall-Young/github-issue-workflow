@@ -76,6 +76,21 @@ class OrcaBoardCliTests(unittest.TestCase):
             self.assertEqual(cmd[0], "/opt/homebrew/bin/node")
             self.assertEqual(cmd[2], str(repo.resolve()))
 
+    def test_install_loads_bundled_plugin_over_older_dev_version(self):
+        bundled = json.loads((self.mod.PLUGIN_DIR / "orca-plugin.json").read_text())["version"]
+        plugin = {"pluginKey": "local.issue-board", "isDev": True,
+                  "version": "0.0.1", "status": "running"}
+
+        def runner(cmd, cwd=None):
+            if cmd == ["orca", "plugin", "list", "--json"]:
+                return make_proc(0, json.dumps({"result": {"plugins": [plugin]}}))
+            self.assertEqual(cmd, ["orca", "plugin", "dev", "load", str(self.mod.PLUGIN_DIR)])
+            plugin["version"] = bundled
+            return make_proc()
+
+        self.assertEqual(self.mod.ensure_plugin_ready(runner=runner), "local.issue-board")
+        self.assertEqual(plugin["version"], bundled)
+
     def test_ensure_plugin_ready_approves_interactively_when_pending(self):
         calls = []
 

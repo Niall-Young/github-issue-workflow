@@ -1,4 +1,4 @@
-name: Release stable skill bundle
+name: Release Issue Workflow
 
 on:
   push:
@@ -24,7 +24,30 @@ jobs:
         env:
           SOURCE_DATE_EPOCH: "0"
         run: python3 scripts/build_release.py --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" --output dist
+      - uses: oven-sh/setup-bun@v2
+      - name: Verify full bundle installation
+        run: |
+          bundle="github-issue-workflow-full-$GITHUB_REF_NAME"
+          (cd dist && shasum -a 256 -c "$bundle.tar.gz.sha256")
+          tar -xzf "dist/$bundle.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/$bundle"
+          ./scripts/orca-board --install --no-plugin --bin-dir "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/orca-board" --help
+          "$RUNNER_TEMP/bin/issue-board" --help
+          bun -e 'await import("./orca-plugin/src/worker.ts"); await import("./orca-plugin/src/tui/app.ts")'
+          bun test ./orca-plugin/src
       - name: Publish stable release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          full="github-issue-workflow-full-$GITHUB_REF_NAME.tar.gz"
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<EOF
+          **[下载完整安装包 / Download the full bundle]($base/$full)**
+
+          含 \`orca-board\` 终端看板、Orca 状态栏插件和四个 Agent Skill。解压到长期保留的目录，在其中运行 \`./scripts/orca-board --install\`。安装需要 Python 3，运行看板建议使用 Bun。状态栏入口需要 Orca 1.4.259+。四个 Skill 的安装步骤见包内 README。
+
+          Extract to a permanent directory and run \`./scripts/orca-board --install\` to install the CLI and set up the Orca plugin. See the bundled README to install the four Skills. The smaller archive without \`-full-\` is for existing Skill updaters.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --notes-file "$notes" --title "$GITHUB_REF_NAME"

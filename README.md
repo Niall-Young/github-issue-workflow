@@ -40,6 +40,8 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 
 #### 安装
 
+从 [GitHub Release](https://github.com/Niall-Young/github-issue-workflow/releases/latest) 下载 `github-issue-workflow-full-vX.Y.Z.tar.gz`，内含终端看板 CLI、Orca 插件和四个 Skill。将它解压到长期保留的目录，在解压目录运行 `./scripts/orca-board --install`，按提示授权插件。安装器将两个命令链接到该目录，请将 `~/.local/bin` 加入 PATH。安装 Python 3 和 Bun 后即可在项目里运行 `orca-board`；状态栏入口需要 Orca 1.4.259 或更高版本。仅安装终端命令可加 `--no-plugin`。四个 Skill 可按下文从解压目录复制，已有安装的 Skill 更新器继续使用同版本的 `github-issue-workflow-vX.Y.Z.tar.gz`。
+
 推荐将下面的提示词直接复制到你的 Agent 会话中，让 Agent 根据其运行环境完成安装：
 
 ```text
@@ -240,6 +242,8 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 - An authenticated GitHub CLI (`gh`)
 
 #### Install
+
+Download `github-issue-workflow-full-vX.Y.Z.tar.gz` from the [GitHub Release](https://github.com/Niall-Young/github-issue-workflow/releases/latest) for the terminal board CLI, Orca plugin, and four Skills. Extract it to a directory you will keep, run `./scripts/orca-board --install` there, and follow the plugin approval prompt. The installer links both commands to that directory. Add `~/.local/bin` to PATH. With Python 3 and Bun installed, run `orca-board` in your project. The status bar entry requires Orca 1.4.259 or later. Add `--no-plugin` to install only the terminal commands. Copy the four Skills from the extracted directory as described below. Existing Skill updaters use the matching `github-issue-workflow-vX.Y.Z.tar.gz` archive.
 
 For the easiest setup, copy the following prompt directly into your agent session and let the agent install the skill for its runtime:
 

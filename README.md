@@ -25,6 +25,7 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 - `github-issue-repair`：把 Issue 归一化为工作包，识别依赖、重复、同根因与冲突关系；仓库 URL 默认只做只读分诊。
 - `github-issue-autopilot`：一句话为当前仓库安装本地循环，领取由当前用户创建且带 `agent-ready` 的全部 open Issue，包括启用前已创建的积压任务，并调用 `$github-issue-repair`。
 - `github-issue-workflow-update`：用户说“检查 issue-workflow 更新”时只读比较版本，说“更新 issue-workflow”时覆盖当前 Agent 运行时中的四个官方 Skill，并同步已安装的 Autopilot runtime。
+- `orca-plugin`（Issue 看板插件）：面向非开发者的 Orca 主区域项目仪表盘，每个项目一个独立标签页，提供大白话快速提 Issue、「进行中 / 已完成」极简状态视图，以及「需要你处理」提问回复与人工拍板卡片，并带状态栏红点提醒与桌面通知。
 - 修复 worker 使用 Orca 管理的项目子 worktree，不修改用户正在使用的工作树；一次记录全部合格 Issue，最多并发 3 个任务。
 - 独立 reviewer 核对验收标准、验证证据、范围漂移和测试弱化。
 - 双层账本（SQLite schema v5）以 Issue node ID 防止重复派单，记录跨 Issue 前置依赖、每次 attempt 的所选 Agent、Orca Task/Dispatch/worktree、分支、base/head SHA、PR 链接、合并时间、心跳与失败 `.patch` 归档路径。
@@ -149,6 +150,11 @@ python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository
 │   ├── SKILL.md
 │   ├── VERSION
 │   └── scripts/update_workflow.py
+├── orca-plugin/                   # Orca 主区域项目级 Issue 看板插件（worker + customEditor）
+│   ├── orca-plugin.json
+│   ├── README.md
+│   ├── src/                       # Node worker、SQLite/GitHub 数据桥接与单元测试
+│   └── editor/                    # 主区域两栏仪表盘界面
 ├── scripts/build_release.py       # 构建带清单与校验和的正式发布包
 ├── .github/workflows/release.yml  # 通过版本 tag 测试并发布稳定包
 └── tests/                         # 修复账本与自动调度单元测试
@@ -165,7 +171,18 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
 python3 scripts/build_release.py --tag v0.1.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+orca plugin validate ./orca-plugin --json
+orca plugin test ./orca-plugin --json
+orca plugin check ./orca-plugin --json
 ```
+
+本地加载 Orca 看板插件（首次需按提示执行 `--approve` 授权）：
+
+```sh
+orca plugin dev load /absolute/path/to/github-issue-workflow/orca-plugin
+```
+
+加载后点击 Orca 底部状态栏「Issue 看板」或按 `Cmd+Shift+I` 即可在当前项目主区域打开专属看板。详见 [`orca-plugin/README.md`](orca-plugin/README.md)。
 
 真实 GitHub 操作还需通过 CLI 端到端回读：
 
@@ -200,6 +217,7 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 - `github-issue-repair` normalizes Issues into work packages and models dependencies, duplicates, shared root causes, and conflicts; repository URLs default to read-only triage.
 - `github-issue-autopilot` installs a local loop with one request, claims every open Issue created by the current user carrying `agent-ready`, including eligible backlog created before activation, and invokes `$github-issue-repair`.
 - `github-issue-workflow-update` checks versions read-only when asked to check and replaces all four official Skills plus installed Autopilot runtimes when asked to update issue-workflow.
+- `orca-plugin` (Issue Board): a non-developer project dashboard rendered directly inside Orca's main editor tab area (one board per project), featuring plain-language Issue submission, simplified In Progress / Completed lists, a Needs You queue for live agent questions and stuck-task actions, status-bar badge updates, and desktop notifications.
 - Repair workers use Orca-managed child worktrees and never edit the user's active tree. Every eligible Issue is recorded, with at most three tasks running concurrently.
 - An independent reviewer checks acceptance criteria, verification evidence, scope drift, and weakened tests.
 - A two-level ledger (SQLite schema v5) deduplicates immutable Issue node IDs and records cross-Issue dependencies, every attempt's selected Agent, Orca Task/Dispatch/worktree, branch, base/head SHAs, PR URLs, merge timestamps, heartbeats, and archived failure `.patch` paths.
@@ -324,6 +342,11 @@ If the path disappears, is no longer the original Git root, or is removed from O
 │   ├── SKILL.md
 │   ├── VERSION
 │   └── scripts/update_workflow.py
+├── orca-plugin/                   # Orca main-area per-project Issue Board plugin (worker + customEditor)
+│   ├── orca-plugin.json
+│   ├── README.md
+│   ├── src/                       # Node worker, SQLite/GitHub data bridge, and unit tests
+│   └── editor/                    # Main-area two-column dashboard UI
 ├── scripts/build_release.py       # Build the manifest and checksummed release bundle
 ├── .github/workflows/release.yml  # Test and publish stable version tags
 └── tests/                         # Repair-ledger and automatic-dispatch unit tests
@@ -340,7 +363,18 @@ python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
 python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
 python3 scripts/build_release.py --tag v0.1.0 --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+orca plugin validate ./orca-plugin --json
+orca plugin test ./orca-plugin --json
+orca plugin check ./orca-plugin --json
 ```
+
+Load the Orca Issue Board plugin locally (first load requires approving the requested capabilities with `--approve`):
+
+```sh
+orca plugin dev load /absolute/path/to/github-issue-workflow/orca-plugin
+```
+
+After loading, click **Issue 看板** in Orca's status bar or press `Cmd+Shift+I` to open the current project's dashboard tab in the main area. See [`orca-plugin/README.md`](orca-plugin/README.md).
 
 Real GitHub mutations still require CLI readback:
 

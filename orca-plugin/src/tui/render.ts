@@ -172,7 +172,7 @@ function prBadge(pr: PullRequestItem): { label: string; style: string } {
 export function computeComposerHeight(composer: ComposerState, width: number): number {
   const innerW = Math.max(12, width - 4)
   const wrapped = composer.text
-    ? wrapTextToWidth(`${composer.text}▏`, innerW, 3)
+    ? wrapTextToWidth(composer.text, innerW, 3)
     : ['']
   const textLines = Math.max(1, Math.min(3, wrapped.length))
   return 2 + textLines
@@ -458,6 +458,7 @@ function renderBottomComposer(
   const textAreaW = Math.max(6, w - 4)
 
   if (c.submitting) {
+    buf.clearCursor()
     buf.writeText(promptX, y + 1, '◌', PALETTE.amber, 2)
     buf.writeText(textAreaX, y + 1, '正在提交…', PALETTE.amber, textAreaW)
     return
@@ -467,15 +468,21 @@ function renderBottomComposer(
 
   const maxTextLines = Math.max(1, h - 2)
   if (!c.text) {
-    const placeholder = isActive ? '▏输入需求，或 / 命令…' : '输入需求，或 / 命令…'
-    buf.writeText(textAreaX, y + 1, placeholder, PALETTE.dim, textAreaW)
+    buf.writeText(textAreaX, y + 1, '输入需求，或 / 命令…', PALETTE.dim, textAreaW)
+    if (isActive) {
+      buf.setCursor(textAreaX, y + 1)
+    }
   } else {
-    const displayText = isActive ? `${c.text}▏` : c.text
-    const lines = wrapTextToWidth(displayText, textAreaW, maxTextLines)
+    const lines = wrapTextToWidth(c.text, textAreaW, maxTextLines)
     lines.forEach((line, idx) => {
       const style = c.text.startsWith('/') ? PALETTE.accent : PALETTE.text
       writeLineWithAttachmentTokens(buf, textAreaX, y + 1 + idx, line, style, textAreaW, c.attachments)
     })
+    if (isActive) {
+      const lastIdx = Math.max(0, lines.length - 1)
+      const lastLineW = stringDisplayWidth(lines[lastIdx] ?? '')
+      buf.setCursor(textAreaX + lastLineW, y + 1 + lastIdx)
+    }
   }
 }
 
@@ -733,6 +740,8 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   const modal = state.modal
   if (modal.type === 'none') return
 
+  buf.clearCursor()
+
   const mw = Math.min(Math.max(48, Math.floor(width * 0.72)), width - 4)
   const mh =
     modal.type === 'settings'
@@ -816,20 +825,31 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
     const inputTop = my + 2 + qLines.length + 1
     buf.drawHLine(ix, inputTop, iw, PALETTE.borderActive)
     buf.writeText(ix, inputTop + 1, '❯', PALETTE.accentBold, 2)
+    const replyTextX = ix + 2
+    const replyTextW = Math.max(1, iw - 2)
     const rLines = modal.text
-      ? wrapTextToWidth(`${modal.text}▏`, iw - 2, 2)
-      : ['▏输入回复…']
+      ? wrapTextToWidth(modal.text, replyTextW, 2)
+      : ['输入回复…']
     rLines.forEach((l, i) =>
       writeLineWithAttachmentTokens(
         buf,
-        ix + 2,
+        replyTextX,
         inputTop + 1 + i,
         l,
         modal.text ? PALETTE.text : PALETTE.dim,
-        iw - 2,
+        replyTextW,
         modal.attachments
       )
     )
+    if (!modal.sending) {
+      if (!modal.text) {
+        buf.setCursor(replyTextX, inputTop + 1)
+      } else {
+        const lastIdx = Math.max(0, rLines.length - 1)
+        const lastLineW = stringDisplayWidth(rLines[lastIdx] ?? '')
+        buf.setCursor(replyTextX + lastLineW, inputTop + 1 + lastIdx)
+      }
+    }
     buf.drawHLine(ix, inputTop + 3, iw, PALETTE.borderActive)
     const footerY = my + mh - 2
     let fx = ix

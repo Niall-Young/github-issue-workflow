@@ -34,7 +34,14 @@ import {
   renderTui,
   type TuiState
 } from './render'
-import { ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
+import {
+  ANSI,
+  cursorTo,
+  ScreenBuffer,
+  stringDisplayWidth,
+  truncateToWidth,
+  wrapTextToWidth
+} from './screen'
 
 function makeSampleSnapshot(): BoardSnapshot {
   return {
@@ -660,4 +667,169 @@ test('collectOrcaAgentState resolves real term_ handle via paneKey and surfaces 
     explicitWait.questions[0]?.kind === 'agent-question' ? explicitWait.questions[0].terminalId : '',
     'term_real_123'
   )
+})
+
+test('renderTui positions native terminal cursor for empty, CJK, wrapped, and trailing-newline composer inputs without pseudo-cursor', () => {
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+
+  // 1. Empty bottom composer: cursor at (textAreaX=3, composerTop+1=27) for height 30, composerH 3
+  const emptyState = makeBaseState('')
+  const emptyBuf = renderTui(emptyState, 100, 30)
+  assert.deepEqual(emptyBuf.cursor, { x: 3, y: 27 })
+  const emptyPlain = emptyBuf.renderLines().map(stripAnsi).join('\n')
+  assert.equal(emptyPlain.includes('▏'), false)
+
+  const emptyFrame = emptyBuf.diffOutput(null)
+  assert.ok(emptyFrame.output.startsWith(ANSI.cursorHide))
+  assert.ok(emptyFrame.output.endsWith(`${cursorTo(3, 27)}${ANSI.cursorShow}`))
+
+  // 2. Mixed CJK + ASCII text: cursor advances by exact display width
+  const mixedText = '修复 IME 光标'
+  const mixedState = makeBaseState(mixedText)
+  const mixedBuf = renderTui(mixedState, 100, 30)
+  assert.deepEqual(mixedBuf.cursor, { x: 3 + stringDisplayWidth(mixedText), y: 27 })
+  assert.equal(mixedBuf.renderLines().map(stripAnsi).join('\n').includes('▏'), false)
+
+  // 3. Trailing newline moves cursor to start of next line and matches computeComposerHeight
+  const newlineState = makeBaseState('第一行\n')
+  assert.equal(computeComposerHeight(newlineState.composer, 100), 4)
+  const newlineBuf = renderTui(newlineState, 100, 30)
+  // footerY=29, composerH=4 -> composerTop=25 -> line 0 at 26, line 1 at 27
+  assert.deepEqual(newlineBuf.cursor, { x: 3, y: 27 })
+
+  // 4. Multi-line CJK/ASCII wrapping & exact-width clamping stays within [0, width - 1]
+  const narrowW = 20 // textAreaW = 16
+  const exactLine = '测试宽字符排12' // 6*2 + 2 = 14; '测试宽字符排版12' = 7*2 + 2 = 16
+  const exactFull = '测试宽字符排版12'
+  assert.equal(stringDisplayWidth(exactFull), 16)
+  const exactState = makeBaseState(exactFull)
+  assert.equal(computeComposerHeight(exactState.composer, narrowW), 3)
+  const exactBuf = renderTui(exactState, narrowW, 20)
+  assert.ok(exactBuf.cursor !== null)
+  assert.ok(exactBuf.cursor.x >= 0 && exactBuf.cursor.x < narrowW)
+  assert.equal(exactBuf.cursor.x, 19)
+  assert.equal(exactBuf.cursor.y, 17)
+
+  const wrappedText = `${exactLine}继续换行ABC`
+  const wrappedState = makeBaseState(wrappedText)
+  assert.equal(computeComposerHeight(wrappedState.composer, narrowW), 4)
+  const wrappedBuf = renderTui(wrappedState, narrowW, 20)
+  const expectedLines = wrapTextToWidth(wrappedText, narrowW - 4, 3)
+  assert.equal(expectedLines.length, 2)
+  assert.deepEqual(wrappedBuf.cursor, {
+    x: 3 + stringDisplayWidth(expectedLines[1]!),
+    y: 17
+  })
+})
+
+test('renderTui positions cursor for reply modal and hides cursor for submitting, sending, settings, and detail states', () => {
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+
+  // 1. Submitting bottom composer hides cursor
+  const submittingState = makeBaseState('准备提交')
+  submittingState.composer.submitting = true
+  const submittingBuf = renderTui(submittingState, 100, 30)
+  assert.equal(submittingBuf.cursor, null)
+  const subFrame = submittingBuf.diffOutput(null)
+  assert.ok(subFrame.output.includes(ANSI.cursorHide))
+  assert.equal(subFrame.output.includes(ANSI.cursorShow), false)
+
+  // 2. Settings modal hides cursor
+  const settingsState = makeBaseState('hello')
+  settingsState.modal = {
+    type: 'settings',
+    defaultAgent: 'codex',
+    allowedAgents: ['codex'],
+    cursor: 0,
+    saving: false
+  }
+  const settingsBuf = renderTui(settingsState, 100, 30)
+  assert.equal(settingsBuf.cursor, null)
+  const settingsFrame = settingsBuf.diffOutput(null)
+  assert.ok(settingsFrame.output.includes(ANSI.cursorHide))
+  assert.equal(settingsFrame.output.includes(ANSI.cursorShow), false)
+
+  // 3. Detail modal hides cursor
+  const detailState = makeBaseState('hello')
+  detailState.modal = {
+    type: 'detail',
+    title: '#10 Bug',
+    subtitle: '状态：处理中',
+    body: '详情内容'
+  }
+  const detailBuf = renderTui(detailState, 100, 30)
+  assert.equal(detailBuf.cursor, null)
+
+  // 4. Reply modal positions cursor when active and hides cursor when sending
+  const replyState = makeBaseState('')
+  const questionItem = replyState.snapshot!.needsYou[0]!
+  assert.equal(questionItem.kind, 'agent-question')
+  if (questionItem.kind === 'agent-question') {
+    replyState.modal = {
+      type: 'reply',
+      item: questionItem,
+      text: '',
+      attachments: [],
+      sending: false
+    }
+    const emptyReplyBuf = renderTui(replyState, 100, 30)
+    assert.ok(emptyReplyBuf.cursor !== null)
+    const emptyReplyPlain = emptyReplyBuf.renderLines().map(stripAnsi)
+    assert.equal(emptyReplyPlain.join('\n').includes('▏'), false)
+    // Reply prompt '❯' sits two columns left of the cursor
+    assert.equal(emptyReplyPlain[emptyReplyBuf.cursor.y]![emptyReplyBuf.cursor.x - 2], '❯')
+
+    const replyText = '好的，继续执行'
+    replyState.modal.text = replyText
+    const filledReplyBuf = renderTui(replyState, 100, 30)
+    assert.deepEqual(filledReplyBuf.cursor, {
+      x: emptyReplyBuf.cursor.x + stringDisplayWidth(replyText),
+      y: emptyReplyBuf.cursor.y
+    })
+    const replyFrame = filledReplyBuf.diffOutput(null)
+    assert.ok(
+      replyFrame.output.endsWith(
+        `${cursorTo(filledReplyBuf.cursor!.x, filledReplyBuf.cursor!.y)}${ANSI.cursorShow}`
+      )
+    )
+
+    replyState.modal.sending = true
+    const sendingReplyBuf = renderTui(replyState, 100, 30)
+    assert.equal(sendingReplyBuf.cursor, null)
+    const sendingFrame = sendingReplyBuf.diffOutput(replyFrame.lines, replyFrame.cursor)
+    assert.ok(sendingFrame.output.includes(ANSI.cursorHide))
+    assert.equal(sendingFrame.output.includes(ANSI.cursorShow), false)
+  }
+})
+
+test('ScreenBuffer.diffOutput preserves cursor position across incremental and no-op redraws without flicker', () => {
+  const buf1 = new ScreenBuffer(40, 12)
+  buf1.writeText(0, 0, 'Header v1')
+  buf1.setCursor(5, 10)
+  const f1 = buf1.diffOutput(null)
+  assert.ok(f1.output.startsWith(ANSI.cursorHide))
+  assert.ok(f1.output.endsWith(`${cursorTo(5, 10)}${ANSI.cursorShow}`))
+
+  // Unchanged lines + unchanged cursor with previousCursor -> empty output (no flicker on 12s poll)
+  const buf2 = new ScreenBuffer(40, 12)
+  buf2.writeText(0, 0, 'Header v1')
+  buf2.setCursor(5, 10)
+  const f2 = buf2.diffOutput(f1.lines, f1.cursor)
+  assert.equal(f2.output, '')
+
+  // Unchanged lines + changed cursor -> moves & shows cursor
+  const buf3 = new ScreenBuffer(40, 12)
+  buf3.writeText(0, 0, 'Header v1')
+  buf3.setCursor(8, 10)
+  const f3 = buf3.diffOutput(f2.lines, f2.cursor)
+  assert.equal(f3.output, `${cursorTo(8, 10)}${ANSI.cursorShow}`)
+
+  // Partial line refresh (e.g. header updated during background poll) -> hides before row write, restores cursor at end
+  const buf4 = new ScreenBuffer(40, 12)
+  buf4.writeText(0, 0, 'Header v2')
+  buf4.setCursor(8, 10)
+  const f4 = buf4.diffOutput(f3.lines, f3.cursor)
+  assert.ok(f4.output.startsWith(ANSI.cursorHide))
+  assert.ok(f4.output.includes('Header v2'))
+  assert.ok(f4.output.endsWith(`${cursorTo(8, 10)}${ANSI.cursorShow}`))
 })

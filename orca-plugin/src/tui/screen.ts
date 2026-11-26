@@ -36,6 +36,15 @@ export const PALETTE = {
   attachmentToken: '\x1b[1;38;2;46;150;108m'
 } as const
 
+export type CursorPosition = {
+  x: number
+  y: number
+}
+
+export function cursorTo(x: number, y: number): string {
+  return `\x1b[${y + 1};${x + 1}H`
+}
+
 export type HitBox = {
   x: number
   y: number
@@ -145,6 +154,7 @@ export class ScreenBuffer {
   readonly width: number
   readonly height: number
   private cells: Cell[][]
+  private _cursor: CursorPosition | null = null
   readonly hitBoxes: HitBox[] = []
 
   constructor(width: number, height: number) {
@@ -153,6 +163,20 @@ export class ScreenBuffer {
     this.cells = Array.from({ length: this.height }, () =>
       Array.from({ length: this.width }, () => ({ ch: ' ', style: '' }))
     )
+  }
+
+  get cursor(): CursorPosition | null {
+    return this._cursor ? { ...this._cursor } : null
+  }
+
+  setCursor(x: number, y: number) {
+    const cx = Math.max(0, Math.min(this.width - 1, Math.floor(x)))
+    const cy = Math.max(0, Math.min(this.height - 1, Math.floor(y)))
+    this._cursor = { x: cx, y: cy }
+  }
+
+  clearCursor() {
+    this._cursor = null
   }
 
   addHitBox(x: number, y: number, w: number, h: number, action: string, payload?: unknown) {
@@ -329,14 +353,38 @@ export class ScreenBuffer {
     return lines
   }
 
-  diffOutput(previousLines: string[] | null): { output: string; lines: string[] } {
+  diffOutput(
+    previousLines: string[] | null,
+    previousCursor?: CursorPosition | null
+  ): { output: string; lines: string[]; cursor: CursorPosition | null } {
     const lines = this.renderLines()
-    let out = ''
+    let body = ''
     for (let row = 0; row < lines.length; row += 1) {
       if (!previousLines || previousLines[row] !== lines[row]) {
-        out += `\x1b[${row + 1};1H${lines[row]}`
+        body += `\x1b[${row + 1};1H${lines[row]}`
       }
     }
-    return { output: out, lines }
+
+    const cur = this.cursor
+    let out = ''
+    if (body) {
+      out = ANSI.cursorHide + body
+      if (cur) {
+        out += cursorTo(cur.x, cur.y) + ANSI.cursorShow
+      }
+    } else if (cur) {
+      const sameCursor =
+        previousCursor !== undefined &&
+        previousCursor !== null &&
+        previousCursor.x === cur.x &&
+        previousCursor.y === cur.y
+      if (!sameCursor) {
+        out = cursorTo(cur.x, cur.y) + ANSI.cursorShow
+      }
+    } else if (previousCursor !== null) {
+      out = ANSI.cursorHide
+    }
+
+    return { output: out, lines, cursor: cur }
   }
 }

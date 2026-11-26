@@ -1464,6 +1464,88 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual("failed", completed[0]["status"])
         self.assertEqual("Orca worker failed (agent_crashed)", completed[0]["summary"])
 
+    def test_preferred_worktree_base_branch_tracks_ahead_state(self) -> None:
+        repo = self.root
+
+        def fake_ahead(argv):
+            if argv[3:5] == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(argv, 0, "main\n", "")
+            if argv[3:5] == ["rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(argv, 0, "origin/main\n", "")
+            if argv[3:5] == ["rev-list", "--left-right"]:
+                return subprocess.CompletedProcess(argv, 0, "0\t4\n", "")
+            return subprocess.CompletedProcess(argv, 1, "", "unexpected")
+
+        with mock.patch.object(WATCHER, "command", side_effect=fake_ahead):
+            self.assertEqual("main", WATCHER.preferred_worktree_base_branch(repo))
+
+        def fake_synced(argv):
+            if argv[3:5] == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(argv, 0, "main\n", "")
+            if argv[3:5] == ["rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(argv, 0, "origin/main\n", "")
+            if argv[3:5] == ["rev-list", "--left-right"]:
+                return subprocess.CompletedProcess(argv, 0, "2\t0\n", "")
+            return subprocess.CompletedProcess(argv, 1, "", "unexpected")
+
+        with mock.patch.object(WATCHER, "command", side_effect=fake_synced):
+            self.assertIsNone(WATCHER.preferred_worktree_base_branch(repo))
+
+        def fake_no_upstream(argv):
+            if argv[3:5] == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(argv, 0, "local-dev\n", "")
+            return subprocess.CompletedProcess(argv, 128, "", "no upstream")
+
+        with mock.patch.object(WATCHER, "command", side_effect=fake_no_upstream):
+            self.assertEqual("local-dev", WATCHER.preferred_worktree_base_branch(repo))
+
+        def fake_detached(argv):
+            return subprocess.CompletedProcess(argv, 0, "\n", "")
+
+        with mock.patch.object(WATCHER, "command", side_effect=fake_detached):
+            self.assertIsNone(WATCHER.preferred_worktree_base_branch(repo))
+
+    def test_dispatch_one_passes_base_branch_when_local_branch_is_ahead(self) -> None:
+        config = self.config()
+        ledger = self.ledger(attempts=2)
+        issue = self.issue()
+        ledger.enqueue(issue)
+        claimed = ledger.claim_next()
+        wt_path = str(self.root / "wt-ahead")
+        calls: list[tuple[str, ...]] = []
+
+        def fake_orca(_cfg, *args):
+            calls.append(args)
+            if args[:2] == ("orchestration", "task-create"):
+                return {"ok": True, "result": {"task": {"id": "task_ahead"}}}
+            if args[:2] == ("orchestration", "worker-start"):
+                return {
+                    "ok": True,
+                    "result": {
+                        "dispatchId": "ctx_ahead",
+                        "worktree": {
+                            "id": f"repo::{wt_path}",
+                            "path": wt_path,
+                            "branch": "refs/heads/repair/issue-1-attempt-1",
+                        },
+                    },
+                }
+            return {"ok": True, "result": {}}
+
+        with (
+            mock.patch.object(WATCHER, "github_login", return_value="owner"),
+            mock.patch.object(WATCHER, "list_issues", return_value=[issue]),
+            mock.patch.object(WATCHER, "preferred_worktree_base_branch", return_value="main"),
+            mock.patch.object(WATCHER, "orca_call", side_effect=fake_orca),
+        ):
+            result = WATCHER.dispatch_one(config, ledger, "run_ahead", claimed)
+
+        self.assertEqual("running", result["status"])
+        worker_start_calls = [c for c in calls if c[:2] == ("orchestration", "worker-start")]
+        self.assertEqual(1, len(worker_start_calls))
+        idx = worker_start_calls[0].index("--base-branch")
+        self.assertEqual("main", worker_start_calls[0][idx + 1])
+
 
 if __name__ == "__main__":
     unittest.main()

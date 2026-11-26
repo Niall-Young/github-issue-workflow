@@ -10,6 +10,7 @@ import {
   fetchGithubPullRequests,
   findAutopilotConfigForRepo,
   findBundledHandoffSkill,
+  isAutopilotRuntimeOutdated,
   listInstalledAgents,
   mergeBoardItems,
   normalizePullRequests,
@@ -427,5 +428,34 @@ test('findAutopilotConfigForRepo reads agent and policy settings and buildAutopi
     ])
   } finally {
     rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('isAutopilotRuntimeOutdated detects stale or missing runtime copies', () => {
+  const root = mkdtempSync(join(tmpdir(), 'autopilot-runtime-sync-'))
+  try {
+    const srcDir = join(root, 'src')
+    const rtDir = join(root, 'runtime')
+    mkdirSync(srcDir, { recursive: true })
+    mkdirSync(rtDir, { recursive: true })
+
+    const srcAdmin = join(srcDir, 'autopilot_admin.py')
+    const srcWatcher = join(srcDir, 'issue_watcher.py')
+    const rtAdmin = join(rtDir, 'autopilot_admin.py')
+    const rtWatcher = join(rtDir, 'issue_watcher.py')
+
+    writeFileSync(srcAdmin, 'admin-v2', 'utf8')
+    writeFileSync(srcWatcher, 'watcher-v2', 'utf8')
+
+    assert.equal(isAutopilotRuntimeOutdated(srcAdmin, rtAdmin), true)
+
+    writeFileSync(rtAdmin, 'admin-v2', 'utf8')
+    writeFileSync(rtWatcher, 'watcher-v1', 'utf8')
+    assert.equal(isAutopilotRuntimeOutdated(srcAdmin, rtAdmin), true)
+
+    writeFileSync(rtWatcher, 'watcher-v2', 'utf8')
+    assert.equal(isAutopilotRuntimeOutdated(srcAdmin, rtAdmin), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

@@ -218,6 +218,23 @@ export function findBundledAutopilotAdmin(pluginDir: string): string | null {
   return null
 }
 
+export function isAutopilotRuntimeOutdated(
+  bundledAdminPath: string,
+  runtimeAdminPath: string
+): boolean {
+  const bundledWatcherPath = join(dirname(bundledAdminPath), 'issue_watcher.py')
+  const runtimeWatcherPath = join(dirname(runtimeAdminPath), 'issue_watcher.py')
+  if (!existsSync(bundledAdminPath) || !existsSync(bundledWatcherPath)) return false
+  if (!existsSync(runtimeAdminPath) || !existsSync(runtimeWatcherPath)) return true
+  try {
+    const adminSame = readFileSync(bundledAdminPath).equals(readFileSync(runtimeAdminPath))
+    const watcherSame = readFileSync(bundledWatcherPath).equals(readFileSync(runtimeWatcherPath))
+    return !adminSame || !watcherSame
+  } catch {
+    return true
+  }
+}
+
 export function findBundledHandoffSkill(pluginDir: string): HandoffSkillPaths | null {
   const candidates = [
     resolve(pluginDir, '..', 'github-issue-handoff', 'SKILL.md'),

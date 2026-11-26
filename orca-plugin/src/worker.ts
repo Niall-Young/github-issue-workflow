@@ -12,6 +12,7 @@ import {
   findAutopilotConfigForRepo,
   findBundledAutopilotAdmin,
   findBundledHandoffSkill,
+  isAutopilotRuntimeOutdated,
   listInstalledAgents,
   mergeBoardItems,
   readLedgerIssues,
@@ -24,6 +25,7 @@ import type { BoardSnapshot, InProgressItem, NeedsYouItem } from './protocol'
 
 const POLL_INTERVAL_MS = 12_000
 const HANDOFF_BOOT_GRACE_MS = 25_000
+const RUNTIME_REFRESH_COOLDOWN_MS = 30_000
 
 type PendingHandoff = {
   terminalId: string
@@ -40,6 +42,37 @@ export default function activate(orca: OrcaWorkerApi) {
   const notifiedIds = new Set<string>()
   const pendingHandoffs = new Map<string, PendingHandoff>()
   let pollTimer: ReturnType<typeof setInterval> | null = null
+  let runtimeRefreshPromise: Promise<void> | null = null
+  let lastRuntimeRefreshAttemptMs = 0
+
+  async function maybeRefreshStaleRuntime(
+    runtimeAdminPath: string | null | undefined,
+    force = false
+  ): Promise<void> {
+    if (!runtimeAdminPath) return
+    const bundledAdmin = findBundledAutopilotAdmin(pluginRoot)
+    if (!bundledAdmin) return
+    if (!isAutopilotRuntimeOutdated(bundledAdmin, runtimeAdminPath)) return
+    if (runtimeRefreshPromise) {
+      await runtimeRefreshPromise
+      return
+    }
+    const now = Date.now()
+    if (!force && now - lastRuntimeRefreshAttemptMs < RUNTIME_REFRESH_COOLDOWN_MS) return
+    lastRuntimeRefreshAttemptMs = now
+    runtimeRefreshPromise = (async () => {
+      try {
+        await defaultRunner('python3', [bundledAdmin, 'refresh-runtimes', '--all'], {
+          timeoutMs: 45_000
+        })
+      } catch {
+        // ignore transient refresh failure; next poll after cooldown will retry
+      } finally {
+        runtimeRefreshPromise = null
+      }
+    })()
+    await runtimeRefreshPromise
+  }
 
   async function resolveWorkspaceInfo(requestedRepoPath?: string, requestedWorkspaceId?: string) {
     let repoPath = requestedRepoPath ? resolve(requestedRepoPath) : null
@@ -202,6 +235,9 @@ export default function activate(orca: OrcaWorkerApi) {
     const repoPath = gitInfo.rootPath
     const repository = input?.repository || gitInfo.repository
     const autopilot = findAutopilotConfigForRepo(repoPath, repository)
+    if (autopilot) {
+      void maybeRefreshStaleRuntime(autopilot.runtimeAdminPath)
+    }
 
     const [ledgerRows, githubIssues, pullRequests, agentState, installedAgents] = await Promise.all([
       autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
@@ -397,8 +433,11 @@ export default function activate(orca: OrcaWorkerApi) {
 
   orca.panels.handle('board.issueAction', async (input) => {
     const autopilot = findAutopilotConfigForRepo(input.repoPath, null)
+    if (autopilot) {
+      await maybeRefreshStaleRuntime(autopilot.runtimeAdminPath, true)
+    }
     const adminScript =
-      (autopilot && autopilot.runtimeAdminPath) || findBundledAutopilotAdmin(pluginRoot)
+      findBundledAutopilotAdmin(pluginRoot) || (autopilot && autopilot.runtimeAdminPath)
     if (!adminScript) {
       throw new Error('未找到 autopilot_admin.py，请先安装 github-issue-autopilot')
     }

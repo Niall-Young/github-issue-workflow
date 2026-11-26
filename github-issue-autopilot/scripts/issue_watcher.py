@@ -1477,13 +1477,46 @@ def create_orca_task(config: dict[str, Any], run_id: str, run: dict[str, Any]) -
     return task_id
 
 
+def preferred_worktree_base_branch(repo: Path) -> str | None:
+    branch_result = command(["git", "-C", str(repo), "branch", "--show-current"])
+    if branch_result.returncode != 0:
+        return None
+    branch = branch_result.stdout.strip()
+    if not branch:
+        return None
+    upstream_result = command([
+        "git", "-C", str(repo), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}",
+    ])
+    if upstream_result.returncode != 0:
+        return branch
+    upstream = upstream_result.stdout.strip()
+    if not upstream:
+        return branch
+    counts = command([
+        "git", "-C", str(repo), "rev-list", "--left-right", "--count", f"{upstream}...{branch}",
+    ])
+    if counts.returncode != 0:
+        return None
+    parts = counts.stdout.strip().split()
+    if len(parts) != 2:
+        return None
+    try:
+        ahead = int(parts[1])
+    except ValueError:
+        return None
+    return branch if ahead > 0 else None
+
+
 def create_blocked_worktree(config: dict[str, Any], repository: dict[str, Any], run: dict[str, Any],
                             summary: str) -> dict[str, Any]:
+    base_branch = preferred_worktree_base_branch(repository["repo_path"])
+    extra = ("--base-branch", base_branch) if base_branch else ()
     response = orca_call(
         config, "worktree", "create", "--repo", f"path:{repository['repo_path']}",
         "--name", f"issue-{run['issue_number']}-attempt-{run['attempt_number']}",
         "--parent-worktree", f"path:{repository['repo_path']}", "--issue", str(run["issue_number"]),
         "--comment", f"Needs human: {summary}", "--setup", config["orca"]["setup"],
+        *extra,
     )
     worktree = nested_value(response, ("result", "worktree"), ("result",))
     return worktree if isinstance(worktree, dict) else {}
@@ -1538,9 +1571,12 @@ def dispatch_one(config: dict[str, Any], ledger: Ledger, run_id: str, run: dict[
         )
         task_id = candidate_task_id
         agent = select_agent(issue, config)
+        base_branch = preferred_worktree_base_branch(repository["repo_path"])
+        base_args = ("--base-branch", base_branch) if base_branch else ()
         response = orca_call(
             config, "orchestration", "worker-start", "--run", run_id, "--task", task_id,
             "--worktree", "new-child", "--repo", f"path:{repository['repo_path']}",
+            *base_args,
             "--name", f"issue-{run['issue_number']}-attempt-{attempt}",
             "--display-name", f"#{run['issue_number']} {run['title']}",
             "--comment", f"Starting {agent}", "--agent", agent, "--setup", config["orca"]["setup"],

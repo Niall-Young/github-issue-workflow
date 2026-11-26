@@ -121,7 +121,9 @@ export class InputParser {
         else if (code === 'H') events.push({ type: 'key', key: 'home', raw: seq })
         else if (code === 'F') events.push({ type: 'key', key: 'end', raw: seq })
         else if (code === 'Z') events.push({ type: 'key', key: 'tab', shift: true, raw: seq })
-        else if (code === 'u' && (params === '13;2' || params === '13;5')) {
+        else if (code === 'u' && params === '9;2') {
+          events.push({ type: 'key', key: 'tab', shift: true, raw: seq })
+        } else if (code === 'u' && (params === '13;2' || params === '13;5')) {
           events.push({ type: 'key', key: 'enter', shift: true, raw: seq })
         } else if (code === '~') {
           if (params === '3') events.push({ type: 'key', key: 'delete', raw: seq })

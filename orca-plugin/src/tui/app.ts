@@ -31,7 +31,14 @@ import {
   submitIssueFromTui,
   type PendingHandoff
 } from './orca-cli'
-import { buildMainRows, computeComposerHeight, renderTui, type TuiState } from './render'
+import {
+  buildMainRows,
+  computeComposerHeight,
+  nextIssueKind,
+  nextSubmitMode,
+  renderTui,
+  type TuiState
+} from './render'
 import { ANSI, type ScreenBuffer } from './screen'
 
 const POLL_INTERVAL_MS = 12_000
@@ -44,7 +51,6 @@ export class IssueBoardTui {
   private lastBuffer: ScreenBuffer | null = null
   private lastRenderedLines: string[] | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
-  private toastTimer: ReturnType<typeof setTimeout> | null = null
   private cleanedUp = false
 
   constructor(targetPath: string) {
@@ -68,8 +74,7 @@ export class IssueBoardTui {
         submitting: false,
         slashIndex: 0
       },
-      modal: { type: 'none' },
-      toast: null
+      modal: { type: 'none' }
     }
   }
 
@@ -123,7 +128,6 @@ export class IssueBoardTui {
     if (this.cleanedUp) return
     this.cleanedUp = true
     if (this.pollTimer) clearInterval(this.pollTimer)
-    if (this.toastTimer) clearTimeout(this.toastTimer)
     process.stdin.off('data', this.onStdinData)
     process.stdout.off('resize', this.onResize)
     try {
@@ -138,14 +142,14 @@ export class IssueBoardTui {
     process.exit(code)
   }
 
-  private showToast(kind: 'ok' | 'err', text: string) {
-    this.state.toast = { kind, text }
+  private cycleIssueKind() {
+    this.state.composer.kind = nextIssueKind(this.state.composer.kind)
     this.render()
-    if (this.toastTimer) clearTimeout(this.toastTimer)
-    this.toastTimer = setTimeout(() => {
-      this.state.toast = null
-      this.render()
-    }, 4500)
+  }
+
+  private cycleSubmitMode() {
+    this.state.composer.mode = nextSubmitMode(this.state.composer.mode)
+    this.render()
   }
 
   private render(forceClear = false) {
@@ -175,9 +179,9 @@ export class IssueBoardTui {
       this.state.loading = false
       this.normalizeSelection()
       this.render()
-    } catch (err) {
+    } catch {
       this.state.loading = false
-      this.showToast('err', `同步失败：${err instanceof Error ? err.message : String(err)}`)
+      this.render()
     }
   }
 
@@ -305,22 +309,20 @@ export class IssueBoardTui {
       case 'feature':
       case 'polish': {
         c.kind = id as IssueKind
-        const label = id === 'bug' ? '修 Bug' : id === 'feature' ? '新功能' : '体验优化'
         if (arg.trim()) {
           void this.handleComposerSubmit(arg)
         } else {
-          this.showToast('ok', `已切换提单类型：${label}`)
+          this.render()
         }
         return
       }
       case 'handoff':
       case 'direct': {
         c.mode = id as SubmitMode
-        const label = id === 'handoff' ? 'Skill 规范提单' : '快速直提'
         if (arg.trim()) {
           void this.handleComposerSubmit(arg)
         } else {
-          this.showToast('ok', `已切换提单方式：${label}`)
+          this.render()
         }
         return
       }
@@ -345,7 +347,7 @@ export class IssueBoardTui {
       case 'clear':
         c.attachments = []
         c.followUpOf = null
-        this.showToast('ok', '已清空输入、附件与追提关联')
+        this.render()
         return
       case 'quit':
         this.quit(0)
@@ -400,11 +402,17 @@ export class IssueBoardTui {
         this.state.attentionIndex = Number(payload)
         this.render()
         return
+      case 'cycle-issue-kind':
+        this.cycleIssueKind()
+        return
+      case 'cycle-submit-mode':
+        this.cycleSubmitMode()
+        return
       case 'open-followup': {
         const num = Number(payload) || null
         this.state.modal = { type: 'none' }
         this.state.composer.followUpOf = num
-        this.showToast('ok', num ? `已关联追提 #${num}，请在下方直接输入补充需求` : '请在下方输入需求')
+        this.render()
         return
       }
       case 'exec-slash':
@@ -419,7 +427,6 @@ export class IssueBoardTui {
       case 'open-url':
         if (typeof payload === 'string' && payload) {
           void openUrlInBrowser(payload)
-          this.showToast('ok', `已在浏览器打开：${payload}`)
         }
         return
       case 'approve-agent': {
@@ -459,11 +466,7 @@ export class IssueBoardTui {
         c.text = next.text
         c.attachments = next.attachments
         c.slashIndex = 0
-        if (next.removed) {
-          this.showToast('ok', `已移除 ${next.removed.token}`)
-        } else {
-          this.render()
-        }
+        this.render()
         return
       }
       case 'remove-reply-attachment': {
@@ -472,11 +475,7 @@ export class IssueBoardTui {
         const next = removeInlineAttachmentById(this.state.modal.text, this.state.modal.attachments, id)
         this.state.modal.text = next.text
         this.state.modal.attachments = next.attachments
-        if (next.removed) {
-          this.showToast('ok', `已移除 ${next.removed.token}`)
-        } else {
-          this.render()
-        }
+        this.render()
         return
       }
       case 'reply-submit':
@@ -532,11 +531,11 @@ export class IssueBoardTui {
           c.text = next.text
           c.attachments = next.attachments
           c.slashIndex = 0
-          this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
+          this.render()
           return
         }
-      } catch (err) {
-        this.showToast('err', err instanceof Error ? err.message : String(err))
+      } catch {
+        this.render()
         return
       }
       c.text += ev.text
@@ -546,6 +545,10 @@ export class IssueBoardTui {
     }
 
     if (ev.type === 'key') {
+      if (ev.key === 'tab' && ev.shift) {
+        this.cycleIssueKind()
+        return
+      }
       if (ev.ctrl && ev.key === 'v') {
         void this.handlePasteClipboardImage()
         return
@@ -593,8 +596,6 @@ export class IssueBoardTui {
           const picked = matches[Math.max(0, Math.min(c.slashIndex, matches.length - 1))]
           if (picked) {
             this.executeSlashCommand(picked.id, '')
-          } else {
-            this.showToast('err', `未知命令：${c.text.trim()}（输入 / 查看可用命令）`)
           }
           return
         }
@@ -635,8 +636,6 @@ export class IssueBoardTui {
           const parsed = parseSlashCommand(trimmed)
           if (parsed?.kind === 'command') {
             this.executeSlashCommand(parsed.command.id, parsed.arg)
-          } else if (parsed?.kind === 'unknown') {
-            this.showToast('err', `未知命令：${parsed.name}（输入 / 查看可用命令）`)
           }
           return
         }
@@ -774,11 +773,11 @@ export class IssueBoardTui {
             const next = appendInlineAttachment(modal.text, modal.attachments, att)
             modal.text = next.text
             modal.attachments = next.attachments
-            this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
+            this.render()
             return
           }
-        } catch (err) {
-          this.showToast('err', err instanceof Error ? err.message : String(err))
+        } catch {
+          this.render()
           return
         }
         modal.text += ev.text.replace(/\r?\n/g, ' ')
@@ -794,14 +793,13 @@ export class IssueBoardTui {
     const repoPath = this.state.snapshot?.repoPath || this.targetPath
     const att = await captureClipboardImage(repoPath)
     if (!att) {
-      this.showToast('err', '剪贴板中未检测到截图（也可直接将文件拖入终端）')
       return
     }
     if (this.state.modal.type === 'reply') {
       const next = appendInlineAttachment(this.state.modal.text, this.state.modal.attachments, att)
       this.state.modal.text = next.text
       this.state.modal.attachments = next.attachments
-      this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
+      this.render()
       return
     }
     const c = this.state.composer
@@ -809,7 +807,7 @@ export class IssueBoardTui {
     c.text = next.text
     c.attachments = next.attachments
     c.slashIndex = 0
-    this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
+    this.render()
   }
 
   private async handleComposerSubmit(overrideText?: string) {
@@ -819,7 +817,6 @@ export class IssueBoardTui {
     const cleanedText = stripInlineAttachmentTokens(rawText, c.attachments)
     const { title, details } = splitComposerText(cleanedText)
     if (!title) {
-      this.showToast('err', '请先输入需求描述')
       return
     }
     const snap = this.state.snapshot
@@ -829,7 +826,7 @@ export class IssueBoardTui {
     c.submitting = true
     this.render()
     try {
-      const res = await submitIssueFromTui({
+      await submitIssueFromTui({
         repoPath,
         repository: snap?.repository ?? null,
         autopilotInstalled: Boolean(snap?.autopilotInstalled),
@@ -847,16 +844,11 @@ export class IssueBoardTui {
       c.followUpOf = null
       c.slashIndex = 0
       c.submitting = false
-      this.showToast(
-        'ok',
-        res.mode === 'handoff'
-          ? `已启动 ${res.agent || 'Agent'} 按 Skill 规范提单`
-          : `已直接提交 Issue${res.issueNumber ? ` #${res.issueNumber}` : ''}`
-      )
+      this.render()
       void this.refresh(true)
-    } catch (err) {
+    } catch {
       c.submitting = false
-      this.showToast('err', err instanceof Error ? err.message : String(err))
+      this.render()
     }
   }
 
@@ -869,11 +861,11 @@ export class IssueBoardTui {
       const cleanedMessage = stripInlineAttachmentTokens(modal.text, modal.attachments)
       await replyToAgentTerminal(modal.item.terminalId, cleanedMessage, modal.attachments)
       this.state.modal = { type: 'none' }
-      this.showToast('ok', `已发送回复给 ${modal.item.agentName}`)
+      this.render()
       void this.refresh(true)
-    } catch (err) {
+    } catch {
       modal.sending = false
-      this.showToast('err', err instanceof Error ? err.message : String(err))
+      this.render()
     }
   }
 
@@ -883,10 +875,9 @@ export class IssueBoardTui {
     this.render()
     try {
       await replyToAgentTerminal(item.terminalId, '同意，请继续执行')
-      this.showToast('ok', `已回复「同意继续」给 ${item.agentName}`)
       void this.refresh(true)
-    } catch (err) {
-      this.showToast('err', err instanceof Error ? err.message : String(err))
+    } catch {
+      // handled by clearing busy state below
     } finally {
       this.state.busyIds.delete(item.id)
       this.render()
@@ -903,10 +894,9 @@ export class IssueBoardTui {
     this.render()
     try {
       await runIssueAdminAction(repoPath, item.url, action)
-      this.showToast('ok', action === 'retry' ? `已安排重试 #${item.issueNumber}` : `已放弃 #${item.issueNumber}`)
       void this.refresh(true)
-    } catch (err) {
-      this.showToast('err', err instanceof Error ? err.message : String(err))
+    } catch {
+      // handled by clearing busy state below
     } finally {
       this.state.busyIds.delete(item.id)
       this.render()
@@ -917,17 +907,15 @@ export class IssueBoardTui {
     const snap = this.state.snapshot
     const repoPath = snap?.repoPath || this.targetPath
     const agent = snap?.defaultAgent || snap?.preferredAgent || 'codex'
-    this.showToast('ok', `正在为当前项目开启自动处理循环 (${agent})…`)
     try {
-      const msg = await saveAgentConfig({
+      await saveAgentConfig({
         repoPath,
         defaultAgent: agent,
         allowedAgents: [agent]
       })
-      this.showToast('ok', msg)
       void this.refresh(true)
-    } catch (err) {
-      this.showToast('err', err instanceof Error ? err.message : String(err))
+    } catch {
+      this.render()
     }
   }
 
@@ -938,17 +926,17 @@ export class IssueBoardTui {
     modal.saving = true
     this.render()
     try {
-      const msg = await saveAgentConfig({
+      await saveAgentConfig({
         repoPath,
         defaultAgent: modal.defaultAgent,
         allowedAgents: modal.allowedAgents
       })
       this.state.modal = { type: 'none' }
-      this.showToast('ok', msg)
+      this.render()
       void this.refresh(true)
-    } catch (err) {
+    } catch {
       modal.saving = false
-      this.showToast('err', err instanceof Error ? err.message : String(err))
+      this.render()
     }
   }
 }

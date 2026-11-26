@@ -78,7 +78,19 @@ export type TuiState = {
   busyIds: Set<string>
   composer: ComposerState
   modal: ModalState
-  toast: { kind: 'ok' | 'err'; text: string } | null
+}
+
+export const ISSUE_KINDS: readonly IssueKind[] = ['feature', 'bug', 'polish']
+export const SUBMIT_MODES: readonly SubmitMode[] = ['handoff', 'direct']
+
+export function nextIssueKind(current: IssueKind): IssueKind {
+  const idx = ISSUE_KINDS.indexOf(current)
+  return ISSUE_KINDS[(idx + 1) % ISSUE_KINDS.length]
+}
+
+export function nextSubmitMode(current: SubmitMode): SubmitMode {
+  const idx = SUBMIT_MODES.indexOf(current)
+  return SUBMIT_MODES[(idx + 1) % SUBMIT_MODES.length]
 }
 
 const MODE_LABELS: Record<SubmitMode, string> = {
@@ -90,6 +102,12 @@ const KIND_LABELS: Record<IssueKind, string> = {
   feature: '新功能',
   bug: '修 Bug',
   polish: '体验优化'
+}
+
+const KIND_STYLES: Record<IssueKind, string> = {
+  feature: PALETTE.blue,
+  bug: PALETTE.red,
+  polish: PALETTE.purple
 }
 
 export function formatRelativeTime(iso: string): string {
@@ -292,24 +310,8 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   // ── Bottom AI-Chat-Style Composer ─────────────────────────────────────────
   renderBottomComposer(buf, state, 0, composerTop, width, composerH)
 
-  // ── Footer (row height - 1) ───────────────────────────────────────────────
-  if (state.toast) {
-    const style = state.toast.kind === 'ok' ? PALETTE.toastOk : PALETTE.toastErr
-    buf.fillRect(0, footerY, width, 1, style)
-    buf.writeText(1, footerY, state.toast.text, style, width - 2)
-  } else if (slashH > 0) {
-    buf.writeText(
-      1,
-      footerY,
-      '↑↓/滚轮 选择 · Tab 补全 · Enter/点击 执行 · Esc 取消',
-      PALETTE.muted,
-      width - 2
-    )
-  } else {
-    const hints =
-      'Enter 提交/执行 · / 斜杠命令 (/bug /direct /agent /refresh /quit) · ^V 贴图 · ↑↓/滚轮 浏览'
-    buf.writeText(1, footerY, hints, PALETTE.muted, width - 2)
-  }
+  // ── Footer Status Bar (Codex-style active selections below composer) ──────
+  renderFooterStatusBar(buf, state, width, footerY)
 
   // ── Active Modal Overlay ──────────────────────────────────────────────────
   if (state.modal.type !== 'none') {
@@ -397,6 +399,40 @@ function renderAttachmentChips(
   }
 }
 
+function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number, y: number) {
+  const c = state.composer
+  const rightHint = '⇧Tab 切换类型'
+  const rightHintW = stringDisplayWidth(rightHint)
+  let cx = 1
+
+  const kindText = `● ${KIND_LABELS[c.kind]}`
+  const kindW = buf.writeText(cx, y, kindText, KIND_STYLES[c.kind], Math.max(0, width - cx - 1))
+  if (kindW > 0) {
+    buf.addHitBox(cx, y, kindW, 1, 'cycle-issue-kind')
+    cx += kindW
+  }
+
+  if (cx < width - 4) {
+    cx += buf.writeText(cx, y, ' · ', PALETTE.dim, Math.max(0, width - cx - 1))
+    const modeText = MODE_LABELS[c.mode]
+    const modeW = buf.writeText(cx, y, modeText, PALETTE.muted, Math.max(0, width - cx - 1))
+    if (modeW > 0) {
+      buf.addHitBox(cx, y, modeW, 1, 'cycle-submit-mode')
+      cx += modeW
+    }
+  }
+
+  if (c.followUpOf !== null && cx < width - 6) {
+    cx += buf.writeText(cx, y, ' · ', PALETTE.dim, Math.max(0, width - cx - 1))
+    cx += buf.writeText(cx, y, `追提 #${c.followUpOf}`, PALETTE.amber, Math.max(0, width - cx - 1))
+  }
+
+  const rightX = width - rightHintW - 1
+  if (rightX > cx + 2) {
+    buf.writeText(rightX, y, rightHint, PALETTE.dim, rightHintW)
+  }
+}
+
 function renderBottomComposer(
   buf: ScreenBuffer,
   state: TuiState,
@@ -407,8 +443,7 @@ function renderBottomComposer(
 ) {
   const c = state.composer
   const isActive = state.modal.type === 'none'
-  const prefixTitle = c.followUpOf ? `追提 #${c.followUpOf}` : '提需求'
-  const title = `${prefixTitle} · ${MODE_LABELS[c.mode]} · ${KIND_LABELS[c.kind]}`
+  const title = c.followUpOf ? `追提 #${c.followUpOf}` : '提需求'
 
   buf.drawBox(x, y, w, h, {
     borderStyle: isActive ? PALETTE.borderActive : PALETTE.border,

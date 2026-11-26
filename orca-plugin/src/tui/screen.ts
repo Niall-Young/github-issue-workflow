@@ -36,9 +36,7 @@ export const PALETTE = {
   attachmentBadge: '\x1b[48;2;34;52;44;38;2;140;224;168;1m',
   modalBg: '\x1b[48;2;26;27;31;38;2;232;230;227m',
   inputBg: '\x1b[48;2;36;38;45;38;2;250;249;245m',
-  inputFocusBg: '\x1b[48;2;48;42;40;38;2;255;255;255m',
-  toastOk: '\x1b[48;2;31;58;43;38;2;140;224;168m',
-  toastErr: '\x1b[48;2;68;32;34;38;2;252;146;146m'
+  inputFocusBg: '\x1b[48;2;48;42;40;38;2;255;255;255m'
 } as const
 
 export type HitBox = {

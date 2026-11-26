@@ -14,7 +14,13 @@ import {
   splitComposerText
 } from './commands'
 import { InputParser } from './input'
-import { buildMainRows, renderTui, type TuiState } from './render'
+import {
+  buildMainRows,
+  nextIssueKind,
+  nextSubmitMode,
+  renderTui,
+  type TuiState
+} from './render'
 import { ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
 
 function makeSampleSnapshot(): BoardSnapshot {
@@ -97,8 +103,7 @@ function makeBaseState(text = ''): TuiState {
       submitting: false,
       slashIndex: 0
     },
-    modal: { type: 'none' },
-    toast: null
+    modal: { type: 'none' }
   }
 }
 
@@ -146,13 +151,15 @@ test('InputParser parses bracketed paste split across chunks', () => {
   assert.deepEqual(e2, [{ type: 'paste', text: '/tmp/demo shot.png' }])
 })
 
-test('InputParser parses arrow keys, shift+enter, ctrl shortcuts and CJK text', () => {
+test('InputParser parses arrow keys, shift+enter, shift+tab, ctrl shortcuts and CJK text', () => {
   const parser = new InputParser()
-  const events = parser.feed('\x1b[A\x1b[B\x1b[13;2u\x16你好\r')
+  const events = parser.feed('\x1b[A\x1b[B\x1b[13;2u\x1b[Z\x1b[9;2u\x16你好\r')
   assert.deepEqual(events, [
     { type: 'key', key: 'up', raw: '\x1b[A' },
     { type: 'key', key: 'down', raw: '\x1b[B' },
     { type: 'key', key: 'enter', shift: true, raw: '\x1b[13;2u' },
+    { type: 'key', key: 'tab', shift: true, raw: '\x1b[Z' },
+    { type: 'key', key: 'tab', shift: true, raw: '\x1b[9;2u' },
     { type: 'key', key: 'v', ctrl: true, raw: '\x16' },
     { type: 'text', text: '你好' },
     { type: 'key', key: 'enter', raw: '\r' }
@@ -331,4 +338,39 @@ test('renderTui renders inline [Image #1] tokens and clickable remove chips in c
     assert.equal(replyRemoveHits.length, 1)
     assert.equal(replyRemoveHits[0]?.payload, 1)
   }
+})
+
+test('Codex-style footer displays active issue kind and submit mode with cycling helpers and hit-boxes', () => {
+  assert.equal(nextIssueKind('feature'), 'bug')
+  assert.equal(nextIssueKind('bug'), 'polish')
+  assert.equal(nextIssueKind('polish'), 'feature')
+  assert.equal(nextSubmitMode('handoff'), 'direct')
+  assert.equal(nextSubmitMode('direct'), 'handoff')
+
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+
+  const state = makeBaseState('')
+  const buf = renderTui(state, 110, 30)
+  const footerLine = stripAnsi(buf.renderLines()[29]!)
+  assert.ok(footerLine.includes('● 新功能'))
+  assert.ok(footerLine.includes('Skill 规范提单'))
+  assert.ok(footerLine.includes('⇧Tab 切换类型'))
+  assert.ok(!footerLine.includes('Enter 提交/执行'))
+
+  const kindHits = buf.hitBoxes.filter((h) => h.action === 'cycle-issue-kind')
+  const modeHits = buf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
+  assert.equal(kindHits.length, 1)
+  assert.equal(kindHits[0]?.y, 29)
+  assert.equal(modeHits.length, 1)
+  assert.equal(modeHits[0]?.y, 29)
+
+  // Cycling to bug and direct mode updates the footer directly without any toast bar
+  state.composer.kind = nextIssueKind(state.composer.kind)
+  state.composer.mode = nextSubmitMode(state.composer.mode)
+  state.composer.followUpOf = 42
+  const updatedBuf = renderTui(state, 110, 30)
+  const updatedFooter = stripAnsi(updatedBuf.renderLines()[29]!)
+  assert.ok(updatedFooter.includes('● 修 Bug'))
+  assert.ok(updatedFooter.includes('快速直提'))
+  assert.ok(updatedFooter.includes('追提 #42'))
 })

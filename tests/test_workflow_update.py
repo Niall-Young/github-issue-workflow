@@ -162,6 +162,56 @@ class WorkflowUpdateTests(unittest.TestCase):
         ):
             UPDATE.latest_release()
 
+    def test_github_token_prefers_env_and_falls_back_to_gh_cli(self) -> None:
+        with mock.patch.dict("os.environ", {"GITHUB_TOKEN": "env-token"}, clear=True), mock.patch.object(
+            UPDATE.shutil, "which"
+        ) as which_mock:
+            self.assertEqual("env-token", UPDATE.github_token())
+            which_mock.assert_not_called()
+
+        completed = mock.Mock(returncode=0, stdout="gh-cli-token\n", stderr="")
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            UPDATE.shutil, "which", return_value="/usr/bin/gh"
+        ), mock.patch.object(UPDATE.subprocess, "run", return_value=completed) as run_mock:
+            self.assertEqual("gh-cli-token", UPDATE.github_token())
+            run_mock.assert_called_once()
+
+        failed = mock.Mock(returncode=1, stdout="", stderr="not logged in")
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+            UPDATE.shutil, "which", return_value="/usr/bin/gh"
+        ), mock.patch.object(UPDATE.subprocess, "run", return_value=failed):
+            self.assertIsNone(UPDATE.github_token())
+
+    def test_request_bytes_sends_auth_header_only_to_github_api(self) -> None:
+        class DummyResponse:
+            headers = {"Content-Length": "2"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int) -> bytes:
+                return b"ok"
+
+        captured: list[UPDATE.urllib.request.Request] = []
+
+        def fake_urlopen(request, timeout=30):
+            captured.append(request)
+            return DummyResponse()
+
+        with mock.patch.object(UPDATE, "github_token", return_value="secret-token"), mock.patch.object(
+            UPDATE.urllib.request, "urlopen", side_effect=fake_urlopen
+        ):
+            self.assertEqual(b"ok", UPDATE.request_bytes(UPDATE.RELEASE_API))
+            self.assertEqual(
+                b"ok",
+                UPDATE.request_bytes("https://github.com/Niall-Young/github-issue-workflow/releases/download/v0.1.0/a.sha256"),
+            )
+        self.assertEqual("Bearer secret-token", captured[0].get_header("Authorization"))
+        self.assertIsNone(captured[1].get_header("Authorization"))
+
 
 if __name__ == "__main__":
     unittest.main()

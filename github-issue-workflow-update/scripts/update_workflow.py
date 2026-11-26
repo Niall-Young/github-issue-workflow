@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -53,11 +54,35 @@ def version_text(value: str) -> str:
     return f"{major}.{minor}.{patch}"
 
 
+def github_token() -> str | None:
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    if token:
+        return token
+    gh = shutil.which("gh")
+    if not gh:
+        return None
+    try:
+        result = subprocess.run(
+            [gh, "auth", "token"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def request_bytes(url: str, accept: str = "application/octet-stream") -> bytes:
     headers = {"Accept": accept, "User-Agent": "github-issue-workflow-update/1"}
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if urllib.parse.urlparse(url).hostname == "api.github.com":
+        token = github_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:

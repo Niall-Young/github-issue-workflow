@@ -7,6 +7,12 @@
 import { resolve } from 'node:path'
 import type { IssueKind, NeedsYouItem, SubmitMode } from '../protocol'
 import {
+  appendInlineAttachment,
+  backspaceWithInlineAttachments,
+  removeInlineAttachmentById,
+  stripInlineAttachmentTokens
+} from './attachments'
+import {
   filterSlashCommands,
   isSlashMenuOpen,
   parseSlashCommand,
@@ -29,12 +35,6 @@ import { buildMainRows, computeComposerHeight, renderTui, type TuiState } from '
 import { ANSI, type ScreenBuffer } from './screen'
 
 const POLL_INTERVAL_MS = 12_000
-
-function dropLastChar(str: string): string {
-  const chars = Array.from(str)
-  chars.pop()
-  return chars.join('')
-}
 
 export class IssueBoardTui {
   private readonly targetPath: string
@@ -452,6 +452,33 @@ export class IssueBoardTui {
       case 'reply-paste-image':
         void this.handlePasteClipboardImage()
         return
+      case 'remove-composer-attachment': {
+        const id = Number(payload)
+        const c = this.state.composer
+        const next = removeInlineAttachmentById(c.text, c.attachments, id)
+        c.text = next.text
+        c.attachments = next.attachments
+        c.slashIndex = 0
+        if (next.removed) {
+          this.showToast('ok', `已移除 ${next.removed.token}`)
+        } else {
+          this.render()
+        }
+        return
+      }
+      case 'remove-reply-attachment': {
+        if (this.state.modal.type !== 'reply') return
+        const id = Number(payload)
+        const next = removeInlineAttachmentById(this.state.modal.text, this.state.modal.attachments, id)
+        this.state.modal.text = next.text
+        this.state.modal.attachments = next.attachments
+        if (next.removed) {
+          this.showToast('ok', `已移除 ${next.removed.token}`)
+        } else {
+          this.render()
+        }
+        return
+      }
       case 'reply-submit':
         void this.handleReplySubmit()
         return
@@ -501,8 +528,11 @@ export class IssueBoardTui {
       try {
         const att = attachLocalFilePath(repoPath, ev.text)
         if (att) {
-          c.attachments.push(att)
-          this.showToast('ok', `已附加文件：${att.name}`)
+          const next = appendInlineAttachment(c.text, c.attachments, att)
+          c.text = next.text
+          c.attachments = next.attachments
+          c.slashIndex = 0
+          this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
           return
         }
       } catch (err) {
@@ -522,6 +552,7 @@ export class IssueBoardTui {
       }
       if (ev.ctrl && ev.key === 'u') {
         c.text = ''
+        c.attachments = []
         c.slashIndex = 0
         this.render()
         return
@@ -580,8 +611,10 @@ export class IssueBoardTui {
         return
       }
       if (ev.key === 'backspace') {
-        if (c.text.length > 0) {
-          c.text = dropLastChar(c.text)
+        if (c.text.length > 0 || c.attachments.length > 0) {
+          const next = backspaceWithInlineAttachments(c.text, c.attachments)
+          c.text = next.text
+          c.attachments = next.attachments
           c.slashIndex = 0
           this.render()
         }
@@ -643,12 +676,20 @@ export class IssueBoardTui {
   }
 
   private handleMouse(ev: Extract<InputEvent, { type: 'mouse' }>) {
-    if (ev.kind === 'scrollUp') {
-      if (this.state.modal.type === 'none') this.moveSelection(-1)
-      return
-    }
-    if (ev.kind === 'scrollDown') {
-      if (this.state.modal.type === 'none') this.moveSelection(1)
+    if (ev.kind === 'scrollUp' || ev.kind === 'scrollDown') {
+      if (this.state.modal.type === 'none') {
+        const delta = ev.kind === 'scrollUp' ? -1 : 1
+        if (isSlashMenuOpen(this.state.composer.text)) {
+          const matches = filterSlashCommands(this.state.composer.text)
+          if (matches.length > 0) {
+            this.state.composer.slashIndex =
+              (this.state.composer.slashIndex + delta + matches.length) % matches.length
+            this.render()
+          }
+          return
+        }
+        this.moveSelection(delta)
+      }
       return
     }
     if (ev.kind === 'press' && ev.button === 'left' && this.lastBuffer) {
@@ -715,8 +756,14 @@ export class IssueBoardTui {
           void this.handleReplySubmit()
         } else if (ev.ctrl && ev.key === 'v') {
           void this.handlePasteClipboardImage()
+        } else if (ev.ctrl && ev.key === 'u') {
+          modal.text = ''
+          modal.attachments = []
+          this.render()
         } else if (ev.key === 'backspace') {
-          modal.text = dropLastChar(modal.text)
+          const next = backspaceWithInlineAttachments(modal.text, modal.attachments)
+          modal.text = next.text
+          modal.attachments = next.attachments
           this.render()
         }
       } else if (ev.type === 'paste') {
@@ -724,8 +771,10 @@ export class IssueBoardTui {
         try {
           const att = attachLocalFilePath(repoPath, ev.text)
           if (att) {
-            modal.attachments.push(att)
-            this.showToast('ok', `已附加文件：${att.name}`)
+            const next = appendInlineAttachment(modal.text, modal.attachments, att)
+            modal.text = next.text
+            modal.attachments = next.attachments
+            this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
             return
           }
         } catch (err) {
@@ -749,19 +798,26 @@ export class IssueBoardTui {
       return
     }
     if (this.state.modal.type === 'reply') {
-      this.state.modal.attachments.push(att)
-      this.showToast('ok', `已粘贴剪贴板截图：${att.name}`)
+      const next = appendInlineAttachment(this.state.modal.text, this.state.modal.attachments, att)
+      this.state.modal.text = next.text
+      this.state.modal.attachments = next.attachments
+      this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
       return
     }
-    this.state.composer.attachments.push(att)
-    this.showToast('ok', `已粘贴剪贴板截图：${att.name}`)
+    const c = this.state.composer
+    const next = appendInlineAttachment(c.text, c.attachments, att)
+    c.text = next.text
+    c.attachments = next.attachments
+    c.slashIndex = 0
+    this.showToast('ok', `已插入 ${next.added.token}（Backspace 或点击 × 删除）`)
   }
 
   private async handleComposerSubmit(overrideText?: string) {
     const c = this.state.composer
     if (c.submitting) return
     const rawText = overrideText !== undefined ? overrideText : c.text
-    const { title, details } = splitComposerText(rawText)
+    const cleanedText = stripInlineAttachmentTokens(rawText, c.attachments)
+    const { title, details } = splitComposerText(cleanedText)
     if (!title) {
       this.showToast('err', '请先输入需求描述')
       return
@@ -810,7 +866,8 @@ export class IssueBoardTui {
     modal.sending = true
     this.render()
     try {
-      await replyToAgentTerminal(modal.item.terminalId, modal.text, modal.attachments)
+      const cleanedMessage = stripInlineAttachmentTokens(modal.text, modal.attachments)
+      await replyToAgentTerminal(modal.item.terminalId, cleanedMessage, modal.attachments)
       this.state.modal = { type: 'none' }
       this.showToast('ok', `已发送回复给 ${modal.item.agentName}`)
       void this.refresh(true)

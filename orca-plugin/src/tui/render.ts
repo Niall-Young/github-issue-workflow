@@ -9,9 +9,9 @@ import type {
   IssueKind,
   NeedsYouItem,
   PullRequestItem,
-  SavedAttachment,
   SubmitMode
 } from '../protocol'
+import type { InlineAttachment } from './attachments'
 import { filterSlashCommands, isSlashMenuOpen, type SlashCommandDef } from './commands'
 import {
   PALETTE,
@@ -32,7 +32,7 @@ export type ComposerState = {
   mode: SubmitMode
   kind: IssueKind
   followUpOf: number | null
-  attachments: SavedAttachment[]
+  attachments: InlineAttachment[]
   submitting: boolean
   slashIndex: number
 }
@@ -50,7 +50,7 @@ export type ModalState =
       type: 'reply'
       item: Extract<NeedsYouItem, { kind: 'agent-question' }>
       text: string
-      attachments: SavedAttachment[]
+      attachments: InlineAttachment[]
       sending: boolean
     }
   | {
@@ -160,6 +160,18 @@ export function computeComposerHeight(composer: ComposerState, width: number): n
   return 2 + textLines + attachmentLine
 }
 
+const SLASH_MAX_VISIBLE = 6
+
+export function computeSlashMenuHeight(state: TuiState, maxHeight: number): number {
+  if (state.modal.type !== 'none' || !isSlashMenuOpen(state.composer.text)) return 0
+  if (maxHeight < 2) return 0
+  const matches = filterSlashCommands(state.composer.text)
+  const visibleRows =
+    matches.length === 0 ? 1 : Math.min(matches.length, Math.min(SLASH_MAX_VISIBLE, maxHeight - 1))
+  // 1 top hairline divider + visible command rows (borderless inline Claude Code style)
+  return 1 + visibleRows
+}
+
 export function renderTui(state: TuiState, width: number, height: number): ScreenBuffer {
   const buf = new ScreenBuffer(width, height)
   const snap = state.snapshot
@@ -203,7 +215,10 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   const composerH = Math.min(5, computeComposerHeight(state.composer, width))
   const composerTop = Math.max(5, footerY - composerH)
   const contentTop = 2
-  const contentHeight = Math.max(3, composerTop - contentTop)
+  const maxSlashH = Math.max(0, composerTop - contentTop - 3)
+  const slashH = computeSlashMenuHeight(state, maxSlashH)
+  const slashTop = composerTop - slashH
+  const contentHeight = Math.max(3, slashTop - contentTop)
 
   const splitMode = width >= 92
   const leftW = splitMode ? Math.floor(width * 0.62) : width
@@ -269,19 +284,27 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
     renderAttentionPane(buf, state, rightX + 1, listTop, rightW - 2, listHeight)
   }
 
+  // ── Inline Slash Command List (Claude Code style, directly above composer) ─
+  if (slashH > 0) {
+    renderSlashMenu(buf, state, width, slashTop, slashH)
+  }
+
   // ── Bottom AI-Chat-Style Composer ─────────────────────────────────────────
   renderBottomComposer(buf, state, 0, composerTop, width, composerH)
-
-  // ── Floating Slash Command Palette (anchored above composer) ──────────────
-  if (state.modal.type === 'none' && isSlashMenuOpen(state.composer.text)) {
-    renderSlashMenu(buf, state, width, composerTop)
-  }
 
   // ── Footer (row height - 1) ───────────────────────────────────────────────
   if (state.toast) {
     const style = state.toast.kind === 'ok' ? PALETTE.toastOk : PALETTE.toastErr
     buf.fillRect(0, footerY, width, 1, style)
     buf.writeText(1, footerY, state.toast.text, style, width - 2)
+  } else if (slashH > 0) {
+    buf.writeText(
+      1,
+      footerY,
+      '↑↓/滚轮 选择 · Tab 补全 · Enter/点击 执行 · Esc 取消',
+      PALETTE.muted,
+      width - 2
+    )
   } else {
     const hints =
       'Enter 提交/执行 · / 斜杠命令 (/bug /direct /agent /refresh /quit) · ^V 贴图 · ↑↓/滚轮 浏览'
@@ -294,6 +317,84 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   }
 
   return buf
+}
+
+function writeLineWithAttachmentTokens(
+  buf: ScreenBuffer,
+  x: number,
+  y: number,
+  line: string,
+  baseStyle: string,
+  maxWidth: number,
+  attachments: readonly InlineAttachment[]
+) {
+  if (attachments.length === 0) {
+    buf.writeText(x, y, line, baseStyle, maxWidth)
+    return
+  }
+
+  const tokens = attachments.map((a) => a.token)
+  let cx = x
+  let remainingW = maxWidth
+  let pos = 0
+
+  while (pos < line.length && remainingW > 0) {
+    let nextIdx = -1
+    let matchedToken = ''
+    for (const token of tokens) {
+      const idx = line.indexOf(token, pos)
+      if (idx !== -1 && (nextIdx === -1 || idx < nextIdx)) {
+        nextIdx = idx
+        matchedToken = token
+      }
+    }
+
+    if (nextIdx === -1) {
+      buf.writeText(cx, y, line.slice(pos), baseStyle, remainingW)
+      break
+    }
+
+    if (nextIdx > pos) {
+      const segment = line.slice(pos, nextIdx)
+      const written = buf.writeText(cx, y, segment, baseStyle, remainingW)
+      cx += written
+      remainingW -= written
+      if (remainingW <= 0) break
+    }
+
+    const tokenWritten = buf.writeText(cx, y, matchedToken, PALETTE.attachmentBadge, remainingW)
+    cx += tokenWritten
+    remainingW -= tokenWritten
+    pos = nextIdx + matchedToken.length
+  }
+}
+
+function renderAttachmentChips(
+  buf: ScreenBuffer,
+  x: number,
+  y: number,
+  maxWidth: number,
+  attachments: readonly InlineAttachment[],
+  removeAction: 'remove-composer-attachment' | 'remove-reply-attachment',
+  showHint: boolean
+) {
+  let ax = x
+  const rightBound = x + maxWidth
+  for (const att of attachments) {
+    const label = `${att.token.slice(1, -1)} ×`
+    const needed = stringDisplayWidth(label) + 2
+    if (ax + needed > rightBound) {
+      const remain = rightBound - ax
+      if (remain >= 2) {
+        buf.writeText(ax, y, '…', PALETTE.dim, remain)
+      }
+      return
+    }
+    ax += buf.drawButton(ax, y, label, PALETTE.attachmentBadge, removeAction, att.id) + 1
+  }
+  if (showHint && ax < rightBound - 6) {
+    buf.writeText(ax, y, 'Backspace 或点击 × 删除', PALETTE.dim, rightBound - ax)
+  }
 }
 
 function renderBottomComposer(
@@ -347,19 +448,21 @@ function renderBottomComposer(
     const lines = wrapTextToWidth(displayText, textAreaW, maxTextLines)
     lines.forEach((line, idx) => {
       const style = c.text.startsWith('/') ? PALETTE.accent : PALETTE.bright
-      buf.writeText(textAreaX, y + 1 + idx, line, style, textAreaW)
+      writeLineWithAttachmentTokens(buf, textAreaX, y + 1 + idx, line, style, textAreaW, c.attachments)
     })
   }
 
   if (c.attachments.length > 0) {
     const attRowY = y + h - 2
-    const names = c.attachments.map((a) => a.name).join(', ')
-    buf.writeText(
-      textAreaX,
+    const prefixW = buf.writeText(textAreaX, attRowY, '📎 ', PALETTE.green, 3)
+    renderAttachmentChips(
+      buf,
+      textAreaX + prefixW,
       attRowY,
-      `📎 已附 ${c.attachments.length} 个: ${names} (/clear 清除)`,
-      PALETTE.green,
-      textAreaW
+      Math.max(0, textAreaW - prefixW),
+      c.attachments,
+      'remove-composer-attachment',
+      true
     )
   }
 }
@@ -374,28 +477,28 @@ function isCommandActive(cmd: SlashCommandDef, composer: ComposerState): boolean
   return false
 }
 
-function renderSlashMenu(buf: ScreenBuffer, state: TuiState, width: number, composerTop: number) {
+function renderSlashMenu(
+  buf: ScreenBuffer,
+  state: TuiState,
+  width: number,
+  slashTop: number,
+  slashH: number
+) {
   const matches = filterSlashCommands(state.composer.text)
-  const menuW = Math.min(width - 2, Math.max(54, Math.min(82, width - 4)))
-  const menuX = 1
-  const maxVisible = Math.max(1, Math.min(8, composerTop - 3))
-  const rowCount = matches.length === 0 ? 1 : Math.min(matches.length, maxVisible)
-  const menuH = rowCount + 2
-  const menuY = Math.max(2, composerTop - menuH)
+  const rowCount = Math.max(1, slashH - 1)
 
-  buf.drawBox(menuX, menuY, menuW, menuH, {
-    borderStyle: PALETTE.borderActive,
-    fillStyle: PALETTE.modalBg,
-    title: '斜杠命令 (↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 取消)',
-    titleStyle: PALETTE.accentBold
-  })
-  buf.addHitBox(menuX, menuY, menuW, menuH, 'noop')
-
-  const innerX = menuX + 2
-  const innerW = menuW - 4
+  // Clean hairline separator above the borderless inline command list
+  buf.drawHLine(0, slashTop, width, PALETTE.border)
+  buf.fillRect(0, slashTop + 1, width, rowCount, '')
 
   if (matches.length === 0) {
-    buf.writeText(innerX, menuY + 1, '无匹配命令 · 按 Esc 清空或继续输入', PALETTE.muted, innerW)
+    buf.writeText(
+      3,
+      slashTop + 1,
+      '无匹配命令 · 按 Esc 清空或继续输入',
+      PALETTE.muted,
+      Math.max(4, width - 4)
+    )
     return
   }
 
@@ -405,32 +508,46 @@ function renderSlashMenu(buf: ScreenBuffer, state: TuiState, width: number, comp
     start = clampedIdx - rowCount + 1
   }
 
+  const leftPad = 1
+  const indicatorW = 2 // "❯ " or "  "
+  const cmdColW = Math.min(22, Math.max(14, Math.floor(width * 0.22)))
+  const descX = leftPad + indicatorW + cmdColW
+
   for (let i = 0; i < rowCount; i += 1) {
     const idx = start + i
     const cmd = matches[idx]
     if (!cmd) break
-    const rowY = menuY + 1 + i
+    const rowY = slashTop + 1 + i
     const isSel = idx === clampedIdx
     const isActive = isCommandActive(cmd, state.composer)
 
-    if (isSel) {
-      buf.fillRect(menuX + 1, rowY, menuW - 2, 1, PALETTE.selBg)
-    }
-
-    const prefix = isSel ? '▸ ' : '  '
-    const nameCol = cmd.name.padEnd(11, ' ')
-    const activeTag = isActive ? ' [当前]' : ''
+    const prefix = isSel ? '❯ ' : '  '
+    const cmdStyle = isSel ? PALETTE.accentBold : PALETTE.text
+    const descStyle = isSel ? PALETTE.accent : PALETTE.muted
+    const activeTag = isActive ? '[当前]' : ''
     const activeW = stringDisplayWidth(activeTag)
 
-    let cx = innerX
-    cx += buf.writeText(cx, rowY, prefix, isSel ? PALETTE.selBg : PALETTE.accent)
-    cx += buf.writeText(cx, rowY, nameCol, isSel ? PALETTE.selBg : PALETTE.bright)
-    const descBudget = Math.max(4, innerW - (cx - innerX) - activeW - 1)
-    buf.writeText(cx, rowY, `${cmd.label} · ${cmd.description}`, isSel ? PALETTE.selBg : PALETTE.muted, descBudget)
-    if (isActive) {
-      buf.writeText(innerX + innerW - activeW, rowY, activeTag, isSel ? PALETTE.selBg : PALETTE.green, activeW)
+    buf.writeText(leftPad, rowY, prefix, isSel ? PALETTE.accentBold : PALETTE.muted, indicatorW)
+    buf.writeText(leftPad + indicatorW, rowY, cmd.name, cmdStyle, cmdColW - 1)
+
+    const rightMargin = 2
+    const descBudget = Math.max(
+      4,
+      width - descX - rightMargin - (isActive ? activeW + 2 : 0)
+    )
+    buf.writeText(descX, rowY, cmd.description, descStyle, descBudget)
+
+    if (isActive && width - rightMargin - activeW > descX + 4) {
+      buf.writeText(
+        width - rightMargin - activeW,
+        rowY,
+        activeTag,
+        isSel ? PALETTE.accentBold : PALETTE.green,
+        activeW
+      )
     }
-    buf.addHitBox(menuX + 1, rowY, menuW - 2, 1, 'exec-slash', cmd.id)
+
+    buf.addHitBox(0, rowY, width, 1, 'exec-slash', cmd.id)
   }
 }
 
@@ -685,12 +802,22 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
     const inputY = my + 6
     buf.fillRect(ix, inputY, iw, 2, PALETTE.inputFocusBg)
     const rLines = wrapTextToWidth(`${modal.text}▏`, iw - 2, 2)
-    rLines.forEach((l, i) => buf.writeText(ix + 1, inputY + i, l, PALETTE.inputFocusBg, iw - 2))
+    rLines.forEach((l, i) =>
+      writeLineWithAttachmentTokens(buf, ix + 1, inputY + i, l, PALETTE.inputFocusBg, iw - 2, modal.attachments)
+    )
     const attY = inputY + 3
     let ax = ix
     ax += buf.drawButton(ax, attY, '+ 粘贴截图 (^V)', PALETTE.chipBg, 'reply-paste-image') + 1
     if (modal.attachments.length > 0) {
-      buf.writeText(ax, attY, `已附 ${modal.attachments.length} 个`, PALETTE.green, Math.max(0, ix + iw - ax))
+      renderAttachmentChips(
+        buf,
+        ax,
+        attY,
+        Math.max(0, ix + iw - ax),
+        modal.attachments,
+        'remove-reply-attachment',
+        false
+      )
     }
     const footerY = my + mh - 2
     let fx = ix

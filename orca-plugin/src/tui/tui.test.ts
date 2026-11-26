@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { BoardSnapshot } from '../protocol'
+import type { BoardSnapshot, SavedAttachment } from '../protocol'
+import {
+  appendInlineAttachment,
+  backspaceWithInlineAttachments,
+  removeInlineAttachmentById,
+  stripInlineAttachmentTokens
+} from './attachments'
 import {
   filterSlashCommands,
   isSlashMenuOpen,
@@ -184,7 +190,7 @@ test('slash command filtering and parsing handle commands, aliases, and argument
   })
 })
 
-test('renderTui renders bottom composer, clickable rows, and floating slash menu', () => {
+test('renderTui renders bottom composer, clickable rows, and inline Claude Code-style slash menu', () => {
   const state = makeBaseState('')
   const rows = buildMainRows(state.snapshot, 'issues')
   assert.equal(rows.length, 2)
@@ -199,10 +205,130 @@ test('renderTui renders bottom composer, clickable rows, and floating slash menu
   assert.equal(actions.has('open-reply'), true)
   assert.equal(actions.has('exec-slash'), false)
 
-  // Typing "/" opens the floating slash command menu with clickable command rows
+  // Typing "/" opens the borderless inline slash command list directly above the composer
   const slashState = makeBaseState('/')
+  slashState.composer.slashIndex = 1
   const slashBuf = renderTui(slashState, 110, 30)
   const slashHits = slashBuf.hitBoxes.filter((h) => h.action === 'exec-slash')
   assert.ok(slashHits.length >= 5)
   assert.equal(slashHits[0]?.payload, 'bug')
+  assert.equal(slashHits[0]?.x, 0)
+  assert.equal(slashHits[0]?.w, 110)
+
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = slashBuf.renderLines().map(stripAnsi)
+  const selectedRow = lines[slashHits[1]!.y]
+  const unselectedRow = lines[slashHits[0]!.y]
+  assert.ok(selectedRow.includes('❯ /feature'))
+  assert.ok(!selectedRow.includes('│'))
+  assert.ok(unselectedRow.includes('  /bug'))
+  assert.ok(!unselectedRow.includes('│'))
+  // Hairline divider immediately above the first inline command row
+  assert.equal(lines[slashHits[0]!.y - 1], '─'.repeat(110))
+})
+
+test('inline attachment tokens support insertion, atomic Backspace, click removal, and clean submit stripping', () => {
+  const img1: SavedAttachment = {
+    name: 'orca-paste-1.png',
+    mimeType: 'image/png',
+    size: 1024,
+    path: '/tmp/orca-paste-1.png'
+  }
+  const pdf2: SavedAttachment = {
+    name: 'spec.pdf',
+    mimeType: 'application/pdf',
+    size: 2048,
+    path: '/tmp/spec.pdf'
+  }
+  const img3: SavedAttachment = {
+    name: 'orca-paste-3.png',
+    mimeType: 'image/png',
+    size: 512,
+    path: '/tmp/orca-paste-3.png'
+  }
+
+  // Insert into empty text -> [Image #1]
+  const s1 = appendInlineAttachment('', [], img1)
+  assert.equal(s1.text, '[Image #1]')
+  assert.equal(s1.added.token, '[Image #1]')
+  assert.equal(s1.attachments.length, 1)
+
+  // Immediate Backspace deletes entire [Image #1] token and removes attachment
+  const bsEmpty = backspaceWithInlineAttachments(s1.text, s1.attachments)
+  assert.equal(bsEmpty.text, '')
+  assert.equal(bsEmpty.attachments.length, 0)
+  assert.equal(bsEmpty.removed?.token, '[Image #1]')
+
+  // Insert after text + second non-image attachment
+  const s2 = appendInlineAttachment('看看这个报错', [], img1)
+  assert.equal(s2.text, '看看这个报错 [Image #1]')
+  const s3 = appendInlineAttachment(s2.text, s2.attachments, pdf2)
+  assert.equal(s3.text, '看看这个报错 [Image #1] [File #2]')
+  assert.equal(s3.attachments.length, 2)
+
+  // Click-remove #1 from the middle without leaving double spaces
+  const removedMid = removeInlineAttachmentById(s3.text, s3.attachments, 1)
+  assert.equal(removedMid.text, '看看这个报错 [File #2]')
+  assert.deepEqual(
+    removedMid.attachments.map((a) => a.token),
+    ['[File #2]']
+  )
+
+  // Next attachment gets monotonic id #3
+  const s4 = appendInlineAttachment(removedMid.text, removedMid.attachments, img3)
+  assert.equal(s4.text, '看看这个报错 [File #2] [Image #3]')
+
+  // Backspace deletes [Image #3] atomically, then space, then [File #2]
+  const bs1 = backspaceWithInlineAttachments(s4.text, s4.attachments)
+  assert.equal(bs1.text, '看看这个报错 [File #2] ')
+  assert.deepEqual(
+    bs1.attachments.map((a) => a.token),
+    ['[File #2]']
+  )
+  const bs2 = backspaceWithInlineAttachments(bs1.text, bs1.attachments)
+  assert.equal(bs2.text, '看看这个报错 [File #2]')
+  const bs3 = backspaceWithInlineAttachments(bs2.text, bs2.attachments)
+  assert.equal(bs3.text, '看看这个报错 ')
+  assert.equal(bs3.attachments.length, 0)
+
+  // Stripping tokens before submit yields clean title & details
+  const cleaned = stripInlineAttachmentTokens('[Image #1] 修复按钮样式 [File #2]\n补充说明', s3.attachments)
+  assert.deepEqual(splitComposerText(cleaned), {
+    title: '修复按钮样式',
+    details: '补充说明'
+  })
+})
+
+test('renderTui renders inline [Image #1] tokens and clickable remove chips in composer and reply modal', () => {
+  const saved: SavedAttachment = {
+    name: 'orca-paste-123.png',
+    mimeType: 'image/png',
+    size: 4096,
+    path: '/tmp/orca-paste-123.png'
+  }
+  const inserted = appendInlineAttachment('修复这个界面', [], saved)
+  const state = makeBaseState(inserted.text)
+  state.composer.attachments = inserted.attachments
+
+  const buf = renderTui(state, 110, 30)
+  const removeHits = buf.hitBoxes.filter((h) => h.action === 'remove-composer-attachment')
+  assert.equal(removeHits.length, 1)
+  assert.equal(removeHits[0]?.payload, 1)
+
+  const snap = state.snapshot!
+  const questionItem = snap.needsYou[0]
+  assert.equal(questionItem.kind, 'agent-question')
+  if (questionItem.kind === 'agent-question') {
+    state.modal = {
+      type: 'reply',
+      item: questionItem,
+      text: inserted.text,
+      attachments: inserted.attachments,
+      sending: false
+    }
+    const modalBuf = renderTui(state, 110, 30)
+    const replyRemoveHits = modalBuf.hitBoxes.filter((h) => h.action === 'remove-reply-attachment')
+    assert.equal(replyRemoveHits.length, 1)
+    assert.equal(replyRemoveHits[0]?.payload, 1)
+  }
 })

@@ -32,8 +32,11 @@ import {
   nextIssueKind,
   nextSubmitMode,
   renderTui,
+  resolveMainRowUrl,
+  resolveSelectedMainRowAction,
   type TuiState
 } from './render'
+import { IssueBoardTui } from './app'
 import { ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
 
 function makeSampleSnapshot(): BoardSnapshot {
@@ -660,4 +663,177 @@ test('collectOrcaAgentState resolves real term_ handle via paneKey and surfaces 
     explicitWait.questions[0]?.kind === 'agent-question' ? explicitWait.questions[0].terminalId : '',
     'term_real_123'
   )
+})
+
+test('resolveMainRowUrl and resolveSelectedMainRowAction handle issues, PRs, empty handoff URLs, sections, and attention pane', () => {
+  const snap = makeSampleSnapshot()
+  snap.inProgress.push({
+    id: 'handoff-term-1',
+    issueNumber: null,
+    title: '本地整理中的需求',
+    url: '',
+    statusLabel: 'Skill 整理提单中',
+    updatedAt: new Date().toISOString()
+  })
+  snap.completed.push({
+    id: 'completed-9',
+    issueNumber: 9,
+    title: '已修复布局偏移',
+    url: 'https://github.com/acme/demo-app/issues/9',
+    prUrl: 'https://github.com/acme/demo-app/pull/19',
+    summary: '已合并',
+    completedAt: new Date().toISOString()
+  })
+
+  const issueRows = buildMainRows(snap, 'issues')
+  // [0]: section 进行中, [1]: inProgress #12, [2]: handoff (empty url), [3]: section 已完成, [4]: completed #9
+  assert.equal(resolveMainRowUrl(issueRows[0]), null)
+  assert.equal(resolveMainRowUrl(issueRows[1]), 'https://github.com/acme/demo-app/issues/12')
+  assert.equal(resolveMainRowUrl(issueRows[2]), null)
+  assert.equal(resolveMainRowUrl(issueRows[3]), null)
+  assert.equal(resolveMainRowUrl(issueRows[4]), 'https://github.com/acme/demo-app/issues/9')
+
+  const base = makeBaseState('')
+  base.snapshot = snap
+
+  // Section header -> ignore
+  base.selectedIndex = 0
+  assert.deepEqual(resolveSelectedMainRowAction(base), { kind: 'ignore' })
+
+  // inProgress with valid URL -> open
+  base.selectedIndex = 1
+  assert.deepEqual(resolveSelectedMainRowAction(base), {
+    kind: 'open',
+    url: 'https://github.com/acme/demo-app/issues/12'
+  })
+
+  // Local handoff with empty URL -> no-url
+  base.selectedIndex = 2
+  assert.deepEqual(resolveSelectedMainRowAction(base), { kind: 'no-url' })
+
+  // Completed issue with valid URL -> open
+  base.selectedIndex = 4
+  assert.deepEqual(resolveSelectedMainRowAction(base), {
+    kind: 'open',
+    url: 'https://github.com/acme/demo-app/issues/9'
+  })
+
+  // Attention pane focused -> ignore (must not open main list item)
+  base.activePane = 'attention'
+  assert.deepEqual(resolveSelectedMainRowAction(base), { kind: 'ignore' })
+
+  // PRs tab -> open PR URL
+  base.activePane = 'main'
+  base.activeTab = 'prs'
+  base.selectedIndex = 1
+  assert.deepEqual(resolveSelectedMainRowAction(base), {
+    kind: 'open',
+    url: 'https://github.com/acme/demo-app/pull/18'
+  })
+})
+
+test('IssueBoardTui opens selected Issue/PR directly in browser on Enter or second click without detail modal', () => {
+  const openedUrls: string[] = []
+  const tui = new IssueBoardTui('/tmp/demo-app', {
+    openUrl: (url) => {
+      openedUrls.push(url)
+    },
+    writeOutput: () => {}
+  })
+
+  const snap = makeSampleSnapshot()
+  snap.inProgress.push({
+    id: 'handoff-local',
+    issueNumber: null,
+    title: '本地待提单',
+    url: '',
+    statusLabel: 'Skill 整理提单中',
+    updatedAt: new Date().toISOString()
+  })
+  snap.completed.push({
+    id: 'completed-9',
+    issueNumber: 9,
+    title: '已完成需求',
+    url: 'https://github.com/acme/demo-app/issues/9',
+    prUrl: null,
+    summary: 'done',
+    completedAt: new Date().toISOString()
+  })
+
+  const internal = tui as unknown as {
+    state: TuiState
+    handleEvent: (ev: { type: 'key'; key: string; raw: string; shift?: boolean; ctrl?: boolean }) => void
+    dispatchAction: (action: string, payload?: unknown) => void
+  }
+  internal.state.snapshot = snap
+  internal.state.loading = false
+  internal.state.activeTab = 'issues'
+  internal.state.activePane = 'main'
+  internal.state.selectedIndex = 1
+
+  // 1. Pressing Enter with empty composer on inProgress issue opens browser directly, no modal
+  internal.handleEvent({ type: 'key', key: 'enter', raw: '\r' })
+  assert.deepEqual(openedUrls, ['https://github.com/acme/demo-app/issues/12'])
+  assert.equal(internal.state.modal.type, 'none')
+
+  // 2. Clicking an unselected row (completed #9 at index 4) only selects it; second click opens browser
+  internal.dispatchAction('select-main-row', 4)
+  assert.equal(internal.state.selectedIndex, 4)
+  assert.equal(openedUrls.length, 1)
+  assert.equal(internal.state.modal.type, 'none')
+
+  internal.dispatchAction('select-main-row', 4)
+  assert.deepEqual(openedUrls, [
+    'https://github.com/acme/demo-app/issues/12',
+    'https://github.com/acme/demo-app/issues/9'
+  ])
+  assert.equal(internal.state.modal.type, 'none')
+
+  // 3. Local handoff row (index 2, empty url) does not open browser or modal, sets errorNotice
+  internal.state.selectedIndex = 2
+  internal.handleEvent({ type: 'key', key: 'enter', raw: '\r' })
+  assert.equal(openedUrls.length, 2)
+  assert.equal(internal.state.modal.type, 'none')
+  assert.equal(internal.state.errorNotice, '该条目尚未生成 GitHub 链接')
+
+  // 4. Section header row (index 0) is safely ignored
+  internal.state.selectedIndex = 0
+  internal.handleEvent({ type: 'key', key: 'enter', raw: '\r' })
+  assert.equal(openedUrls.length, 2)
+  assert.equal(internal.state.modal.type, 'none')
+  assert.equal(internal.state.errorNotice, null)
+
+  // 5. Switching to PRs tab and pressing Enter opens PR URL directly
+  internal.dispatchAction('switch-tab', 'prs')
+  assert.equal(internal.state.selectedIndex, 1)
+  internal.handleEvent({ type: 'key', key: 'enter', raw: '\r' })
+  assert.deepEqual(openedUrls, [
+    'https://github.com/acme/demo-app/issues/12',
+    'https://github.com/acme/demo-app/issues/9',
+    'https://github.com/acme/demo-app/pull/18'
+  ])
+  assert.equal(internal.state.modal.type, 'none')
+
+  // 6. Focus on attention pane: pressing Enter does not open main list item
+  internal.state.activePane = 'attention'
+  internal.handleEvent({ type: 'key', key: 'enter', raw: '\r' })
+  assert.equal(openedUrls.length, 3)
+  assert.equal(internal.state.modal.type, 'none')
+
+  // 7. Settings and reply modals remain functional and close on Escape
+  internal.dispatchAction('open-settings')
+  assert.equal(internal.state.modal.type, 'settings')
+  const settingsBuf = renderTui(internal.state, 110, 30)
+  assert.equal(settingsBuf.hitBoxes.some((h) => h.action === 'settings-save'), true)
+  internal.handleEvent({ type: 'key', key: 'escape', raw: '\x1b' })
+  assert.equal(internal.state.modal.type, 'none')
+
+  const qItem = snap.needsYou[0]
+  assert.equal(qItem?.kind, 'agent-question')
+  internal.dispatchAction('open-reply', qItem)
+  assert.equal(internal.state.modal.type, 'reply')
+  const replyBuf = renderTui(internal.state, 110, 30)
+  assert.equal(replyBuf.hitBoxes.some((h) => h.action === 'reply-submit'), true)
+  internal.handleEvent({ type: 'key', key: 'escape', raw: '\x1b' })
+  assert.equal(internal.state.modal.type, 'none')
 })

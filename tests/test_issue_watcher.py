@@ -1668,6 +1668,18 @@ class IssueWatcherTests(unittest.TestCase):
         with mock.patch.object(WATCHER, "command", side_effect=fake_synced):
             self.assertIsNone(WATCHER.preferred_worktree_base_branch(repo))
 
+        def fake_diverged(argv):
+            if argv[3:5] == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(argv, 0, "main\n", "")
+            if argv[3:5] == ["rev-parse", "--abbrev-ref"]:
+                return subprocess.CompletedProcess(argv, 0, "origin/main\n", "")
+            if argv[3:5] == ["rev-list", "--left-right"]:
+                return subprocess.CompletedProcess(argv, 0, "1\t3\n", "")
+            return subprocess.CompletedProcess(argv, 1, "", "unexpected")
+
+        with mock.patch.object(WATCHER, "command", side_effect=fake_diverged):
+            self.assertIsNone(WATCHER.preferred_worktree_base_branch(repo))
+
         def fake_no_upstream(argv):
             if argv[3:5] == ["branch", "--show-current"]:
                 return subprocess.CompletedProcess(argv, 0, "local-dev\n", "")

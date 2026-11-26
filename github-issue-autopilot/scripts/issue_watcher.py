@@ -1708,10 +1708,11 @@ def preferred_worktree_base_branch(repo: Path) -> str | None:
     if len(parts) != 2:
         return None
     try:
+        behind = int(parts[0])
         ahead = int(parts[1])
     except ValueError:
         return None
-    return branch if ahead > 0 else None
+    return branch if ahead > 0 and behind == 0 else None
 
 
 def create_blocked_worktree(config: dict[str, Any], repository: dict[str, Any], run: dict[str, Any],

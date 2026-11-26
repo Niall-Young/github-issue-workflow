@@ -70,7 +70,8 @@ export type TuiState = {
 }
 
 export const ISSUE_KINDS: readonly IssueKind[] = ['feature', 'bug', 'polish']
-export const SUBMIT_MODES: readonly SubmitMode[] = ['handoff', 'direct']
+export const SUBMIT_MODES: readonly SubmitMode[] = ['direct', 'handoff']
+export const DEFAULT_SUBMIT_MODE: SubmitMode = 'direct'
 
 export function nextIssueKind(current: IssueKind): IssueKind {
   const idx = ISSUE_KINDS.indexOf(current)
@@ -82,9 +83,9 @@ export function nextSubmitMode(current: SubmitMode): SubmitMode {
   return SUBMIT_MODES[(idx + 1) % SUBMIT_MODES.length]
 }
 
-const MODE_LABELS: Record<SubmitMode, string> = {
-  handoff: 'Skill 规范提单',
-  direct: '快速直提'
+const MODE_DISPLAY: Record<SubmitMode, { label: string; style: string }> = {
+  direct: { label: '○ Skill 规范提单', style: PALETTE.dim },
+  handoff: { label: '✓ Skill 规范提单', style: PALETTE.accentBold }
 }
 
 const KIND_LABELS: Record<IssueKind, string> = {
@@ -434,8 +435,14 @@ function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number
 
   if (cx < width - 4) {
     cx += buf.writeText(cx, y, ' · ', PALETTE.dim, Math.max(0, width - cx - 1))
-    const modeText = MODE_LABELS[c.mode]
-    const modeW = buf.writeText(cx, y, modeText, PALETTE.muted, Math.max(0, width - cx - 1))
+    const modeDisplay = MODE_DISPLAY[c.mode]
+    const modeW = buf.writeText(
+      cx,
+      y,
+      modeDisplay.label,
+      modeDisplay.style,
+      Math.max(0, width - cx - 1)
+    )
     if (modeW > 0) {
       buf.addHitBox(cx, y, modeW, 1, 'cycle-submit-mode')
       cx += modeW

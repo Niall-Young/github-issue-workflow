@@ -26,9 +26,11 @@ import {
   loadBoardSnapshot,
   type PendingHandoff
 } from './orca-cli'
+import { IssueBoardTui } from './app'
 import {
   buildMainRows,
   computeComposerHeight,
+  DEFAULT_SUBMIT_MODE,
   nextIssueKind,
   nextSubmitMode,
   renderTui,
@@ -36,8 +38,14 @@ import {
   resolveSelectedMainRowAction,
   type TuiState
 } from './render'
-import { IssueBoardTui } from './app'
-import { ANSI, ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
+import {
+  ANSI,
+  PALETTE,
+  ScreenBuffer,
+  stringDisplayWidth,
+  truncateToWidth,
+  wrapTextToWidth
+} from './screen'
 
 function makeSampleSnapshot(): BoardSnapshot {
   return {
@@ -112,7 +120,7 @@ function makeBaseState(text = ''): TuiState {
     busyIds: new Set(),
     composer: {
       text,
-      mode: 'handoff',
+      mode: DEFAULT_SUBMIT_MODE,
       kind: 'feature',
       followUpOf: null,
       attachments: [],
@@ -348,10 +356,11 @@ test('renderTui keeps inline [Image #1] on a single composer line without duplic
   assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-issue-kind'), true)
   assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-submit-mode'), true)
 
-  // Footer shows active kind & mode, and inline error notice replaces right hint without a banner
+  // Footer shows active kind & default off Skill toggle, and inline error notice replaces right hint without a banner
   const footerLine = plainLines[plainLines.length - 1]
   assert.ok(footerLine.includes('● 新功能'))
-  assert.ok(footerLine.includes('Skill 规范提单'))
+  assert.ok(footerLine.includes('○ Skill 规范提单'))
+  assert.ok(!footerLine.includes('✓ Skill 规范提单'))
 
   state.errorNotice = '剪贴板中未检测到截图'
   const errBuf = renderTui(state, 110, 30)
@@ -377,39 +386,95 @@ test('renderTui keeps inline [Image #1] on a single composer line without duplic
   }
 })
 
-test('Codex-style footer displays active issue kind and submit mode with cycling helpers and hit-boxes', () => {
+test('Codex-style footer defaults Skill handoff to off and toggles enabled indicator cleanly with hit-boxes and slash menu sync', () => {
+  assert.equal(DEFAULT_SUBMIT_MODE, 'direct')
   assert.equal(nextIssueKind('feature'), 'bug')
   assert.equal(nextIssueKind('bug'), 'polish')
   assert.equal(nextIssueKind('polish'), 'feature')
-  assert.equal(nextSubmitMode('handoff'), 'direct')
   assert.equal(nextSubmitMode('direct'), 'handoff')
+  assert.equal(nextSubmitMode('handoff'), 'direct')
+
+  // IssueBoardTui initializes with Skill handoff disabled ('direct') by default
+  const app = new IssueBoardTui('/tmp/demo-app')
+  const initialComposer = (app as unknown as { state: TuiState }).state.composer
+  assert.equal(initialComposer.mode, 'direct')
 
   const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
 
+  // 1. Default state ('direct'): dimmed unselected toggle, no active checkmark indicator
   const state = makeBaseState('')
   const buf = renderTui(state, 110, 30)
-  const footerLine = stripAnsi(buf.renderLines()[29]!)
-  assert.ok(footerLine.includes('● 新功能'))
-  assert.ok(footerLine.includes('Skill 规范提单'))
-  assert.ok(footerLine.includes('⇧Tab 切换'))
-  assert.ok(!footerLine.includes('Enter 提交/执行'))
+  const rawFooterOff = buf.renderLines()[29]!
+  const footerOff = stripAnsi(rawFooterOff)
+  assert.ok(footerOff.includes('● 新功能'))
+  assert.ok(footerOff.includes('○ Skill 规范提单'))
+  assert.ok(!footerOff.includes('✓ Skill 规范提单'))
+  assert.ok(rawFooterOff.includes(`${PALETTE.dim} · ○ Skill 规范提单`))
+  assert.ok(footerOff.includes('⇧Tab 切换'))
+  assert.ok(!footerOff.includes('Enter 提交/执行'))
 
   const kindHits = buf.hitBoxes.filter((h) => h.action === 'cycle-issue-kind')
-  const modeHits = buf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
+  const modeHitsOff = buf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
   assert.equal(kindHits.length, 1)
   assert.equal(kindHits[0]?.y, 29)
-  assert.equal(modeHits.length, 1)
-  assert.equal(modeHits[0]?.y, 29)
+  assert.equal(modeHitsOff.length, 1)
+  assert.equal(modeHitsOff[0]?.y, 29)
 
-  // Cycling to bug and direct mode updates the footer directly without any toast bar
+  // Slash menu reflects default 'direct' active checkmark
+  const slashOffState = makeBaseState('/')
+  slashOffState.composer.mode = 'direct'
+  const slashOffLines = renderTui(slashOffState, 110, 30).renderLines().map(stripAnsi)
+  const directRowOff = slashOffLines.find((l) => l.includes('/direct'))!
+  const handoffRowOff = slashOffLines.find((l) => l.includes('/handoff'))!
+  assert.ok(directRowOff.trimEnd().endsWith('✓'))
+  assert.ok(!handoffRowOff.trimEnd().endsWith('✓'))
+
+  // 2. Toggle on ('handoff'): highlighted enabled indicator with identical hit-box width (no layout shift)
   state.composer.kind = nextIssueKind(state.composer.kind)
   state.composer.mode = nextSubmitMode(state.composer.mode)
   state.composer.followUpOf = 42
-  const updatedBuf = renderTui(state, 110, 30)
-  const updatedFooter = stripAnsi(updatedBuf.renderLines()[29]!)
-  assert.ok(updatedFooter.includes('● 修 Bug'))
-  assert.ok(updatedFooter.includes('快速直提'))
-  assert.ok(updatedFooter.includes('追提 #42'))
+  assert.equal(state.composer.mode, 'handoff')
+  const onBuf = renderTui(state, 110, 30)
+  const rawFooterOn = onBuf.renderLines()[29]!
+  const footerOn = stripAnsi(rawFooterOn)
+  assert.ok(footerOn.includes('● 修 Bug'))
+  assert.ok(footerOn.includes('✓ Skill 规范提单'))
+  assert.ok(!footerOn.includes('○ Skill 规范提单'))
+  assert.ok(rawFooterOn.includes(`${PALETTE.accentBold}✓`))
+  assert.ok(footerOn.includes('追提 #42'))
+
+  const modeHitsOn = onBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
+  assert.equal(modeHitsOn.length, 1)
+  assert.equal(modeHitsOn[0]?.y, 29)
+  assert.equal(modeHitsOn[0]?.w, modeHitsOff[0]?.w)
+
+  // Slash menu reflects enabled 'handoff' active checkmark
+  const slashOnState = makeBaseState('/')
+  slashOnState.composer.mode = 'handoff'
+  const slashOnLines = renderTui(slashOnState, 110, 30).renderLines().map(stripAnsi)
+  const directRowOn = slashOnLines.find((l) => l.includes('/direct'))!
+  const handoffRowOn = slashOnLines.find((l) => l.includes('/handoff'))!
+  assert.ok(!directRowOn.trimEnd().endsWith('✓'))
+  assert.ok(handoffRowOn.trimEnd().endsWith('✓'))
+
+  // 3. Toggle back off ('direct'): restores dimmed unselected state
+  state.composer.mode = nextSubmitMode(state.composer.mode)
+  assert.equal(state.composer.mode, 'direct')
+  const backOffBuf = renderTui(state, 110, 30)
+  const backOffFooter = stripAnsi(backOffBuf.renderLines()[29]!)
+  assert.ok(backOffFooter.includes('○ Skill 规范提单'))
+  assert.ok(!backOffFooter.includes('✓ Skill 规范提单'))
+  assert.equal(backOffBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode').length, 1)
+
+  // 4. Narrow terminal width stays within bounds and preserves error/hint budget
+  const narrowState = makeBaseState('')
+  narrowState.composer.mode = 'handoff'
+  narrowState.errorNotice = '网络异常'
+  const narrowBuf = renderTui(narrowState, 46, 20)
+  const narrowFooter = stripAnsi(narrowBuf.renderLines()[19]!)
+  assert.ok(stringDisplayWidth(narrowFooter) <= 46)
+  assert.ok(narrowFooter.includes('✓ Skill 规范提单'))
+  assert.ok(narrowFooter.includes('⚠ 网络异常'))
 })
 
 test('extractTerminalQuestion strips CLI chrome and handoff issue detection matches created URLs', () => {

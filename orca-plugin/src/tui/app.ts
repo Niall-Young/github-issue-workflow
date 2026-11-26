@@ -34,6 +34,7 @@ import {
 import {
   buildMainRows,
   computeComposerHeight,
+  DEFAULT_SUBMIT_MODE,
   nextIssueKind,
   nextSubmitMode,
   renderTui,
@@ -82,7 +83,7 @@ export class IssueBoardTui {
       busyIds: new Set(),
       composer: {
         text: '',
-        mode: 'handoff',
+        mode: DEFAULT_SUBMIT_MODE,
         kind: 'feature',
         followUpOf: null,
         attachments: [],

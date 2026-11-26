@@ -37,14 +37,22 @@ import {
   nextIssueKind,
   nextSubmitMode,
   renderTui,
+  resolveSelectedMainRowAction,
   type TuiState
 } from './render'
 import { ANSI, type ScreenBuffer } from './screen'
 
 const POLL_INTERVAL_MS = 12_000
 
+export type IssueBoardTuiOptions = {
+  openUrl?: (url: string) => Promise<void> | void
+  writeOutput?: (chunk: string) => void
+}
+
 export class IssueBoardTui {
   private readonly targetPath: string
+  private readonly openUrl: (url: string) => Promise<void> | void
+  private readonly writeOutput: (chunk: string) => void
   private readonly pendingHandoffs = new Map<string, PendingHandoff>()
   private readonly parser = new InputParser()
   private state: TuiState
@@ -54,8 +62,12 @@ export class IssueBoardTui {
   private errorTimer: ReturnType<typeof setTimeout> | null = null
   private cleanedUp = false
 
-  constructor(targetPath: string) {
+  constructor(targetPath: string, options?: IssueBoardTuiOptions) {
     this.targetPath = resolve(targetPath)
+    this.openUrl = options?.openUrl ?? openUrlInBrowser
+    this.writeOutput = options?.writeOutput ?? ((chunk: string) => {
+      process.stdout.write(chunk)
+    })
     this.state = {
       snapshot: null,
       loading: true,
@@ -153,6 +165,7 @@ export class IssueBoardTui {
       this.state.errorNotice = null
       this.render()
     }, 3500)
+    this.errorTimer.unref?.()
   }
 
   private clearError() {
@@ -181,12 +194,12 @@ export class IssueBoardTui {
     this.lastBuffer = buf
     if (forceClear) {
       this.lastRenderedLines = null
-      process.stdout.write(ANSI.clearScreen)
+      this.writeOutput(ANSI.clearScreen)
     }
     const { output, lines } = buf.diffOutput(this.lastRenderedLines)
     this.lastRenderedLines = lines
     if (output) {
-      process.stdout.write(output)
+      this.writeOutput(output)
     }
   }
 
@@ -255,42 +268,13 @@ export class IssueBoardTui {
     }
   }
 
-  private openDetailForCurrent() {
-    const rows = buildMainRows(this.state.snapshot, this.state.activeTab)
-    const row = rows[this.state.selectedIndex]
-    if (!row || row.kind === 'section') return
-    if (row.kind === 'inProgress') {
-      this.state.modal = {
-        type: 'detail',
-        title: `${row.item.issueNumber ? `#${row.item.issueNumber} ` : ''}${row.item.title}`,
-        subtitle: `状态：${row.item.statusLabel}`,
-        body: row.item.url || '正在由本地 Agent 整理并提交 GitHub Issue。',
-        url: row.item.url,
-        prUrl: row.item.prUrl,
-        issueNumber: row.item.issueNumber
-      }
-    } else if (row.kind === 'completed') {
-      this.state.modal = {
-        type: 'detail',
-        title: `#${row.item.issueNumber} ${row.item.title}`,
-        subtitle: '状态：已完成 · 可验收',
-        body: row.item.summary,
-        url: row.item.url,
-        prUrl: row.item.prUrl,
-        issueNumber: row.item.issueNumber,
-        canFollowUp: true
-      }
-    } else if (row.kind === 'pr') {
-      const pr = row.item
-      this.state.modal = {
-        type: 'detail',
-        title: `PR #${pr.number} ${pr.title}`,
-        subtitle: `${pr.headRefName} → ${pr.baseRefName} · ${pr.state} · CI: ${pr.ciStatus}`,
-        body: `作者：${pr.author || '未知'}\n合并状态：${pr.mergeable || '未知'}\n链接：${pr.url}`,
-        url: pr.url
-      }
+  private openCurrentMainRow() {
+    const result = resolveSelectedMainRowAction(this.state)
+    if (result.kind === 'open') {
+      this.dispatchAction('open-url', result.url)
+    } else if (result.kind === 'no-url') {
+      this.showError('该条目尚未生成 GitHub 链接')
     }
-    this.render()
   }
 
   private openSettingsModal() {
@@ -413,7 +397,7 @@ export class IssueBoardTui {
         this.state.activePane = 'main'
         this.state.selectedIndex = idx
         if (alreadySelected) {
-          this.openDetailForCurrent()
+          this.openCurrentMainRow()
         } else {
           this.render()
         }
@@ -447,8 +431,8 @@ export class IssueBoardTui {
         void this.handleEnableAutopilot()
         return
       case 'open-url':
-        if (typeof payload === 'string' && payload) {
-          void openUrlInBrowser(payload)
+        if (typeof payload === 'string' && payload.trim()) {
+          void this.openUrl(payload.trim())
         }
         return
       case 'approve-agent': {
@@ -654,7 +638,7 @@ export class IssueBoardTui {
         }
         const trimmed = c.text.trim()
         if (!trimmed) {
-          this.openDetailForCurrent()
+          this.openCurrentMainRow()
           return
         }
         if (trimmed.startsWith('/')) {
@@ -733,13 +717,6 @@ export class IssueBoardTui {
     if (ev.type === 'key' && ev.key === 'escape') {
       this.state.modal = { type: 'none' }
       this.render()
-      return
-    }
-
-    if (modal.type === 'detail') {
-      if (ev.type === 'key' && ev.key === 'enter' && modal.url) {
-        this.dispatchAction('open-url', modal.url)
-      }
       return
     }
 

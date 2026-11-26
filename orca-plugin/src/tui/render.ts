@@ -53,18 +53,6 @@ export type ModalState =
       attachments: InlineAttachment[]
       sending: boolean
     }
-  | {
-      type: 'detail'
-      title: string
-      subtitle: string
-      body: string
-      url?: string
-      prUrl?: string | null
-      issueNumber?: number | null
-      canRetry?: boolean
-      canDiscard?: boolean
-      canFollowUp?: boolean
-    }
 
 export type TuiState = {
   snapshot: BoardSnapshot | null
@@ -156,6 +144,28 @@ export function buildMainRows(snapshot: BoardSnapshot | null, tab: 'issues' | 'p
     }
   }
   return rows
+}
+
+export type MainRowOpenAction =
+  | { kind: 'open'; url: string }
+  | { kind: 'no-url' }
+  | { kind: 'ignore' }
+
+export function resolveMainRowUrl(row: ListRow | undefined): string | null {
+  if (!row || row.kind === 'section') return null
+  const url = row.item.url?.trim()
+  return url ? url : null
+}
+
+export function resolveSelectedMainRowAction(
+  state: Pick<TuiState, 'snapshot' | 'activeTab' | 'activePane' | 'selectedIndex'>
+): MainRowOpenAction {
+  if (state.activePane !== 'main') return { kind: 'ignore' }
+  const rows = buildMainRows(state.snapshot, state.activeTab)
+  const row = rows[state.selectedIndex]
+  if (!row || row.kind === 'section') return { kind: 'ignore' }
+  const url = resolveMainRowUrl(row)
+  return url ? { kind: 'open', url } : { kind: 'no-url' }
 }
 
 function prBadge(pr: PullRequestItem): { label: string; style: string } {
@@ -737,9 +747,7 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   const mh =
     modal.type === 'settings'
       ? Math.min(15, height - 4)
-      : modal.type === 'reply'
-        ? Math.min(18, height - 4)
-        : Math.min(13, height - 4)
+      : Math.min(18, height - 4)
   const mx = Math.floor((width - mw) / 2)
   const my = Math.floor((height - mh) / 2)
 
@@ -748,8 +756,7 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
 
   const titleMap = {
     settings: '配置执行 Agent',
-    reply: modal.type === 'reply' ? `回复 ${modal.item.agentName}` : '回复助手',
-    detail: '任务详情'
+    reply: modal.type === 'reply' ? `回复 ${modal.item.agentName}` : '回复助手'
   }
 
   buf.drawBox(mx, my, mw, mh, {
@@ -844,25 +851,5 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
     fx += buf.drawLinkButton(fx, footerY, '[贴图 ^V]', PALETTE.muted, 'reply-paste-image') + 2
     buf.drawLinkButton(fx, footerY, '[取消]', PALETTE.muted, 'close-modal')
     return
-  }
-
-  if (modal.type === 'detail') {
-    buf.writeText(ix, my + 2, truncateToWidth(modal.title, iw), PALETTE.bright, iw)
-    buf.writeText(ix, my + 3, truncateToWidth(modal.subtitle, iw), PALETTE.muted, iw)
-    const bodyLines = wrapTextToWidth(modal.body, iw, Math.max(2, mh - 8))
-    bodyLines.forEach((l, i) => buf.writeText(ix, my + 5 + i, l, PALETTE.text, iw))
-
-    const footerY = my + mh - 2
-    let fx = ix
-    if (modal.url) {
-      fx += buf.drawButton(fx, footerY, '浏览器打开', PALETTE.accentBg, 'open-url', modal.url) + 2
-    }
-    if (modal.prUrl) {
-      fx += buf.drawLinkButton(fx, footerY, '[打开 PR]', PALETTE.muted, 'open-url', modal.prUrl) + 2
-    }
-    if (modal.canFollowUp && modal.issueNumber) {
-      fx += buf.drawLinkButton(fx, footerY, '[追提]', PALETTE.muted, 'open-followup', modal.issueNumber) + 2
-    }
-    buf.drawLinkButton(fx, footerY, '[关闭]', PALETTE.muted, 'close-modal')
   }
 }

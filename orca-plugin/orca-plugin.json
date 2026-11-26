@@ -2,8 +2,8 @@
   "manifestVersion": 2,
   "id": "issue-board",
   "name": "Issue 看板",
-  "version": "0.1.0",
-  "description": "面向非开发者的项目级 Issue 仪表盘：提需求、看结果、只在需要时回复问题或确认。",
+  "version": "0.2.0",
+  "description": "面向终端的轻量 Issue 看板：在 Orca 状态栏展示待处理徽标，点击或快捷键一键在终端打开纯 TUI 看板。",
   "license": "MIT",
   "repository": "https://github.com/Niall-Young/github-issue-workflow",
   "engines": {
@@ -14,31 +14,16 @@
   "pluginApi": 1,
   "capabilities": [
     { "kind": "workspace:read" },
-    { "kind": "workspace:write" },
     { "kind": "agent:read" },
-    { "kind": "agent:launch" },
     { "kind": "terminal:read" },
     { "kind": "terminal:send" },
-    { "kind": "notifications:show" },
-    { "kind": "storage:own" }
+    { "kind": "notifications:show" }
   ],
   "contributes": {
-    "customEditors": [
-      {
-        "id": "issue-board",
-        "title": "Issue 看板",
-        "extensions": [
-          ".issue-board"
-        ],
-        "entry": "editor/main.ts",
-        "priority": "default",
-        "frame": "isolated"
-      }
-    ],
     "commands": [
       {
         "id": "open-board",
-        "title": "打开当前项目的 Issue 看板"
+        "title": "在终端打开当前项目的 Issue 看板 (TUI)"
       }
     ],
     "keybindings": [
@@ -51,9 +36,9 @@
       {
         "id": "board-status",
         "text": "Issue 看板",
-        "icon": "layers",
+        "icon": "terminal",
         "tone": "neutral",
-        "tooltip": "打开当前项目的 Issue 看板",
+        "tooltip": "在终端打开当前项目的 Issue 看板 (TUI)",
         "command": "open-board"
       }
     ],

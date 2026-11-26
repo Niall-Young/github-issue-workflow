@@ -25,7 +25,7 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 - `github-issue-repair`：把 Issue 归一化为工作包，识别依赖、重复、同根因与冲突关系；仓库 URL 默认只做只读分诊。
 - `github-issue-autopilot`：一句话为当前仓库安装本地循环，领取由当前用户创建且带 `agent-ready` 的全部 open Issue，包括启用前已创建的积压任务，并调用 `$github-issue-repair`。
 - `github-issue-workflow-update`：用户说“检查 issue-workflow 更新”时只读比较版本，说“更新 issue-workflow”时覆盖当前 Agent 运行时中的四个官方 Skill，并同步已安装的 Autopilot runtime。
-- `orca-plugin`（Issue 看板插件）：面向非开发者的 Orca 主区域 TUI 风格项目仪表盘，每个项目一个独立标签页，支持在顶栏（`⚙ Agent` / 快捷键 `,`）直接配置工作树默认执行 Agent 及允许 `agent:<id>` 标签切换的 Agent 列表（同步更新 Orca Automation 并保留其他策略设置），默认通过 `github-issue-handoff` Skill 唤起 Agent 读代码、查重并按标准模板提单（也支持切换快速直提），支持 `Cmd+V` 粘贴截图与拖拽文件（自动存到本地状态目录供助手读取）、Issues（进行中 / 已完成）与 PR 列表（打开中 / 历史、CI 与冲突状态）双视图切换，以及「需要你处理」提问回复与人工拍板卡片，并带状态栏红点提醒与桌面通知。
+- `orca-plugin` + `orca-board`（纯终端 Issue 看板 TUI）：零外部依赖的原生全屏终端 TUI（Alternate Screen + SGR 1006 鼠标点击/滚轮 + 键盘快捷键，无 Webview 开销），任意项目目录运行 `orca-board` 即可在当前终端秒开；支持顶栏点击 `⚙ Agent`（或按 `,`）配置工作树默认执行 Agent 及允许 `agent:<id>` 覆盖的列表、点击 `+ 提需求`（或按 `n`）默认走 `github-issue-handoff` Skill 唤起 Agent 读代码查重并按模板提单（也支持快速直提）、`Ctrl+V` 粘贴 macOS 剪贴板截图与拖入文件路径、Issues（进行中 / 已完成）与 PRs（打开中 / 历史、CI 与冲突状态）双视图切换，以及右侧「需要你处理」一键同意/回复与重试/放弃操作；保留极简 Orca 插件仅用于状态栏待处理徽标、桌面通知与 `Cmd+Shift+I` 一键在终端标签页唤起 TUI。
 - 修复 worker 使用 Orca 管理的项目子 worktree，不修改用户正在使用的工作树；当本地当前分支领先远端或无上游跟踪分支时，自动通过 `--base-branch` 基于本地最新分支创建子 worktree，无需先手动 `git push`；看板插件也会自动检测并刷新过期的 Autopilot runtime 副本。一次记录全部合格 Issue，最多并发 3 个任务。
 - 独立 reviewer 核对验收标准、验证证据、范围漂移和测试弱化。
 - 双层账本（SQLite schema v5）以 Issue node ID 防止重复派单，记录跨 Issue 前置依赖、每次 attempt 的所选 Agent、Orca Task/Dispatch/worktree、分支、base/head SHA、PR 链接、合并时间、心跳与失败 `.patch` 归档路径。
@@ -150,14 +150,13 @@ python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository
 │   ├── SKILL.md
 │   ├── VERSION
 │   └── scripts/update_workflow.py
-├── orca-plugin/                   # Orca 主区域项目级 Issue 看板插件（worker + customEditor）
+├── orca-plugin/                   # 纯终端 Issue 看板 TUI 与极简 Orca 状态栏启动器插件
 │   ├── orca-plugin.json
 │   ├── README.md
-│   ├── src/                       # Node worker、SQLite/GitHub 数据桥接与单元测试
-│   └── editor/                    # 主区域两栏仪表盘界面
+│   └── src/                       # 终端 TUI 渲染引擎（src/tui/）、状态栏 worker、数据桥接与单测
 ├── scripts/
 │   ├── build_release.py           # 构建带清单与校验和的正式发布包
-│   └── orca-board                 # 安装并在任意项目一键打开 Orca Issue 看板的 CLI
+│   └── orca-board                 # 安装并在任意项目终端一键启动 Issue 看板 TUI 的 CLI
 ├── .github/workflows/release.yml  # 通过版本 tag 测试并发布稳定包
 └── tests/                         # 修复账本与自动调度单元测试
 ```
@@ -178,19 +177,19 @@ orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json
 ```
 
-一键安装 Orca 看板插件与全局命令（首次使用按回车确认授权即可）：
+一键安装全局终端命令与 Orca 状态栏启动器（首次启用插件时按回车确认授权即可，可加 `--no-plugin` 仅装终端命令）：
 
 ```sh
 ./scripts/orca-board --install
 ```
 
-安装完成后，在**任意项目目录**执行一行命令即可打开该项目的专属看板：
+安装完成后，在**任意项目目录的终端**执行一行命令即可直接渲染纯终端 Issue 看板（支持鼠标点击、滚轮与快捷键）：
 
 ```sh
 orca-board
 ```
 
-也可点击 Orca 底部状态栏「Issue 看板」或按 `Cmd+Shift+I` 打开。详见 [`orca-plugin/README.md`](orca-plugin/README.md)。
+也可点击 Orca 底部状态栏「Issue 看板」或按 `Cmd+Shift+I` 在终端标签页中打开。详见 [`orca-plugin/README.md`](orca-plugin/README.md)。
 
 真实 GitHub 操作还需通过 CLI 端到端回读：
 
@@ -225,7 +224,7 @@ When upgrading, remove the installed `github-issue-creator/` copy before install
 - `github-issue-repair` normalizes Issues into work packages and models dependencies, duplicates, shared root causes, and conflicts; repository URLs default to read-only triage.
 - `github-issue-autopilot` installs a local loop with one request, claims every open Issue created by the current user carrying `agent-ready`, including eligible backlog created before activation, and invokes `$github-issue-repair`.
 - `github-issue-workflow-update` checks versions read-only when asked to check and replaces all four official Skills plus installed Autopilot runtimes when asked to update issue-workflow.
-- `orca-plugin` (Issue Board): a TUI-styled non-developer project dashboard rendered directly inside Orca's main editor tab area (one board per project), with an inline top-bar Agent settings drawer (`⚙ Agent` / `,` shortcut) to configure the repository's default worktree execution Agent and allowed `agent:<id>` label overrides (syncing Orca Automation while preserving other policy settings), routing Issue submission by default through `github-issue-handoff` via an Orca agent to inspect repository context, check duplicates, and apply standard templates (with an optional direct-submit toggle), plus `Cmd+V` screenshot paste and drag-and-drop file attachments (saved locally outside Git for agent access), dual Issues (In Progress / Completed) and Pull Requests (Open / Merged & Closed with CI and conflict badges) views, a Needs You queue for live agent questions and stuck-task actions, status-bar badge updates, and desktop notifications.
+- `orca-plugin` + `orca-board` (Pure Terminal Issue Board TUI): a zero-dependency full-screen terminal TUI (Alternate Screen + SGR 1006 mouse click/scroll + keyboard shortcuts, with zero webview overhead) launched directly in any terminal via `orca-board`, featuring a clickable top-bar Agent settings modal (`⚙ Agent` / `,`) to configure the repository's default worktree execution Agent and allowed `agent:<id>` label overrides, Issue submission routed by default through `github-issue-handoff` via an Orca agent (with an optional direct-submit toggle), `Ctrl+V` macOS clipboard screenshot paste and dragged file-path attachments, dual Issues (In Progress / Completed) and Pull Requests (Open / Merged & Closed with CI and conflict badges) views, and a Needs You queue for one-click agent approval/replies and retry/discard actions; the slimmed-down Orca plugin handles only status-bar badges, desktop notifications, and launching the TUI in an Orca terminal tab (`Cmd+Shift+I`).
 - Repair workers use Orca-managed child worktrees and never edit the user's active tree; when the local branch is ahead of its upstream (or has no upstream), dispatch automatically passes `--base-branch` so child worktrees branch from local latest commits without requiring a manual `git push`, and the board plugin automatically refreshes stale Autopilot runtime copies. Every eligible Issue is recorded, with at most three tasks running concurrently.
 - An independent reviewer checks acceptance criteria, verification evidence, scope drift, and weakened tests.
 - A two-level ledger (SQLite schema v5) deduplicates immutable Issue node IDs and records cross-Issue dependencies, every attempt's selected Agent, Orca Task/Dispatch/worktree, branch, base/head SHAs, PR URLs, merge timestamps, heartbeats, and archived failure `.patch` paths.
@@ -350,14 +349,13 @@ If the path disappears, is no longer the original Git root, or is removed from O
 │   ├── SKILL.md
 │   ├── VERSION
 │   └── scripts/update_workflow.py
-├── orca-plugin/                   # Orca main-area per-project Issue Board plugin (worker + customEditor)
+├── orca-plugin/                   # Pure terminal Issue Board TUI + minimal Orca status-bar launcher
 │   ├── orca-plugin.json
 │   ├── README.md
-│   ├── src/                       # Node worker, SQLite/GitHub data bridge, and unit tests
-│   └── editor/                    # Main-area two-column dashboard UI
+│   └── src/                       # Terminal TUI engine (src/tui/), status-bar worker, data bridge, tests
 ├── scripts/
 │   ├── build_release.py           # Build the manifest and checksummed release bundle
-│   └── orca-board                 # CLI to install and open the Orca Issue Board in any project
+│   └── orca-board                 # CLI to install and launch the terminal Issue Board TUI in any project
 ├── .github/workflows/release.yml  # Test and publish stable version tags
 └── tests/                         # Repair-ledger and automatic-dispatch unit tests
 ```
@@ -378,19 +376,19 @@ orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json
 ```
 
-Install the Orca Issue Board plugin and global CLI in one step (press Enter once to approve plugin capabilities on first run):
+Install the global terminal CLI and optional Orca status-bar launcher in one step (press Enter once to approve plugin capabilities on first run, or pass `--no-plugin` for CLI-only install):
 
 ```sh
 ./scripts/orca-board --install
 ```
 
-After installation, run a single command in **any project directory** to open that project's dashboard tab:
+After installation, run a single command in **any project terminal** to render the pure terminal Issue Board TUI (with mouse click, scroll, and keyboard shortcuts):
 
 ```sh
 orca-board
 ```
 
-You can also click **Issue 看板** in Orca's status bar or press `Cmd+Shift+I`. See [`orca-plugin/README.md`](orca-plugin/README.md).
+You can also click **Issue 看板** in Orca's status bar or press `Cmd+Shift+I` to open the TUI in an Orca terminal tab. See [`orca-plugin/README.md`](orca-plugin/README.md).
 
 Real GitHub mutations still require CLI readback:
 

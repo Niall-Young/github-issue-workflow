@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command launcher and installer for the Orca Issue Board plugin."""
+"""One-command terminal TUI launcher and installer for the Orca Issue Board."""
 
 from __future__ import annotations
 
@@ -7,14 +7,15 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO_ROOT / "orca-plugin"
+TUI_ENTRY = PLUGIN_DIR / "src" / "tui" / "app.ts"
 DEFAULT_PLUGIN_KEY = "local.issue-board"
-ANCHOR_NAME = ".orca-board.issue-board"
 CLI_NAMES = ("orca-board", "issue-board")
 
 
@@ -35,13 +36,29 @@ def resolve_project_root(target: Path, runner=run_cmd) -> Path:
     return target.resolve()
 
 
-def resolve_github_repo(root: Path, runner=run_cmd) -> str | None:
-    res = runner(["git", "remote", "get-url", "origin"], cwd=str(root))
-    if res.returncode != 0:
-        return None
-    url = res.stdout.strip()
-    match = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?$", url)
-    return match.group(1) if match else None
+def resolve_tui_runtime(which=shutil.which) -> list[str]:
+    bun = which("bun")
+    if bun:
+        return [bun]
+    node = which("node")
+    if node:
+        return [node]
+    raise RuntimeError("未找到 bun 或 node 运行时，请先安装 bun 或 Node.js >= 22。")
+
+
+def build_tui_command(
+    target: Path,
+    tui_entry: Path = TUI_ENTRY,
+    runner=run_cmd,
+    which=shutil.which,
+) -> list[str]:
+    if not target.exists():
+        raise RuntimeError(f"目录不存在：{target}")
+    if not tui_entry.exists():
+        raise RuntimeError(f"未找到终端 TUI 入口：{tui_entry}")
+    root = resolve_project_root(target, runner=runner)
+    runtime = resolve_tui_runtime(which=which)
+    return [*runtime, str(tui_entry), str(root)]
 
 
 def find_plugin(runner=run_cmd) -> tuple[dict | None, str | None]:
@@ -70,7 +87,7 @@ def extract_fingerprint(text: str) -> str | None:
 
 
 def prompt_for_approval(plugin_key: str, fingerprint: str, input_fn=input) -> bool:
-    print(f"首次使用（或插件权限更新后）需要授权 Orca「Issue 看板」插件（{plugin_key}）。")
+    print(f"首次使用（或插件权限更新后）需要授权 Orca 状态栏插件（{plugin_key}）。")
     try:
         answer = input_fn("按回车确认授权，输入 n 取消 [Y/n]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -147,41 +164,6 @@ def ensure_plugin_ready(
     return plugin_key
 
 
-def ensure_anchor_file(root: Path, runner=run_cmd) -> Path:
-    anchor = root / ANCHOR_NAME
-    if not anchor.exists():
-        payload = {
-            "version": 1,
-            "repoPath": str(root),
-            "projectName": root.name,
-        }
-        repo = resolve_github_repo(root, runner=runner)
-        if repo:
-            payload["repository"] = repo
-        anchor.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-    git_info = runner(["git", "rev-parse", "--git-path", "info/exclude"], cwd=str(root))
-    if git_info.returncode == 0 and git_info.stdout.strip():
-        exclude_path = Path(git_info.stdout.strip())
-        if not exclude_path.is_absolute():
-            exclude_path = (root / exclude_path).resolve()
-        exclude_path.parent.mkdir(parents=True, exist_ok=True)
-        existing_text = (
-            exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-        )
-        existing_lines = existing_text.splitlines()
-        if ANCHOR_NAME not in existing_lines:
-            with exclude_path.open("a", encoding="utf-8") as fh:
-                if existing_text and not existing_text.endswith("\n"):
-                    fh.write("\n")
-                fh.write(f"{ANCHOR_NAME}\n")
-
-    return anchor
-
-
 def install_cli(
     bin_dir: Path | None = None,
     script_path: Path | None = None,
@@ -201,47 +183,16 @@ def install_cli(
     return installed
 
 
-def open_board(
-    target: Path,
-    plugin_dir: Path = PLUGIN_DIR,
-    runner=run_cmd,
-    is_tty: bool | None = None,
-    input_fn=input,
-) -> str:
-    if not target.exists():
-        raise RuntimeError(f"目录不存在：{target}")
-
-    root = resolve_project_root(target, runner=runner)
-    plugin_key = ensure_plugin_ready(
-        plugin_dir=plugin_dir,
-        runner=runner,
-        is_tty=is_tty,
-        input_fn=input_fn,
-    )
-    anchor = ensure_anchor_file(root, runner=runner)
-
-    open_res = runner(
-        ["orca", "plugin", "open", plugin_key, "--editor", str(anchor), "--json"]
-    )
-    if open_res.returncode != 0:
-        raise RuntimeError(
-            f"打开看板失败：{open_res.stderr.strip() or open_res.stdout.strip()}"
-        )
-    try:
-        parsed = json.loads(open_res.stdout)
-        if not parsed.get("ok", True):
-            msg = parsed.get("error", {}).get("message") or open_res.stdout
-            raise RuntimeError(f"打开看板失败：{msg}")
-    except json.JSONDecodeError:
-        pass
-
-    return root.name
+def launch_tui(target: Path) -> int:
+    cmd = build_tui_command(target)
+    proc = subprocess.run(cmd, check=False)
+    return proc.returncode
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="orca-board",
-        description="在 Orca 中一键打开当前（或指定）项目的 Issue 看板。",
+        description="在当前终端运行纯终端 Issue 看板 (TUI)，支持鼠标点击与快捷键。",
     )
     parser.add_argument(
         "path",
@@ -252,7 +203,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--install",
         action="store_true",
-        help="安装 orca-board / issue-board 命令到 ~/.local/bin 并检查插件状态",
+        help="安装 orca-board / issue-board 命令到 ~/.local/bin，并可选同步 Orca 状态栏启动器插件",
+    )
+    parser.add_argument(
+        "--no-plugin",
+        action="store_true",
+        help="配合 --install 使用，仅安装终端命令，跳过 Orca 状态栏插件检查",
     )
     parser.add_argument(
         "--bin-dir",
@@ -269,10 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             bin_dir = Path(args.bin_dir).expanduser() if args.bin_dir else None
             installed = install_cli(bin_dir=bin_dir)
             installed_dir = installed[0].parent
-            print(
-                "已安装命令："
-                + ", ".join(str(p) for p in installed)
-            )
+            print("已安装终端命令：" + ", ".join(str(p) for p in installed))
             path_entries = [
                 Path(p).expanduser().resolve()
                 for p in os.environ.get("PATH", "").split(os.pathsep)
@@ -283,14 +236,17 @@ def main(argv: list[str] | None = None) -> int:
                     f"提示：请将 {installed_dir} 加入 PATH，例如：\n"
                     f'  export PATH="{installed_dir}:$PATH"'
                 )
-            ensure_plugin_ready()
-            print("插件已就绪。以后在任意项目目录直接运行 `orca-board` 即可打开 Issue 看板。")
+            if not args.no_plugin:
+                try:
+                    ensure_plugin_ready()
+                    print("Orca 状态栏插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开 TUI）。")
+                except RuntimeError as exc:
+                    print(f"提示：Orca 状态栏插件跳过（{exc}），不影响终端直接运行 `orca-board`。")
+            print("以后在任意项目目录直接运行 `orca-board` 即可启动终端 Issue 看板。")
             return 0
 
         target = Path(args.path).expanduser() if args.path else Path.cwd()
-        project_name = open_board(target)
-        print(f"已打开 {project_name} 的 Issue 看板（Orca）")
-        return 0
+        return launch_tui(target)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1

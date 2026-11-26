@@ -44,25 +44,37 @@ class OrcaBoardCliTests(unittest.TestCase):
                 self.assertTrue(link.is_symlink())
                 self.assertEqual(link.resolve(), SCRIPT_PATH.resolve())
 
-    def test_ensure_anchor_file_creates_payload_and_excludes_in_git(self):
+    def test_build_tui_command_prefers_bun_and_resolves_git_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "demo-repo"
+            sub = repo / "src"
+            sub.mkdir(parents=True)
+
+            def fake_runner(cmd, cwd=None):
+                if cmd == ["git", "rev-parse", "--show-toplevel"]:
+                    return make_proc(0, str(repo) + "\n")
+                return make_proc(1)
+
+            cmd = self.mod.build_tui_command(
+                sub,
+                runner=fake_runner,
+                which=lambda name: "/usr/local/bin/bun" if name == "bun" else None,
+            )
+            self.assertEqual(cmd[0], "/usr/local/bin/bun")
+            self.assertTrue(cmd[1].endswith("orca-plugin/src/tui/app.ts"))
+            self.assertEqual(cmd[2], str(repo.resolve()))
+
+    def test_build_tui_command_falls_back_to_node(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "demo-repo"
             repo.mkdir()
-            exclude = repo / ".git" / "info" / "exclude"
-
-            def fake_runner(cmd, cwd=None):
-                if cmd[:3] == ["git", "remote", "get-url"]:
-                    return make_proc(0, "git@github.com:acme/demo-repo.git\n")
-                if cmd[:3] == ["git", "rev-parse", "--git-path"]:
-                    return make_proc(0, str(exclude) + "\n")
-                return make_proc(1)
-
-            anchor = self.mod.ensure_anchor_file(repo, runner=fake_runner)
-            self.assertTrue(anchor.exists())
-            payload = json.loads(anchor.read_text(encoding="utf-8"))
-            self.assertEqual(payload["repository"], "acme/demo-repo")
-            self.assertEqual(payload["projectName"], "demo-repo")
-            self.assertIn(".orca-board.issue-board", exclude.read_text(encoding="utf-8").splitlines())
+            cmd = self.mod.build_tui_command(
+                repo,
+                runner=lambda cmd, cwd=None: make_proc(1),
+                which=lambda name: "/opt/homebrew/bin/node" if name == "node" else None,
+            )
+            self.assertEqual(cmd[0], "/opt/homebrew/bin/node")
+            self.assertEqual(cmd[2], str(repo.resolve()))
 
     def test_ensure_plugin_ready_approves_interactively_when_pending(self):
         calls = []
@@ -140,7 +152,10 @@ class OrcaBoardCliTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError) as ctx:
             self.mod.ensure_plugin_ready(runner=fake_runner, is_tty=False)
-        self.assertIn("orca plugin enable local.issue-board --approve ap1-deadbeef1234", str(ctx.exception))
+        self.assertIn(
+            "orca plugin enable local.issue-board --approve ap1-deadbeef1234",
+            str(ctx.exception),
+        )
 
 
 if __name__ == "__main__":

@@ -1,16 +1,19 @@
-# Issue 看板（Orca Plugin）
+# Issue 看板（纯终端 TUI + 极简 Orca 状态栏启动器）
 
-面向非开发者的项目级 Issue 仪表盘插件，直接打开在 Orca 主区域标签页中（每个项目独立一个看板）。
+完全在终端中绘制的 Claude Code 风格轻量 Issue 看板（无 Webview / 无 Electron iframe 开销），同时支持**鼠标点击、滚轮滚动、拖拽文件、剪贴板粘贴截图**与键盘快捷键。
 
 ## 核心体验
 
-- **TUI 风格主区域看板**：等宽终端美学、清晰框线与键盘快捷键（`n` 提需求、`i`/`p` 切换 Issues / PR 列表、`,` 配置 Agent、`r` 刷新、`1/2/3` 切换类型、`⌘V` 贴截图、`⌘↵` 提交），每个项目独立一个标签页。
-- **面板内配置执行 Agent**：点击顶栏 `⚙ Agent: <id>`（或按 `,`）可直接选择当前仓库工作树默认执行的 Agent（自动读取 Orca 已安装 Agent 列表），并勾选允许单条 Issue 通过 `agent:<id>` 标签覆盖的 Agent；保存时自动通过 `autopilot_admin.py install` 同步更新 Orca Automation 并保留已有并发、超时与发布策略配置。
-- **默认走 `github-issue-handoff` Skill 提单 + 附截图/文件**：用大白话输入，支持直接 **`Cmd+V` 粘贴截图**、**拖拽文件**或点击选文件；附件自动保存到 `~/.local/state/github-issue-autopilot/attachments/<project>/`（不污染 Git 仓库）。默认模式会通过 Orca `agent.launch` 启动项目默认 Agent，按 `github-issue-handoff` 规范读取代码上下文、查重并套用标准模板提单（如需补充信息会自动出现在右侧「需要你处理」等待回复）；也可一键切换为「直提」模式直接调用 `gh issue create`。
-- **Issues 与 PR 双视图**：左侧支持在 **Issues**（「进行中」与「已完成 · 可直接验收」）与 **PRs**（「打开中 PR」与「已合并 / 已关闭 PR」，展示分支、Draft、CI 状态、冲突标记与快捷跳转）之间切换，关联 PR 的 Issue 也可直接点开对应 PR。
-- **只在需要时打扰**：右侧「需要你处理」与底部状态栏红点提醒，仅在助手向你提问或任务需要人工拍板时亮起；回复助手时同样支持粘贴截图或附带文件。
+- **纯终端绘制 + 鼠标可点击**：基于零依赖原生 ANSI 终端画布 + SGR 1006 鼠标协议，支持点击顶栏按钮、点击切换 Issues / PRs 标签页、点击列表项与右侧「需要你处理」操作按钮、滚轮滚动列表，响应极快。
+- **任意终端即开即用**：在任意项目目录直接运行 `orca-board`（或 `issue-board`），无需打开任何 GUI 窗口，直接在当前终端全屏渲染。
+- **极简 Orca 插件（可选）**：仅保留后台状态栏待处理红点徽标、桌面通知与快捷键（`Cmd+Shift+I`），点击状态栏或按快捷键会在当前工作区直接打开一个运行纯终端 TUI 的终端标签页。
+- **全功能覆盖**：
+  - 顶栏点击 `⚙ Agent`（或按 `,`）配置工作树默认执行 Agent 与允许 `agent:<id>` 标签覆盖的列表；
+  - 点击 `+ 提需求`（或按 `n`）默认走 `github-issue-handoff` Skill 唤起 Agent 查重并按模板提单（也支持切换「快速直提」），支持 `Ctrl+V` 粘贴 macOS 剪贴板截图与直接拖入文件路径；
+  - Issues（进行中 / 已完成 · 可验收）与 PRs（打开中 / 历史、CI 与冲突状态）双视图切换；
+  - 右侧「需要你处理」直接一键「同意继续」、回复助手提问（支持附截图/文件），或对阻塞/失败 Issue 执行「重试」/「放弃」。
 
-## 一键安装与打开（推荐）
+## 一键安装与使用
 
 在仓库根目录执行一次安装：
 
@@ -18,17 +21,18 @@
 ./scripts/orca-board --install
 ```
 
-首次运行会提示授权插件，直接按回车确认即可。之后在**任意项目目录**只需一行命令即可打开当前项目的 Issue 看板：
+之后在**任意项目目录的终端**直接运行：
 
 ```bash
 orca-board
 ```
 
-（也支持别名 `issue-board`，或在 Orca 底部状态栏点击 **Issue 看板** / 按 `Cmd+Shift+I`。）
+（也支持别名 `issue-board`，或在 Orca 底部状态栏点击 **Issue 看板** / 按 `Cmd+Shift+I` 在终端标签页中打开。）
 
 ## 验证命令
 
 ```bash
+bun test ./orca-plugin/src/tui/tui.test.ts
 orca plugin validate ./orca-plugin --json
 orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json

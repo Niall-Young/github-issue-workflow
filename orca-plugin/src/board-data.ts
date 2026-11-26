@@ -781,6 +781,76 @@ export async function createAgentReadyIssue(
   }
 }
 
+const TERMINAL_CHROME_PATTERNS: readonly RegExp[] = [
+  /^[─━═\-_=│┃┌┐└┘├┤┬┴┼]+$/,
+  /^>\s*$/,
+  /^>\s*Auto mode:/i,
+  /^\?\s*for shortcuts/i,
+  /^shift\+tab\b/i,
+  /^esc to interrupt\b/i,
+  /^剩余\s+\d+%/,
+  /^auto\s*·/i
+]
+
+export function isHandoffSessionTitle(title: string | undefined | null): boolean {
+  if (!title) return false
+  const normalized = title.toLowerCase()
+  return (
+    normalized.includes('github-issue-handoff') ||
+    normalized.includes('github issue handoff')
+  )
+}
+
+export function extractGithubIssueNumbers(
+  text: string,
+  repository?: string | null
+): number[] {
+  if (!text) return []
+  const repoEscaped = repository
+    ? repository.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    : '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'
+  const re = new RegExp(`https://github\\.com/${repoEscaped}/issues/(\\d+)`, 'gi')
+  const numbers = new Set<number>()
+  for (const match of text.matchAll(re)) {
+    const num = Number(match[1])
+    if (Number.isInteger(num) && num > 0) {
+      numbers.add(num)
+    }
+  }
+  return Array.from(numbers)
+}
+
+export function hasHandoffCreatedIssue(params: {
+  output: string
+  repository?: string | null
+  githubIssues: readonly GithubIssueRow[]
+  startedMs?: number
+  agentUpdatedMs?: number
+}): boolean {
+  const mentioned = extractGithubIssueNumbers(params.output, params.repository)
+  if (mentioned.length === 0) return false
+
+  const byNumber = new Map<number, GithubIssueRow>()
+  for (const issue of params.githubIssues) {
+    byNumber.set(issue.number, issue)
+  }
+
+  for (const num of mentioned) {
+    const issue = byNumber.get(num)
+    if (!issue) continue
+    const createdMs = Date.parse(issue.createdAt)
+    if (!Number.isFinite(createdMs)) continue
+    if (typeof params.startedMs === 'number') {
+      if (createdMs >= params.startedMs - 60_000) return true
+    } else if (typeof params.agentUpdatedMs === 'number') {
+      if (Math.abs(params.agentUpdatedMs - createdMs) <= 30 * 60 * 1000) return true
+    } else {
+      return true
+    }
+  }
+  return false
+}
+
 export function extractTerminalQuestion(rawOutput: string): string {
   // Strip ANSI escape sequences
   const clean = rawOutput
@@ -790,7 +860,10 @@ export function extractTerminalQuestion(rawOutput: string): string {
   const lines = clean
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !/^[─━═\-_=│┃┌┐└┘├┤┬┴┼]+$/.test(line))
+    .filter(
+      (line) =>
+        line.length > 0 && !TERMINAL_CHROME_PATTERNS.some((pattern) => pattern.test(line))
+    )
 
   if (lines.length === 0) {
     return '后台任务正在等待你的确认或输入，你可以直接回复指示，或点击「同意继续」。'

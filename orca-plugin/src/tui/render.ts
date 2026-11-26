@@ -734,7 +734,12 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   if (modal.type === 'none') return
 
   const mw = Math.min(Math.max(48, Math.floor(width * 0.72)), width - 4)
-  const mh = modal.type === 'settings' ? Math.min(15, height - 4) : Math.min(13, height - 4)
+  const mh =
+    modal.type === 'settings'
+      ? Math.min(15, height - 4)
+      : modal.type === 'reply'
+        ? Math.min(18, height - 4)
+        : Math.min(13, height - 4)
   const mx = Math.floor((width - mw) / 2)
   const my = Math.floor((height - mh) / 2)
 
@@ -805,9 +810,10 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   }
 
   if (modal.type === 'reply') {
-    const qLines = wrapTextToWidth(modal.item.question, iw, 3)
+    const maxQuestionLines = Math.max(3, mh - 10)
+    const qLines = wrapTextToWidth(modal.item.question, iw, maxQuestionLines)
     qLines.forEach((l, i) => buf.writeText(ix, my + 2 + i, l, PALETTE.muted, iw))
-    const inputTop = my + 5
+    const inputTop = my + 2 + qLines.length + 1
     buf.drawHLine(ix, inputTop, iw, PALETTE.borderActive)
     buf.writeText(ix, inputTop + 1, '❯', PALETTE.accentBold, 2)
     const rLines = modal.text

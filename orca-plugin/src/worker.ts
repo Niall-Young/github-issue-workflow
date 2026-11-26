@@ -4,6 +4,8 @@ import {
   extractTerminalQuestion,
   fetchGithubIssues,
   findAutopilotConfigForRepo,
+  hasHandoffCreatedIssue,
+  isHandoffSessionTitle,
   mergeBoardItems,
   readLedgerIssues,
   resolveGitRepository,
@@ -69,44 +71,63 @@ export default function activate(orca: OrcaWorkerApi) {
       return false
     })
 
+    const [ledgerRows, githubIssues] = await Promise.all([
+      autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
+      fetchGithubIssues(rootPath)
+    ])
+
     const agentQuestions: NeedsYouItem[] = []
     for (const ws of related) {
       try {
         const res = await orca.host.call('agents.list', { workspaceId: ws.id })
         for (const agent of res.agents || []) {
-          if (agent.terminalId && (agent.state === 'blocked' || agent.state === 'waiting')) {
-            let output = ''
-            try {
-              const readRes = await orca.host.call('terminal.read', {
-                terminalId: agent.terminalId,
-                maxLines: 30
-              })
-              output = (readRes.lines || []).join('\n')
-            } catch {
-              output = ''
-            }
-            agentQuestions.push({
-              id: `agent-${agent.terminalId}`,
-              kind: 'agent-question',
-              title: agent.task?.title || agent.title || `${ws.name} 中的助手需要你确认`,
-              question: extractTerminalQuestion(output),
+          if (!agent.terminalId) continue
+          const isExplicitWait = agent.state === 'blocked' || agent.state === 'waiting'
+          const agentTitle = agent.task?.title || agent.title || ''
+          const isHandoffDone =
+            agent.state === 'done' && isHandoffSessionTitle(agentTitle)
+
+          if (!isExplicitWait && !isHandoffDone) continue
+
+          let output = ''
+          try {
+            const readRes = await orca.host.call('terminal.read', {
               terminalId: agent.terminalId,
-              workspaceId: ws.id,
-              agentName: agent.agent || 'Agent',
-              state: agent.state === 'blocked' ? 'blocked' : 'waiting',
-              updatedAt: new Date(agent.stateStartedAt || Date.now()).toISOString()
+              maxLines: 40
             })
+            output = (readRes.lines || []).join('\n')
+          } catch {
+            output = ''
           }
+
+          if (
+            isHandoffDone &&
+            hasHandoffCreatedIssue({
+              output,
+              repository: autopilot?.repository || gitInfo.repository,
+              githubIssues,
+              agentUpdatedMs: agent.stateStartedAt || Date.now()
+            })
+          ) {
+            continue
+          }
+
+          agentQuestions.push({
+            id: `agent-${agent.terminalId}`,
+            kind: 'agent-question',
+            title: agentTitle || `${ws.name} 中的助手需要你确认`,
+            question: extractTerminalQuestion(output),
+            terminalId: agent.terminalId,
+            workspaceId: ws.id,
+            agentName: agent.agent || 'Agent',
+            state: agent.state === 'blocked' ? 'blocked' : 'waiting',
+            updatedAt: new Date(agent.stateStartedAt || Date.now()).toISOString()
+          })
         }
       } catch {
         continue
       }
     }
-
-    const [ledgerRows, githubIssues] = await Promise.all([
-      autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
-      fetchGithubIssues(rootPath)
-    ])
 
     const merged = mergeBoardItems({
       ledgerRows,

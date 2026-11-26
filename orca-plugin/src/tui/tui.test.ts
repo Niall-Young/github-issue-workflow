@@ -15,6 +15,18 @@ import {
 } from './commands'
 import { InputParser } from './input'
 import {
+  extractGithubIssueNumbers,
+  extractTerminalQuestion,
+  hasHandoffCreatedIssue,
+  isHandoffSessionTitle,
+  type CommandRunner
+} from '../board-data'
+import {
+  collectOrcaAgentState,
+  loadBoardSnapshot,
+  type PendingHandoff
+} from './orca-cli'
+import {
   buildMainRows,
   computeComposerHeight,
   nextIssueKind,
@@ -395,4 +407,257 @@ test('Codex-style footer displays active issue kind and submit mode with cycling
   assert.ok(updatedFooter.includes('● 修 Bug'))
   assert.ok(updatedFooter.includes('快速直提'))
   assert.ok(updatedFooter.includes('追提 #42'))
+})
+
+test('extractTerminalQuestion strips CLI chrome and handoff issue detection matches created URLs', () => {
+  const raw = [
+    '为避免理解偏差，请确认方案：',
+    '1. 默认关闭 Skill 规范提单',
+    '2. 新增第 3 个独立开关',
+    '您直接回复编号即可。',
+    '> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)',
+    '? for shortcuts',
+    '剩余 80% 3d 16h'
+  ].join('\n')
+  const question = extractTerminalQuestion(raw)
+  assert.ok(question.includes('1. 默认关闭 Skill 规范提单'))
+  assert.ok(question.includes('您直接回复编号即可。'))
+  assert.ok(!question.includes('Auto mode'))
+  assert.ok(!question.includes('for shortcuts'))
+  assert.ok(!question.includes('剩余 80%'))
+
+  assert.equal(isHandoffSessionTitle('请严格按照 github issue handoff Skill'), true)
+  assert.equal(isHandoffSessionTitle('普通终端任务'), false)
+  assert.deepEqual(
+    extractGithubIssueNumbers(
+      '已创建 Issue: https://github.com/acme/demo-app/issues/12',
+      'acme/demo-app'
+    ),
+    [12]
+  )
+
+  const startedMs = Date.parse('2026-11-26T08:40:00Z')
+  assert.equal(
+    hasHandoffCreatedIssue({
+      output: '已创建 https://github.com/acme/demo-app/issues/12',
+      repository: 'acme/demo-app',
+      githubIssues: [
+        {
+          number: 12,
+          title: '[Feature] 新开关',
+          state: 'OPEN',
+          url: 'https://github.com/acme/demo-app/issues/12',
+          createdAt: '2026-11-26T08:42:00Z',
+          updatedAt: '2026-11-26T08:42:00Z',
+          closedAt: null,
+          labels: []
+        }
+      ],
+      startedMs
+    }),
+    true
+  )
+  // Mentioning an old issue from days ago does not count as creating a new issue
+  assert.equal(
+    hasHandoffCreatedIssue({
+      output: '发现可能与历史单 https://github.com/acme/demo-app/issues/3 相关，请确认是否继续？',
+      repository: 'acme/demo-app',
+      githubIssues: [
+        {
+          number: 3,
+          title: '[Feature] 旧单',
+          state: 'CLOSED',
+          url: 'https://github.com/acme/demo-app/issues/3',
+          createdAt: '2026-11-20T08:00:00Z',
+          updatedAt: '2026-11-20T08:00:00Z',
+          closedAt: '2026-11-20T09:00:00Z',
+          labels: []
+        }
+      ],
+      startedMs
+    }),
+    false
+  )
+})
+
+test('collectOrcaAgentState resolves real term_ handle via paneKey and surfaces handoff questions when agent stops in done state', async () => {
+  const repoPath = '/tmp/demo-handoff-repo'
+  const nowMs = Date.now()
+  const startedMs = nowMs - 60_000 // Past 25s boot grace window!
+
+  const makeRunner = (opts: {
+    agentState: string
+    preview: string
+    githubIssues?: Array<Record<string, unknown>>
+  }): CommandRunner => {
+    return async (cmd, args) => {
+      if (cmd === 'git' && args.includes('--show-toplevel')) {
+        return { stdout: `${repoPath}\n`, stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'git' && args.includes('get-url')) {
+        return { stdout: 'https://github.com/acme/demo-handoff-repo.git\n', stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'gh' && args[0] === 'issue') {
+        return { stdout: JSON.stringify(opts.githubIssues ?? []), stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'gh' && args[0] === 'pr') {
+        return { stdout: '[]', stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'installed') {
+        return { stdout: JSON.stringify({ result: { agents: [{ id: 'antigravity', default: true }] } }), stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({
+            result: {
+              agents: [
+                {
+                  orcaSessionId: 'sess-1',
+                  kind: 'terminal',
+                  agent: 'antigravity',
+                  state: opts.agentState,
+                  worktreeId: `wt::${repoPath}`,
+                  workspace: 'main',
+                  repo: 'demo-handoff-repo',
+                  paneKey: 'tab-1:leaf-1',
+                  title: '请严格按照 github issue handoff Skill',
+                  lastAssistantMessage: null,
+                  updatedAt: nowMs
+                }
+              ]
+            }
+          }),
+          stderr: '',
+          exitCode: 0
+        }
+      }
+      if (cmd === 'orca' && args[0] === 'terminal' && args[1] === 'list') {
+        return {
+          stdout: JSON.stringify({
+            result: {
+              terminals: [
+                {
+                  handle: 'term_real_123',
+                  worktreeId: `wt::${repoPath}`,
+                  worktreePath: repoPath,
+                  tabId: 'tab-1',
+                  leafId: 'leaf-1',
+                  title: '请严格按照 github issue handoff Skill',
+                  connected: true,
+                  writable: true,
+                  lastOutputAt: nowMs,
+                  preview: opts.preview,
+                  agentIdentity: 'antigravity'
+                }
+              ]
+            }
+          }),
+          stderr: '',
+          exitCode: 0
+        }
+      }
+      if (cmd === 'orca' && args[0] === 'terminal' && args[1] === 'read') {
+        return {
+          stdout: JSON.stringify({ result: { terminal: { tail: opts.preview.split('\n') } } }),
+          stderr: '',
+          exitCode: 0
+        }
+      }
+      return { stdout: '', stderr: '', exitCode: 1 }
+    }
+  }
+
+  // 1. Agent still working after 60s: matched via term_real_123 <-> paneKey, stays in inProgress
+  const pending = new Map<string, PendingHandoff>([
+    [
+      'term_real_123',
+      {
+        terminalId: 'term_real_123',
+        repoPath,
+        title: '支持配置 Skill 提单开关',
+        agent: 'antigravity',
+        startedAt: new Date(startedMs).toISOString(),
+        startedMs
+      }
+    ]
+  ])
+
+  const workingSnap = await loadBoardSnapshot(
+    repoPath,
+    pending,
+    makeRunner({ agentState: 'working', preview: 'Reading repo files...' })
+  )
+  assert.equal(workingSnap.inProgress.length, 1)
+  assert.equal(workingSnap.inProgress[0]?.title, '支持配置 Skill 提单开关')
+  assert.equal(workingSnap.inProgress[0]?.statusLabel, 'Skill 整理提单中 (antigravity)')
+  assert.equal(workingSnap.needsYou.length, 0)
+  assert.equal(pending.has('term_real_123'), true)
+
+  // 2. Agent finishes turn (state: "done") with a clarifying question and no Issue URL:
+  //    stays visible in inProgress as "Skill 等待确认" AND appears in needsYou with real term_ handle!
+  const questionPreview =
+    '请确认您的期望更接近哪种方案：\n1. 默认关闭 Skill 提单\n2. 新增第 3 个独立开关\n> Auto mode: edits\n? for shortcuts'
+  const waitingSnap = await loadBoardSnapshot(
+    repoPath,
+    pending,
+    makeRunner({ agentState: 'done', preview: questionPreview })
+  )
+  assert.equal(waitingSnap.inProgress.length, 1)
+  assert.equal(waitingSnap.inProgress[0]?.statusLabel, 'Skill 等待确认 (antigravity)')
+  assert.equal(waitingSnap.needsYou.length, 1)
+  const qItem = waitingSnap.needsYou[0]
+  assert.equal(qItem?.kind, 'agent-question')
+  if (qItem?.kind === 'agent-question') {
+    assert.equal(qItem.terminalId, 'term_real_123')
+    assert.equal(qItem.title, '支持配置 Skill 提单开关')
+    assert.ok(qItem.question.includes('1. 默认关闭 Skill 提单'))
+    assert.ok(!qItem.question.includes('for shortcuts'))
+  }
+  assert.equal(pending.has('term_real_123'), true)
+
+  // 3. Even if pendingHandoffs is empty (e.g. TUI restarted), unanswered handoff is still discovered
+  const discoveredSnap = await loadBoardSnapshot(
+    repoPath,
+    new Map(),
+    makeRunner({ agentState: 'done', preview: questionPreview })
+  )
+  assert.equal(discoveredSnap.inProgress.length, 1)
+  assert.equal(discoveredSnap.inProgress[0]?.statusLabel, 'Skill 等待确认 (antigravity)')
+  assert.equal(discoveredSnap.needsYou.length, 1)
+
+  // 4. Once the agent creates the GitHub Issue and finishes, pendingHandoff is cleared
+  const createdSnap = await loadBoardSnapshot(
+    repoPath,
+    pending,
+    makeRunner({
+      agentState: 'done',
+      preview: '已创建 Issue：https://github.com/acme/demo-handoff-repo/issues/15',
+      githubIssues: [
+        {
+          number: 15,
+          title: '[Feature] 支持配置 Skill 提单开关',
+          state: 'OPEN',
+          url: 'https://github.com/acme/demo-handoff-repo/issues/15',
+          createdAt: new Date(nowMs - 5_000).toISOString(),
+          updatedAt: new Date(nowMs - 5_000).toISOString(),
+          closedAt: null,
+          labels: [{ name: 'agent-ready' }]
+        }
+      ]
+    })
+  )
+  assert.equal(pending.has('term_real_123'), false)
+  assert.equal(createdSnap.needsYou.length, 0)
+  assert.equal(createdSnap.inProgress.some((it) => it.issueNumber === 15), true)
+
+  // 5. Explicit waiting agent resolves real term_ handle instead of stale paneKey
+  const explicitWait = await collectOrcaAgentState(
+    repoPath,
+    makeRunner({ agentState: 'waiting', preview: '是否允许执行数据库迁移？' })
+  )
+  assert.equal(explicitWait.questions.length, 1)
+  assert.equal(
+    explicitWait.questions[0]?.kind === 'agent-question' ? explicitWait.questions[0].terminalId : '',
+    'term_real_123'
+  )
 })

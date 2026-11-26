@@ -15,6 +15,8 @@ import {
   findBundledAutopilotAdmin,
   findBundledHandoffSkill,
   getAutopilotStateRoot,
+  hasHandoffCreatedIssue,
+  isHandoffSessionTitle,
   listInstalledAgents,
   mergeBoardItems,
   readLedgerIssues,
@@ -33,10 +35,13 @@ import type {
 } from '../protocol'
 
 const HANDOFF_BOOT_GRACE_MS = 25_000
+const DISCOVERED_HANDOFF_MAX_AGE_MS = 6 * 60 * 60 * 1000
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 export type PendingHandoff = {
   terminalId: string
+  paneKey?: string
+  orcaSessionId?: string
   repoPath: string
   title: string
   agent: string
@@ -59,6 +64,35 @@ type OrcaAgentEntry = {
   updatedAt?: number
 }
 
+type OrcaTerminalEntry = {
+  handle?: string
+  worktreeId?: string
+  worktreePath?: string
+  tabId?: string
+  leafId?: string
+  title?: string
+  connected?: boolean
+  writable?: boolean
+  lastOutputAt?: number
+  preview?: string
+  agentIdentity?: string
+}
+
+export type ResolvedOrcaAgent = {
+  handle: string
+  paneKey?: string
+  orcaSessionId?: string
+  agent: string
+  state: string
+  title: string
+  worktreeId: string
+  workspace: string
+  lastAssistantMessage: string
+  preview: string
+  updatedAt: number
+  terminalConnected: boolean
+}
+
 function resolvePluginRootFromTui(): string {
   try {
     const fileUrl = import.meta.url
@@ -72,65 +106,154 @@ function resolvePluginRootFromTui(): string {
   return process.cwd()
 }
 
-function matchesProject(entry: OrcaAgentEntry, repoPath: string): boolean {
+function matchesProject(
+  entry: { worktreeId?: string; worktreePath?: string; repo?: string },
+  repoPath: string
+): boolean {
   const normalized = resolve(repoPath)
+  if (entry.worktreePath && resolve(entry.worktreePath) === normalized) return true
   if (entry.worktreeId && entry.worktreeId.includes(normalized)) return true
   const projectName = basename(normalized)
   if (entry.repo && entry.repo === projectName) return true
   return false
 }
 
+async function readTerminalText(
+  handle: string,
+  runner: CommandRunner
+): Promise<string> {
+  if (!handle) return ''
+  for (const extraArgs of [
+    ['--screen', '--limit', '40'],
+    ['--limit', '40']
+  ]) {
+    const readRes = await runner(
+      'orca',
+      ['terminal', 'read', '--terminal', handle, ...extraArgs, '--json'],
+      { timeoutMs: 4_000 }
+    )
+    if (readRes.exitCode === 0 && readRes.stdout.trim()) {
+      try {
+        const parsed = JSON.parse(readRes.stdout) as {
+          result?: { terminal?: { tail?: string[] } }
+        }
+        const tail = parsed.result?.terminal?.tail || []
+        const joined = tail.join('\n').trim()
+        if (joined) return joined
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return ''
+}
+
 export async function collectOrcaAgentState(
   repoPath: string,
   runner: CommandRunner = defaultRunner
-): Promise<{ questions: NeedsYouItem[]; sessionStates: Map<string, string> }> {
+): Promise<{
+  questions: NeedsYouItem[]
+  sessionStates: Map<string, string>
+  agentsByKey: Map<string, ResolvedOrcaAgent>
+  terminalByHandle: Map<string, OrcaTerminalEntry>
+  handoffAgents: ResolvedOrcaAgent[]
+}> {
   const questions: NeedsYouItem[] = []
   const sessionStates = new Map<string, string>()
+  const agentsByKey = new Map<string, ResolvedOrcaAgent>()
+  const terminalByHandle = new Map<string, OrcaTerminalEntry>()
+  const terminalByPaneKey = new Map<string, OrcaTerminalEntry>()
+  const handoffAgents: ResolvedOrcaAgent[] = []
 
-  const res = await runner('orca', ['agent', 'list', '--json'], { timeoutMs: 6_000 })
-  if (res.exitCode !== 0 || !res.stdout.trim()) {
-    return { questions, sessionStates }
+  const [agentRes, termRes] = await Promise.all([
+    runner('orca', ['agent', 'list', '--json'], { timeoutMs: 6_000 }),
+    runner('orca', ['terminal', 'list', '--json'], { timeoutMs: 6_000 })
+  ])
+
+  if (termRes.exitCode === 0 && termRes.stdout.trim()) {
+    try {
+      const parsed = JSON.parse(termRes.stdout) as {
+        result?: { terminals?: OrcaTerminalEntry[] }
+        terminals?: OrcaTerminalEntry[]
+      }
+      const terminals = parsed.result?.terminals || parsed.terminals || []
+      for (const term of terminals) {
+        if (term.handle) {
+          terminalByHandle.set(term.handle, term)
+        }
+        if (term.tabId && term.leafId) {
+          terminalByPaneKey.set(`${term.tabId}:${term.leafId}`, term)
+        }
+      }
+    } catch {
+      // ignore terminal list parse failure
+    }
+  }
+
+  if (agentRes.exitCode !== 0 || !agentRes.stdout.trim()) {
+    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents }
   }
 
   let agents: OrcaAgentEntry[] = []
   try {
-    const parsed = JSON.parse(res.stdout) as {
+    const parsed = JSON.parse(agentRes.stdout) as {
       result?: { agents?: OrcaAgentEntry[] }
       agents?: OrcaAgentEntry[]
     }
     agents = parsed.result?.agents || parsed.agents || []
   } catch {
-    return { questions, sessionStates }
+    return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents }
   }
 
   for (const agent of agents) {
-    if (!matchesProject(agent, repoPath)) continue
-    const handle = agent.terminalId || agent.paneKey || agent.orcaSessionId || ''
-    if (handle && agent.state) {
-      sessionStates.set(handle, agent.state)
-    }
-    if (agent.orcaSessionId && agent.state) {
-      sessionStates.set(agent.orcaSessionId, agent.state)
+    const matchedTerminal =
+      (agent.terminalId ? terminalByHandle.get(agent.terminalId) : undefined) ||
+      (agent.paneKey ? terminalByPaneKey.get(agent.paneKey) : undefined)
+    if (!matchesProject(agent, repoPath) && !(matchedTerminal && matchesProject(matchedTerminal, repoPath))) {
+      continue
     }
 
-    if (agent.state === 'blocked' || agent.state === 'waiting') {
-      let question = (agent.lastAssistantMessage || '').trim()
+    const handle =
+      matchedTerminal?.handle || agent.terminalId || agent.paneKey || agent.orcaSessionId || ''
+    const resolved: ResolvedOrcaAgent = {
+      handle,
+      paneKey: agent.paneKey,
+      orcaSessionId: agent.orcaSessionId,
+      agent: agent.agent || matchedTerminal?.agentIdentity || 'Agent',
+      state: agent.state || '',
+      title: agent.title || matchedTerminal?.title || '',
+      worktreeId: agent.worktreeId || matchedTerminal?.worktreeId || '',
+      workspace: agent.workspace || basename(repoPath),
+      lastAssistantMessage: (agent.lastAssistantMessage || '').trim(),
+      preview: (matchedTerminal?.preview || '').trim(),
+      updatedAt: agent.updatedAt || matchedTerminal?.lastOutputAt || Date.now(),
+      terminalConnected: matchedTerminal ? matchedTerminal.connected !== false : true
+    }
+
+    for (const key of [handle, agent.terminalId, agent.paneKey, agent.orcaSessionId]) {
+      if (key) {
+        if (resolved.state) sessionStates.set(key, resolved.state)
+        agentsByKey.set(key, resolved)
+      }
+    }
+
+    if (isHandoffSessionTitle(resolved.title)) {
+      handoffAgents.push(resolved)
+    }
+
+    if (
+      resolved.state === 'blocked' ||
+      resolved.state === 'waiting' ||
+      resolved.state === 'permission'
+    ) {
+      let question = resolved.lastAssistantMessage
+      if (!question && resolved.preview) {
+        question = extractTerminalQuestion(resolved.preview)
+      }
       if (!question && handle) {
-        const readRes = await runner(
-          'orca',
-          ['terminal', 'read', '--terminal', handle, '--limit', '30', '--json'],
-          { timeoutMs: 4_000 }
-        )
-        if (readRes.exitCode === 0 && readRes.stdout.trim()) {
-          try {
-            const parsed = JSON.parse(readRes.stdout) as {
-              result?: { terminal?: { tail?: string[] } }
-            }
-            const tail = parsed.result?.terminal?.tail || []
-            question = extractTerminalQuestion(tail.join('\n'))
-          } catch {
-            // ignore
-          }
+        const terminalText = await readTerminalText(handle, runner)
+        if (terminalText) {
+          question = extractTerminalQuestion(terminalText)
         }
       }
       if (!question) {
@@ -139,18 +262,23 @@ export async function collectOrcaAgentState(
       questions.push({
         id: `agent-${handle || agent.orcaSessionId || Math.random().toString(36).slice(2)}`,
         kind: 'agent-question',
-        title: agent.title || `${agent.workspace || basename(repoPath)} 中的助手需要你确认`,
+        title: resolved.title || `${resolved.workspace} 中的助手需要你确认`,
         question,
         terminalId: handle,
-        workspaceId: agent.worktreeId || '',
-        agentName: agent.agent || 'Agent',
-        state: agent.state === 'blocked' ? 'blocked' : 'waiting',
-        updatedAt: new Date(agent.updatedAt || Date.now()).toISOString()
+        workspaceId: resolved.worktreeId,
+        agentName: resolved.agent,
+        state:
+          resolved.state === 'blocked'
+            ? 'blocked'
+            : resolved.state === 'permission'
+              ? 'permission'
+              : 'waiting',
+        updatedAt: new Date(resolved.updatedAt).toISOString()
       })
     }
   }
 
-  return { questions, sessionStates }
+  return { questions, sessionStates, agentsByKey, terminalByHandle, handoffAgents }
 }
 
 export async function loadBoardSnapshot(
@@ -178,37 +306,222 @@ export async function loadBoardSnapshot(
     installedAgents
   )
 
-  const merged = mergeBoardItems({
-    ledgerRows,
-    githubIssues,
-    agentQuestions: agentState.questions
-  })
+  const questionsByHandle = new Map<string, Extract<NeedsYouItem, { kind: 'agent-question' }>>()
+  const allQuestions: NeedsYouItem[] = []
+  for (const q of agentState.questions) {
+    allQuestions.push(q)
+    if (q.kind === 'agent-question' && q.terminalId) {
+      questionsByHandle.set(q.terminalId, q)
+    }
+  }
 
   const now = Date.now()
   const activeHandoffs: InProgressItem[] = []
+  const handledHandoffKeys = new Set<string>()
+
   for (const [terminalId, entry] of pendingHandoffs.entries()) {
     if (entry.repoPath !== repoPath) continue
-    const state = agentState.sessionStates.get(terminalId)
-    if (state === 'done') {
-      pendingHandoffs.delete(terminalId)
+    const resolved =
+      agentState.agentsByKey.get(entry.terminalId) ||
+      (entry.paneKey ? agentState.agentsByKey.get(entry.paneKey) : undefined) ||
+      (entry.orcaSessionId ? agentState.agentsByKey.get(entry.orcaSessionId) : undefined)
+    const effectiveHandle = resolved?.handle || entry.terminalId
+    const termEntry = agentState.terminalByHandle.get(effectiveHandle)
+    const state = resolved?.state
+    const terminalStillOpen = Boolean(
+      (termEntry && termEntry.connected !== false) ||
+        (resolved && resolved.terminalConnected)
+    )
+
+    for (const k of [
+      entry.terminalId,
+      entry.paneKey,
+      entry.orcaSessionId,
+      effectiveHandle,
+      resolved?.paneKey,
+      resolved?.orcaSessionId
+    ]) {
+      if (k) handledHandoffKeys.add(k)
+    }
+
+    if (!state && !terminalStillOpen) {
+      if (now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
+        pendingHandoffs.delete(terminalId)
+        continue
+      }
+      activeHandoffs.push({
+        id: `handoff-${effectiveHandle}`,
+        issueNumber: null,
+        title: entry.title,
+        url: '',
+        statusLabel: `Skill 整理提单中 (${entry.agent})`,
+        updatedAt: entry.startedAt
+      })
       continue
     }
-    if (!state && now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
-      pendingHandoffs.delete(terminalId)
+
+    if (state === 'done' || state === 'idle') {
+      let output = [resolved?.lastAssistantMessage, resolved?.preview, termEntry?.preview]
+        .filter(Boolean)
+        .join('\n')
+      let created = hasHandoffCreatedIssue({
+        output,
+        repository: autopilot?.repository || repository,
+        githubIssues,
+        startedMs: entry.startedMs
+      })
+      if (!created && effectiveHandle) {
+        const screenText = await readTerminalText(effectiveHandle, runner)
+        if (screenText) {
+          output = output ? `${output}\n${screenText}` : screenText
+          created = hasHandoffCreatedIssue({
+            output,
+            repository: autopilot?.repository || repository,
+            githubIssues,
+            startedMs: entry.startedMs
+          })
+        }
+      }
+      if (created || !terminalStillOpen) {
+        pendingHandoffs.delete(terminalId)
+        continue
+      }
+
+      // Agent finished its turn without creating an Issue -> waiting for user confirmation!
+      const existingQuestion = questionsByHandle.get(effectiveHandle)
+      if (existingQuestion) {
+        existingQuestion.title = entry.title
+      } else {
+        const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+          id: `agent-${effectiveHandle}`,
+          kind: 'agent-question',
+          title: entry.title,
+          question: extractTerminalQuestion(output),
+          terminalId: effectiveHandle,
+          workspaceId: resolved?.worktreeId || '',
+          agentName: entry.agent,
+          state: 'waiting',
+          updatedAt: new Date(resolved?.updatedAt || now).toISOString()
+        }
+        allQuestions.push(questionItem)
+        questionsByHandle.set(effectiveHandle, questionItem)
+      }
+
+      activeHandoffs.push({
+        id: `handoff-${effectiveHandle}`,
+        issueNumber: null,
+        title: entry.title,
+        url: '',
+        statusLabel: `Skill 等待确认 (${entry.agent})`,
+        updatedAt: new Date(resolved?.updatedAt || entry.startedMs).toISOString()
+      })
       continue
     }
+
+    const waitingConfirmation =
+      state === 'waiting' || state === 'blocked' || state === 'permission'
+    if (waitingConfirmation) {
+      const existingQuestion = questionsByHandle.get(effectiveHandle)
+      if (existingQuestion) {
+        existingQuestion.title = entry.title
+      }
+    }
+
     activeHandoffs.push({
-      id: `handoff-${terminalId}`,
+      id: `handoff-${effectiveHandle}`,
       issueNumber: null,
       title: entry.title,
       url: '',
-      statusLabel:
-        state === 'waiting' || state === 'blocked'
-          ? `Skill 等待确认 (${entry.agent})`
-          : `Skill 整理提单中 (${entry.agent})`,
+      statusLabel: waitingConfirmation
+        ? `Skill 等待确认 (${entry.agent})`
+        : `Skill 整理提单中 (${entry.agent})`,
       updatedAt: entry.startedAt
     })
   }
+
+  // Also discover active/waiting handoff terminals not in in-memory pendingHandoffs (e.g. after TUI restart)
+  for (const agent of agentState.handoffAgents) {
+    if (!agent.terminalConnected) continue
+    if (
+      handledHandoffKeys.has(agent.handle) ||
+      (agent.paneKey && handledHandoffKeys.has(agent.paneKey)) ||
+      (agent.orcaSessionId && handledHandoffKeys.has(agent.orcaSessionId))
+    ) {
+      continue
+    }
+    if (now - agent.updatedAt > DISCOVERED_HANDOFF_MAX_AGE_MS) continue
+
+    const effectiveHandle = agent.handle
+    const displayTitle = agent.title || 'Skill 规范提单任务'
+
+    if (agent.state === 'done' || agent.state === 'idle') {
+      let output = [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
+      let created = hasHandoffCreatedIssue({
+        output,
+        repository: autopilot?.repository || repository,
+        githubIssues,
+        agentUpdatedMs: agent.updatedAt
+      })
+      if (!created && effectiveHandle) {
+        const screenText = await readTerminalText(effectiveHandle, runner)
+        if (screenText) {
+          output = output ? `${output}\n${screenText}` : screenText
+          created = hasHandoffCreatedIssue({
+            output,
+            repository: autopilot?.repository || repository,
+            githubIssues,
+            agentUpdatedMs: agent.updatedAt
+          })
+        }
+      }
+      if (created) continue
+
+      if (!questionsByHandle.has(effectiveHandle)) {
+        const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+          id: `agent-${effectiveHandle}`,
+          kind: 'agent-question',
+          title: displayTitle,
+          question: extractTerminalQuestion(output),
+          terminalId: effectiveHandle,
+          workspaceId: agent.worktreeId,
+          agentName: agent.agent,
+          state: 'waiting',
+          updatedAt: new Date(agent.updatedAt).toISOString()
+        }
+        allQuestions.push(questionItem)
+        questionsByHandle.set(effectiveHandle, questionItem)
+      }
+
+      activeHandoffs.push({
+        id: `handoff-${effectiveHandle}`,
+        issueNumber: null,
+        title: displayTitle,
+        url: '',
+        statusLabel: `Skill 等待确认 (${agent.agent})`,
+        updatedAt: new Date(agent.updatedAt).toISOString()
+      })
+      continue
+    }
+
+    const waitingConfirmation =
+      agent.state === 'waiting' || agent.state === 'blocked' || agent.state === 'permission'
+    activeHandoffs.push({
+      id: `handoff-${effectiveHandle}`,
+      issueNumber: null,
+      title: displayTitle,
+      url: '',
+      statusLabel: waitingConfirmation
+        ? `Skill 等待确认 (${agent.agent})`
+        : `Skill 整理提单中 (${agent.agent})`,
+      updatedAt: new Date(agent.updatedAt).toISOString()
+    })
+  }
+
+  const merged = mergeBoardItems({
+    ledgerRows,
+    githubIssues,
+    agentQuestions: allQuestions
+  })
 
   return {
     projectName: basename(repoPath),
@@ -320,11 +633,14 @@ export async function submitIssueFromTui(params: {
   }
 
   let terminalId = `handoff-${Date.now()}`
+  let paneKey: string | undefined
+  let orcaSessionId: string | undefined
   try {
     const parsed = JSON.parse(launchRes.stdout) as {
       result?: {
         terminalId?: string
-        terminal?: { handle?: string }
+        paneKey?: string
+        terminal?: { handle?: string; tabId?: string; leafId?: string }
         orcaSessionId?: string
       }
     }
@@ -333,6 +649,12 @@ export async function submitIssueFromTui(params: {
       parsed.result?.terminal?.handle ||
       parsed.result?.orcaSessionId ||
       terminalId
+    orcaSessionId = parsed.result?.orcaSessionId
+    paneKey =
+      parsed.result?.paneKey ||
+      (parsed.result?.terminal?.tabId && parsed.result?.terminal?.leafId
+        ? `${parsed.result.terminal.tabId}:${parsed.result.terminal.leafId}`
+        : undefined)
   } catch {
     // keep synthetic id
   }
@@ -340,6 +662,8 @@ export async function submitIssueFromTui(params: {
   const nowMs = Date.now()
   params.pendingHandoffs.set(terminalId, {
     terminalId,
+    paneKey,
+    orcaSessionId,
     repoPath: params.repoPath,
     title,
     agent,

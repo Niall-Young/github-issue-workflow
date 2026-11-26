@@ -71,7 +71,10 @@ class AutopilotAdminTests(unittest.TestCase):
         )
         self.assertEqual(3, value["schema_version"])
         self.assertEqual(["agent-ready"], value["repositories"][0]["labels"])
-        self.assertEqual("never", value["policy"]["publication"])
+        self.assertEqual("auto-merge", value["policy"]["publication"])
+        self.assertEqual("squash", value["policy"]["merge_method"])
+        self.assertTrue(value["policy"]["require_ci"])
+        self.assertEqual([], value["policy"]["pre_merge_commands"])
         self.assertEqual("claude", value["orca"]["default_agent"])
         self.assertEqual(["claude", "codex"], value["orca"]["allowed_agents"])
         self.assertEqual("orca-automation", value["scheduler"]["backend"])
@@ -533,11 +536,17 @@ class AutopilotAdminTests(unittest.TestCase):
             "agent-ready", paths, "codex", ["codex"],
             max_concurrent_workers=2, max_attempts=3,
             worker_timeout_seconds=1800, heartbeat_timeout_seconds=600,
+            publication="pr-only", merge_method="rebase",
+            pre_merge_commands=["python3 -m unittest"], require_ci=False,
         )
         self.assertEqual(2, value["max_concurrent_workers"])
         self.assertEqual(3, value["max_attempts"])
         self.assertEqual(1800, value["worker_timeout_seconds"])
         self.assertEqual(600, value["heartbeat_timeout_seconds"])
+        self.assertEqual("pr-only", value["policy"]["publication"])
+        self.assertEqual("rebase", value["policy"]["merge_method"])
+        self.assertEqual(["python3 -m unittest"], value["policy"]["pre_merge_commands"])
+        self.assertFalse(value["policy"]["require_ci"])
 
     def test_prune_cli_forwards_arguments_to_watcher(self) -> None:
         with mock.patch.object(

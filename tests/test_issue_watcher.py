@@ -1204,11 +1204,130 @@ class IssueWatcherTests(unittest.TestCase):
         )
         conn.close()
         ledger = self.ledger()
-        self.assertEqual("4", ledger.metadata("schema_version"))
+        self.assertEqual("5", ledger.metadata("schema_version"))
         issue_cols = {row[1] for row in ledger.connection.execute("PRAGMA table_info(issues)")}
         attempt_cols = {row[1] for row in ledger.connection.execute("PRAGMA table_info(attempts)")}
         self.assertIn("depends_on", issue_cols)
-        self.assertTrue({"last_heartbeat", "output_digest", "failure_patch_path"}.issubset(attempt_cols))
+        self.assertTrue(
+            {"last_heartbeat", "output_digest", "failure_patch_path", "pr_number", "pr_url", "merged_at"}
+            .issubset(attempt_cols)
+        )
+
+    def test_auto_merge_publishes_pr_waits_for_ci_merges_and_unblocks_dependent_issue(self) -> None:
+        config = self.config()
+        config["policy"]["publication"] = "auto-merge"
+        config["policy"]["merge_method"] = "squash"
+        config["policy"]["require_ci"] = True
+        ledger = self.ledger()
+
+        issue1 = self.issue("I_1", 1)
+        issue2 = {**self.issue("I_2", 2), "body": "Blocked by: #1"}
+        ledger.enqueue(issue1)
+        ledger.enqueue(issue2)
+        claimed = ledger.claim_many(3)
+        self.assertEqual([1], [item["issue_number"] for item in claimed])
+
+        base = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        worktree = self.root / "wt-pr-1"
+        branch = "repair/issue-1-attempt-1"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True, stdout=subprocess.PIPE,
+        )
+        (worktree / "ok.txt").write_text("done\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "ok.txt"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "-m", "fix #1"], check=True, stdout=subprocess.PIPE)
+        head = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"], check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        evidence = self.repair_evidence(worktree, branch, base, head)
+        ledger.assign_orca(
+            claimed[0]["node_id"], claimed[0]["attempt_number"],
+            run_id=evidence["run_id"], agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-1",
+            orca_worktree_id=f"repo::{worktree}", worktree_path=str(worktree), branch=branch,
+        )
+        receipt = json.dumps({"status": "ready-for-review", "summary": "all tests green", **evidence})
+        with mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"status": "completed"}},
+            {"ok": True, "result": {"rows": [{"text": f"AUTOPILOT_RESULT: {receipt}"}]}},
+            {"ok": True, "result": {}},  # worktree set
+            {"ok": True, "result": {}},  # worker-release
+        ]), mock.patch.object(
+            WATCHER, "publish_attempt_pr",
+            return_value={"pr_number": 42, "pr_url": "https://github.com/owner/repo/pull/42"},
+        ) as pub:
+            completed = WATCHER.reconcile_workers(config, ledger)
+        pub.assert_called_once()
+        self.assertEqual("pr-open", completed[0]["status"])
+        self.assertEqual("https://github.com/owner/repo/pull/42", completed[0]["pr_url"])
+        # While PR is open, #2 is still blocked.
+        self.assertEqual([], ledger.claim_many(3))
+
+        # CI pending -> stays pr-open.
+        with mock.patch.object(WATCHER, "github_pr_view", return_value={
+            "number": 42, "url": "https://github.com/owner/repo/pull/42",
+            "state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"name": "test", "status": "IN_PROGRESS", "conclusion": ""}],
+        }):
+            self.assertEqual([], WATCHER.reconcile_pull_requests(config, ledger))
+        self.assertEqual("pr-open", ledger.snapshot()["issues"][0]["status"])
+
+        # CI green -> auto-merges PR, closes Issue, cleans worktree, and unblocks #2.
+        with mock.patch.object(WATCHER, "github_pr_view", return_value={
+            "number": 42, "url": "https://github.com/owner/repo/pull/42",
+            "state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }), mock.patch.object(WATCHER, "merge_github_pr") as merge_pr, mock.patch.object(
+            WATCHER, "close_github_issue"
+        ) as close_issue, mock.patch.object(WATCHER, "cleanup_attempt") as cleanup, mock.patch.object(
+            WATCHER, "command", return_value=subprocess.CompletedProcess([], 0, "", "")
+        ):
+            merged = WATCHER.reconcile_pull_requests(config, ledger)
+        self.assertEqual("merged", merged[0]["status"])
+        merge_pr.assert_called_once_with("https://github.com/owner/repo/pull/42", "squash")
+        close_issue.assert_called_once_with(issue1["url"])
+        cleanup.assert_called_once()
+        self.assertEqual("merged", ledger.snapshot()["issues"][0]["status"])
+
+        # Now #2 is unblocked and immediately claimable.
+        next_batch = ledger.claim_many(3)
+        self.assertEqual([2], [item["issue_number"] for item in next_batch])
+
+    def test_pr_reconcile_stops_at_needs_human_on_ci_failure_or_conflict(self) -> None:
+        config = self.config()
+        config["policy"]["publication"] = "auto-merge"
+        for case, pr_payload, expected_text in [
+            ("ci_fail", {
+                "number": 10, "url": "https://github.com/owner/repo/pull/10",
+                "state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [{"name": "pytest", "status": "COMPLETED", "conclusion": "FAILURE"}],
+            }, "CI checks failed: pytest"),
+            ("conflict", {
+                "number": 11, "url": "https://github.com/owner/repo/pull/11",
+                "state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+                "statusCheckRollup": [],
+            }, "merge conflicts"),
+        ]:
+            with self.subTest(case=case):
+                db = self.root / f"{case}.sqlite3"
+                ledger = WATCHER.Ledger(db, lease_seconds=20, max_attempts=2)
+                ledger.enqueue(self.issue("I_1", 1))
+                claimed = ledger.claim_next()
+                ledger.finish(
+                    claimed["node_id"], claimed["attempt_number"], "pr-open",
+                    pr_number=pr_payload["number"], pr_url=pr_payload["url"],
+                    summary="PR opened",
+                )
+                with mock.patch.object(WATCHER, "github_pr_view", return_value=pr_payload):
+                    updated = WATCHER.reconcile_pull_requests(config, ledger)
+                self.assertEqual(1, len(updated))
+                self.assertEqual("needs-human", updated[0]["status"])
+                self.assertIn(expected_text, updated[0]["summary"])
 
 
 if __name__ == "__main__":

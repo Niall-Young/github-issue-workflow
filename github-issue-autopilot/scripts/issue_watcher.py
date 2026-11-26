@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 CONFIG_VERSIONS = {2, 3}
-LEDGER_VERSION = 4
+LEDGER_VERSION = 5
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 RECEIPT = re.compile(r"(?m)^AUTOPILOT_RESULT: (\{[^\r\n]+\})[ \t]*$")
 DEPENDENCY_LINE = re.compile(
@@ -28,9 +28,16 @@ DEPENDENCY_LINE = re.compile(
 )
 ISSUE_REF = re.compile(r"(?:#|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/)(\d+)\b")
 CHILD_STATES = {"succeeded", "ready-for-review", "needs-human", "blocked", "failed"}
-STOPPED_STATES = {"ready-for-review", "needs-human", "blocked", "failed", "discarded"}
+STOPPED_STATES = {"ready-for-review", "pr-open", "merged", "needs-human", "blocked", "failed", "discarded"}
+RESOLVED_DEPENDENCY_STATES = {"accepted", "merged"}
 PRUNABLE_ATTEMPT_STATES = {"failed", "discarded", "rejected"}
-PROTECTED_ISSUE_STATES = {"claimed", "running", "ready-for-review", "needs-human"}
+PROTECTED_ISSUE_STATES = {"claimed", "running", "ready-for-review", "pr-open", "needs-human"}
+PUBLICATION_MODES = {"auto-merge", "pr-only", "never"}
+MERGE_METHODS = {"squash", "merge", "rebase"}
+CI_FAILURE_CONCLUSIONS = {
+    "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE",
+}
+CI_PENDING_STATES = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", "REQUESTED"}
 
 
 class WatcherError(RuntimeError):
@@ -146,8 +153,20 @@ def load_config(path: Path) -> dict[str, Any]:
     policy = config.get("policy", {})
     if policy.get("scope_approval") != "eligible-issue":
         raise WatcherError("policy.scope_approval must be eligible-issue")
-    if policy.get("publication", "never") != "never":
-        raise WatcherError("only policy.publication=never is supported")
+    publication = policy.get("publication", "auto-merge")
+    if publication not in PUBLICATION_MODES:
+        raise WatcherError("policy.publication must be auto-merge, pr-only, or never")
+    policy["publication"] = publication
+    merge_method = policy.get("merge_method", "squash")
+    if merge_method not in MERGE_METHODS:
+        raise WatcherError("policy.merge_method must be squash, merge, or rebase")
+    policy["merge_method"] = merge_method
+    pre_merge_commands = policy.get("pre_merge_commands", [])
+    if (not isinstance(pre_merge_commands, list)
+            or any(not isinstance(cmd, str) or not cmd.strip() for cmd in pre_merge_commands)):
+        raise WatcherError("policy.pre_merge_commands must be an array of non-empty command strings")
+    policy["pre_merge_commands"] = pre_merge_commands
+    policy["require_ci"] = bool(policy.get("require_ci", True))
     if policy.get("max_risk", "medium") not in {"low", "medium"}:
         raise WatcherError("policy.max_risk must be low or medium")
     config["policy"] = policy
@@ -255,6 +274,7 @@ class Ledger:
               summary TEXT, returncode INTEGER, log_path TEXT, agent_id TEXT,
               orca_task_id TEXT, orca_dispatch_id TEXT, orca_worktree_id TEXT,
               last_heartbeat TEXT, output_digest TEXT, failure_patch_path TEXT,
+              pr_number INTEGER, pr_url TEXT, merged_at TEXT,
               PRIMARY KEY(node_id, attempt_number)
             );
             """
@@ -267,15 +287,22 @@ class Ledger:
             self._migrate_v1()
             self._migrate_v2()
             self._migrate_v3()
+            self._migrate_v4()
             self.connection.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
                                     (str(LEDGER_VERSION),))
         elif row[0] == "2":
             self._migrate_v2()
             self._migrate_v3()
+            self._migrate_v4()
             self.connection.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
                                     (str(LEDGER_VERSION),))
         elif row[0] == "3":
             self._migrate_v3()
+            self._migrate_v4()
+            self.connection.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
+                                    (str(LEDGER_VERSION),))
+        elif row[0] == "4":
+            self._migrate_v4()
             self.connection.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
                                     (str(LEDGER_VERSION),))
         elif row[0] != str(LEDGER_VERSION):
@@ -305,6 +332,14 @@ class Ledger:
             self.connection.execute("ALTER TABLE issues ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'")
         attempt_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(attempts)")}
         for name in ("last_heartbeat", "output_digest", "failure_patch_path"):
+            if name not in attempt_columns:
+                self.connection.execute(f"ALTER TABLE attempts ADD COLUMN {name} TEXT")
+
+    def _migrate_v4(self) -> None:
+        attempt_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(attempts)")}
+        if "pr_number" not in attempt_columns:
+            self.connection.execute("ALTER TABLE attempts ADD COLUMN pr_number INTEGER")
+        for name in ("pr_url", "merged_at"):
             if name not in attempt_columns:
                 self.connection.execute(f"ALTER TABLE attempts ADD COLUMN {name} TEXT")
 
@@ -457,7 +492,7 @@ class Ledger:
                     unmet = []
                     for dep in deps:
                         if dep in statuses:
-                            if statuses[dep] != "accepted":
+                            if statuses[dep] not in RESOLVED_DEPENDENCY_STATES:
                                 unmet.append(dep)
                         elif not external_satisfied.get((repo, dep), False):
                             unmet.append(dep)
@@ -580,6 +615,13 @@ class Ledger:
                WHERE attempts.status='running' ORDER BY issues.created_at, issues.issue_number"""
         )]
 
+    def open_pr_attempts(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.connection.execute(
+            """SELECT attempts.*, issues.repository, issues.issue_number, issues.url, issues.title
+               FROM attempts JOIN issues USING(node_id)
+               WHERE attempts.status='pr-open' ORDER BY issues.created_at, issues.issue_number"""
+        )]
+
     def finish(self, node_id: str, attempt: int, status: str,
                validate_orca: bool = False, **fields: Any) -> None:
         if status == "succeeded":
@@ -594,7 +636,7 @@ class Ledger:
         allowed = {"pid", "run_id", "worktree_path", "branch", "base_sha", "head_sha",
                    "summary", "returncode", "log_path", "agent_id", "orca_task_id",
                    "orca_dispatch_id", "orca_worktree_id", "last_heartbeat",
-                   "output_digest", "failure_patch_path"}
+                   "output_digest", "failure_patch_path", "pr_number", "pr_url", "merged_at"}
         if any(key not in allowed for key in fields):
             raise WatcherError("unsupported attempt field")
         self.connection.execute("BEGIN IMMEDIATE")
@@ -693,8 +735,8 @@ class Ledger:
         issue = self.connection.execute("SELECT * FROM issues WHERE url=?", (url,)).fetchone()
         if issue is None:
             raise WatcherError(f"unknown Issue URL: {url}")
-        if issue["status"] == "accepted":
-            raise WatcherError("an accepted Issue cannot be discarded")
+        if issue["status"] in RESOLVED_DEPENDENCY_STATES:
+            raise WatcherError("an accepted or merged Issue cannot be discarded")
         row = self.connection.execute(
             "SELECT * FROM attempts WHERE node_id=? AND attempt_number=?",
             (issue["node_id"], issue["attempts"]),
@@ -891,7 +933,7 @@ class Ledger:
             issue["depends_on"] = deps
             waiting = [
                 dep for dep in deps
-                if repo_statuses.get(issue["repository"], {}).get(dep) != "accepted"
+                if repo_statuses.get(issue["repository"], {}).get(dep) not in RESOLVED_DEPENDENCY_STATES
             ] if issue["status"] in {"queued", "retry-pending"} and deps else []
             issue["waiting_on"] = waiting
             if waiting:
@@ -1358,6 +1400,21 @@ def verified_receipt(receipt: dict[str, Any] | None, repository: dict[str, Any],
 
 
 def prompt_for(run: dict[str, Any], config: dict[str, Any]) -> str:
+    publication = config.get("policy", {}).get("publication", "auto-merge")
+    if publication == "auto-merge":
+        handoff_note = (
+            "The coordinator will push your verified commit, open a PR, verify PR checks, and auto-merge "
+            "once checks pass. Do not push, create a PR, merge, close, comment, or relabel Issues yourself. "
+        )
+    elif publication == "pr-only":
+        handoff_note = (
+            "The coordinator will push your verified commit and open a PR for review. "
+            "Do not push, create a PR, merge, close, comment, or relabel Issues yourself. "
+        )
+    else:
+        handoff_note = (
+            "Never push, create a PR, merge, close, comment, label, release, or deploy. "
+        )
     return (
         f"Use $github-issue-repair {run['url']} in GitHub Issue Autopilot mode for attempt "
         f"{run['attempt_number']}. Use repair run ID {run['run_id']} and the current Orca-managed worktree and branch. "
@@ -1366,8 +1423,8 @@ def prompt_for(run: dict[str, Any], config: dict[str, Any]) -> str:
         f"{config['policy'].get('max_risk', 'medium')} in the isolated Orca worktree and verify it independently. "
         "Update the active Orca worktree comment at investigation, implementation, and test checkpoints. "
         "Stop on ambiguity, unsafe work, expansion, dependency upgrades, migrations, security/auth/payment changes, "
-        "public API changes, destructive operations, or a broad diff. Never push, create a PR, merge, close, comment, "
-        "label, release, or deploy. Commit only the isolated task changes. Finish with exactly one single-line receipt "
+        f"public API changes, destructive operations, or a broad diff. {handoff_note}"
+        "Commit only the isolated task changes. Finish with exactly one single-line receipt "
         "using the literal prefix `AUTOPILOT_RESULT: `. Example (replace the placeholders):\n"
         "AUTOPILOT_RESULT: "
         '{"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>",'
@@ -1599,6 +1656,257 @@ def worker_state(value: dict[str, Any]) -> str:
     return "running"
 
 
+def run_pre_merge_commands(worktree: Path, commands: list[str]) -> str | None:
+    for cmd in commands:
+        result = subprocess.run(
+            cmd, cwd=worktree, shell=True, check=False, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}")
+            return f"pre-merge verification failed (`{cmd}`): {detail[:240]}"
+    return None
+
+
+def find_existing_open_pr(repository: str, branch: str) -> dict[str, Any] | None:
+    result = command([
+        "gh", "pr", "list", "--repo", repository, "--head", branch,
+        "--state", "open", "--json", "number,url",
+    ])
+    if result.returncode:
+        raise WatcherError(result.stderr.strip() or "failed to check existing open PRs")
+    try:
+        items = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise WatcherError("gh pr list returned invalid JSON") from exc
+    if isinstance(items, list) and items:
+        first = items[0]
+        if isinstance(first, dict) and isinstance(first.get("url"), str) and isinstance(first.get("number"), int):
+            return {"pr_number": first["number"], "pr_url": first["url"]}
+    return None
+
+
+def publish_attempt_pr(
+    config: dict[str, Any],
+    repository: dict[str, Any],
+    attempt: dict[str, Any],
+    summary: str,
+) -> dict[str, Any]:
+    worktree = Path(str(attempt["worktree_path"]))
+    branch = str(attempt["branch"])
+    slug = str(repository["repository"])
+    push = command(["git", "-C", str(worktree), "push", "-u", "origin", branch])
+    if push.returncode:
+        raise WatcherError(push.stderr.strip() or push.stdout.strip() or f"git push failed for {branch}")
+    existing = find_existing_open_pr(slug, branch)
+    if existing is not None:
+        return existing
+    issue_num = attempt["issue_number"]
+    title = f"{attempt.get('title') or f'Fix issue #{issue_num}'} (#{issue_num})"
+    body = (
+        f"Closes #{issue_num}\n\n"
+        f"## Automated Repair Summary\n\n"
+        f"{summary}\n\n"
+        f"- Issue: {attempt['url']}\n"
+        f"- Attempt: {attempt['attempt_number']}\n"
+        f"- Branch: `{branch}`\n"
+        f"- Base SHA: `{attempt.get('base_sha') or ''}`\n"
+        f"- Head SHA: `{attempt.get('head_sha') or ''}`\n"
+    )
+    created = command([
+        "gh", "pr", "create", "--repo", slug, "--head", branch,
+        "--title", title, "--body", body,
+    ])
+    if created.returncode:
+        existing = find_existing_open_pr(slug, branch)
+        if existing is not None:
+            return existing
+        raise WatcherError(created.stderr.strip() or created.stdout.strip() or "gh pr create failed")
+    existing = find_existing_open_pr(slug, branch)
+    if existing is not None:
+        return existing
+    pr_url = next((line.strip() for line in reversed(created.stdout.splitlines())
+                   if line.strip().startswith("https://github.com/")), "")
+    if not pr_url:
+        raise WatcherError("gh pr create did not return a PR URL")
+    pr_view = github_pr_view(pr_url)
+    return {"pr_number": int(pr_view["number"]), "pr_url": str(pr_view["url"])}
+
+
+def github_pr_view(pr_url: str) -> dict[str, Any]:
+    result = command([
+        "gh", "pr", "view", pr_url, "--json",
+        "number,url,state,mergeable,mergeStateStatus,statusCheckRollup,headRefOid",
+    ])
+    if result.returncode:
+        raise WatcherError(result.stderr.strip() or f"gh pr view failed for {pr_url}")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise WatcherError("gh pr view returned invalid JSON") from exc
+    if not isinstance(value, dict) or not value.get("state"):
+        raise WatcherError("gh pr view returned an unexpected payload")
+    return value
+
+
+def evaluate_pr_checks(rollup: Any) -> tuple[str, str]:
+    if not isinstance(rollup, list) or not rollup:
+        return "passed", "no CI checks configured"
+    failed: list[str] = []
+    pending: list[str] = []
+    for item in rollup:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("context") or "check")
+        conclusion = str(item.get("conclusion") or "").upper()
+        state = str(item.get("state") or item.get("status") or "").upper()
+        if conclusion in CI_FAILURE_CONCLUSIONS or state in CI_FAILURE_CONCLUSIONS:
+            failed.append(f"{name} ({conclusion or state})")
+        elif state in CI_PENDING_STATES or (not conclusion and state not in {"SUCCESS", "COMPLETED", "NEUTRAL", "SKIPPED"}):
+            pending.append(name)
+    if failed:
+        return "failed", f"CI checks failed: {', '.join(failed[:5])}"
+    if pending:
+        return "pending", f"waiting for CI checks: {', '.join(pending[:5])}"
+    return "passed", f"all {len(rollup)} CI check(s) passed"
+
+
+def merge_github_pr(pr_url: str, method: str) -> None:
+    flag = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}[method]
+    result = command(["gh", "pr", "merge", pr_url, flag, "--delete-branch"])
+    if result.returncode:
+        state = github_pr_view(pr_url)
+        if state.get("state") != "MERGED":
+            raise WatcherError(result.stderr.strip() or result.stdout.strip() or "gh pr merge failed")
+    confirmed = github_pr_view(pr_url)
+    if confirmed.get("state") != "MERGED":
+        raise WatcherError(f"PR remained in state {confirmed.get('state')} after merge")
+
+
+def reconcile_pull_requests(
+    config: dict[str, Any],
+    ledger: Ledger,
+    at: dt.datetime | None = None,
+) -> list[dict[str, Any]]:
+    policy = config.get("policy", {})
+    publication = policy.get("publication", "auto-merge")
+    merge_method = policy.get("merge_method", "squash")
+    require_ci = bool(policy.get("require_ci", True))
+    pre_merge_commands = list(policy.get("pre_merge_commands", []))
+    orca_cli = config.get("orca", {}).get("cli")
+    current = at or now()
+    updated: list[dict[str, Any]] = []
+    for attempt in ledger.open_pr_attempts():
+        pr_url = attempt.get("pr_url")
+        if not pr_url:
+            continue
+        repository = next((item for item in config["repositories"]
+                           if item["repository"] == attempt["repository"]), None)
+        if repository is None:
+            continue
+        try:
+            pr = github_pr_view(pr_url)
+        except WatcherError:
+            continue
+        pr_state = str(pr.get("state", "")).upper()
+        if pr_state == "MERGED":
+            try:
+                close_github_issue(attempt["url"])
+            except WatcherError:
+                pass
+            ledger.finish(
+                attempt["node_id"], attempt["attempt_number"], "merged",
+                summary=f"PR merged: {pr_url}", merged_at=iso(current),
+            )
+            try:
+                cleanup_attempt(repository["repo_path"], attempt, force=True, orca_cli=orca_cli)
+            except WatcherError:
+                pass
+            command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
+            updated.append({"url": attempt["url"], "status": "merged", "pr_url": pr_url})
+            continue
+        if pr_state == "CLOSED":
+            summary = f"PR was closed without merging: {pr_url}"
+            ledger.finish(attempt["node_id"], attempt["attempt_number"], "needs-human", summary=summary)
+            if attempt.get("orca_worktree_id"):
+                try:
+                    orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
+                              "--workspace-status", "in-review", "--comment", f"needs-human: {summary[:180]}")
+                except WatcherError:
+                    pass
+            updated.append({"url": attempt["url"], "status": "needs-human", "pr_url": pr_url, "summary": summary})
+            continue
+        if pr_state != "OPEN" or publication != "auto-merge":
+            continue
+        mergeable = str(pr.get("mergeable") or "").upper()
+        merge_status = str(pr.get("mergeStateStatus") or "").upper()
+        if mergeable == "CONFLICTING" or merge_status == "DIRTY":
+            summary = f"PR has merge conflicts ({pr_url}); manual resolution or retry required"
+            patch_path = export_failure_patch(repository["repo_path"], ledger.path, attempt)
+            extra = {"failure_patch_path": patch_path} if patch_path else {}
+            ledger.finish(attempt["node_id"], attempt["attempt_number"], "needs-human",
+                          summary=summary, **extra)
+            if attempt.get("orca_worktree_id"):
+                try:
+                    orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
+                              "--workspace-status", "in-review", "--comment", f"needs-human: {summary[:180]}")
+                except WatcherError:
+                    pass
+            updated.append({"url": attempt["url"], "status": "needs-human", "pr_url": pr_url, "summary": summary})
+            continue
+        if mergeable == "UNKNOWN":
+            continue
+        if require_ci:
+            ci_state, ci_detail = evaluate_pr_checks(pr.get("statusCheckRollup"))
+            if ci_state == "pending":
+                continue
+            if ci_state == "failed":
+                summary = f"PR blocked by {ci_detail} ({pr_url})"
+                patch_path = export_failure_patch(repository["repo_path"], ledger.path, attempt)
+                extra = {"failure_patch_path": patch_path} if patch_path else {}
+                ledger.finish(attempt["node_id"], attempt["attempt_number"], "needs-human",
+                              summary=summary, **extra)
+                if attempt.get("orca_worktree_id"):
+                    try:
+                        orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
+                                  "--workspace-status", "in-review", "--comment", f"needs-human: {summary[:180]}")
+                    except WatcherError:
+                        pass
+                updated.append({"url": attempt["url"], "status": "needs-human", "pr_url": pr_url, "summary": summary})
+                continue
+        if pre_merge_commands and attempt.get("worktree_path") and Path(attempt["worktree_path"]).is_dir():
+            failure = run_pre_merge_commands(Path(attempt["worktree_path"]), pre_merge_commands)
+            if failure is not None:
+                patch_path = export_failure_patch(repository["repo_path"], ledger.path, attempt)
+                extra = {"failure_patch_path": patch_path} if patch_path else {}
+                ledger.finish(attempt["node_id"], attempt["attempt_number"], "needs-human",
+                              summary=failure, **extra)
+                updated.append({"url": attempt["url"], "status": "needs-human", "pr_url": pr_url, "summary": failure})
+                continue
+        try:
+            merge_github_pr(pr_url, merge_method)
+        except WatcherError as exc:
+            summary = f"automatic PR merge failed ({pr_url}): {exc}"
+            ledger.finish(attempt["node_id"], attempt["attempt_number"], "needs-human", summary=summary)
+            updated.append({"url": attempt["url"], "status": "needs-human", "pr_url": pr_url, "summary": summary})
+            continue
+        try:
+            close_github_issue(attempt["url"])
+        except WatcherError:
+            pass
+        ledger.finish(
+            attempt["node_id"], attempt["attempt_number"], "merged",
+            summary=f"PR automatically verified and merged: {pr_url}", merged_at=iso(current),
+        )
+        try:
+            cleanup_attempt(repository["repo_path"], attempt, force=True, orca_cli=orca_cli)
+        except WatcherError:
+            pass
+        command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
+        updated.append({"url": attempt["url"], "status": "merged", "pr_url": pr_url})
+    return updated
+
+
 def reconcile_workers(
     config: dict[str, Any],
     ledger: Ledger,
@@ -1711,6 +2019,29 @@ def reconcile_workers(
                 repository = next(item for item in config["repositories"]
                                   if item["repository"] == attempt["repository"])
             status, summary, evidence = verified_receipt(receipt, repository, attempt, output=receipt_output)
+        if status == "ready-for-review" and repository is not None:
+            publication = config.get("policy", {}).get("publication", "auto-merge")
+            if publication in {"pr-only", "auto-merge"}:
+                pre_merge_commands = list(config.get("policy", {}).get("pre_merge_commands", []))
+                worktree_path = Path(str(attempt["worktree_path"]))
+                failure = (
+                    run_pre_merge_commands(worktree_path, pre_merge_commands)
+                    if pre_merge_commands and worktree_path.is_dir() else None
+                )
+                if failure is not None:
+                    status = "needs-human" if int(attempt["attempt_number"]) >= max_attempts else "failed"
+                    summary = failure
+                else:
+                    merged_attempt = {**attempt, **evidence}
+                    try:
+                        pr_info = publish_attempt_pr(config, repository, merged_attempt, summary)
+                    except WatcherError as exc:
+                        status = "needs-human"
+                        summary = f"automatic PR publication failed: {exc}"
+                    else:
+                        status = "pr-open"
+                        evidence = {**evidence, **pr_info}
+                        summary = f"PR opened ({pr_info['pr_url']}): {summary}"
         if status in {"failed", "needs-human", "blocked"} and repository is not None:
             patch_path = export_failure_patch(repository["repo_path"], ledger.path, attempt)
             if patch_path:
@@ -1720,7 +2051,8 @@ def reconcile_workers(
             orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
                       "--workspace-status", "in-review", "--comment", f"{status}: {summary[:180]}")
         orca_call(config, "orchestration", "worker-release", "--dispatch", dispatch_id)
-        completed.append({"url": attempt["url"], "status": status, "summary": summary})
+        completed.append({"url": attempt["url"], "status": status, "summary": summary,
+                          **({"pr_url": evidence["pr_url"]} if "pr_url" in evidence else {})})
     return completed
 
 
@@ -1881,12 +2213,18 @@ def main() -> int:
                 result, code = poll(config, ledger), 0
             elif args.command_name == "work":
                 run_id = ensure_orca_run(config, ledger)
-                result, code = {"completed": reconcile_workers(config, ledger),
-                                "started": work_available(config, ledger, run_id)}, 0
+                result, code = {
+                    "completed": reconcile_workers(config, ledger),
+                    "pull_requests": reconcile_pull_requests(config, ledger),
+                    "started": work_available(config, ledger, run_id),
+                }, 0
             elif args.command_name == "once":
                 run_id = ensure_orca_run(config, ledger)
-                result, code = {"detection": poll(config, ledger),
-                                "completed": reconcile_workers(config, ledger)}, 0
+                result, code = {
+                    "detection": poll(config, ledger),
+                    "completed": reconcile_workers(config, ledger),
+                    "pull_requests": reconcile_pull_requests(config, ledger),
+                }, 0
                 result["started"] = work_available(config, ledger, run_id)
             else:
                 run_id = None
@@ -1907,8 +2245,11 @@ def main() -> int:
                         break
                     try:
                         run_id = run_id or ensure_orca_run(config, ledger)
-                        value = {"detection": poll(config, ledger),
-                                 "completed": reconcile_workers(config, ledger)}
+                        value = {
+                            "detection": poll(config, ledger),
+                            "completed": reconcile_workers(config, ledger),
+                            "pull_requests": reconcile_pull_requests(config, ledger),
+                        }
                         value["started"] = work_available(config, ledger, run_id)
                         print(json.dumps(value, ensure_ascii=False), flush=True)
                     except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:

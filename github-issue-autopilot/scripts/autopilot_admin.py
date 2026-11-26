@@ -198,7 +198,7 @@ def ledger_summary(path: Path) -> dict[str, Any]:
             "SELECT node_id, issue_number, url, status, attempts FROM issues ORDER BY issue_number"
         )]
         unresolved_statuses = {
-            "queued", "claimed", "running", "retry-pending", "ready-for-review", "needs-human"
+            "queued", "claimed", "running", "retry-pending", "ready-for-review", "pr-open", "needs-human"
         }
         unresolved = [item for item in issues if item["status"] in unresolved_statuses]
         artifact_blockers: list[dict[str, Any]] = []
@@ -226,7 +226,11 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
                  max_concurrent_workers: int = 3,
                  max_attempts: int = 2,
                  worker_timeout_seconds: int = 2700,
-                 heartbeat_timeout_seconds: int = 900) -> dict[str, Any]:
+                 heartbeat_timeout_seconds: int = 900,
+                 publication: str = "auto-merge",
+                 merge_method: str = "squash",
+                 pre_merge_commands: list[str] | None = None,
+                 require_ci: bool = True) -> dict[str, Any]:
     return {
         "schema_version": 3,
         "state_db": str(paths["database"]),
@@ -236,7 +240,14 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
         "heartbeat_timeout_seconds": max(0, int(heartbeat_timeout_seconds)),
         "max_attempts": max(1, int(max_attempts)),
         "max_concurrent_workers": max(1, min(3, int(max_concurrent_workers))),
-        "policy": {"scope_approval": "eligible-issue", "publication": "never", "max_risk": "medium"},
+        "policy": {
+            "scope_approval": "eligible-issue",
+            "publication": publication,
+            "merge_method": merge_method,
+            "pre_merge_commands": list(pre_merge_commands or []),
+            "require_ci": bool(require_ci),
+            "max_risk": "medium",
+        },
         "repositories": [{
             "repository": metadata["nameWithOwner"], "repository_id": metadata["id"],
             "repo_path": str(repo), "author": login, "labels": [label],
@@ -733,7 +744,11 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
             max_concurrent_workers: int = 3,
             max_attempts: int = 2,
             worker_timeout_seconds: int = 2700,
-            heartbeat_timeout_seconds: int = 900) -> dict[str, Any]:
+            heartbeat_timeout_seconds: int = 900,
+            publication: str = "auto-merge",
+            merge_method: str = "squash",
+            pre_merge_commands: list[str] | None = None,
+            require_ci: bool = True) -> dict[str, Any]:
     repo = repository_root(repo_path)
     login_result = command(["gh", "api", "user", "--jq", ".login"])
     if login_result.returncode:
@@ -752,6 +767,10 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
         max_attempts=max_attempts,
         worker_timeout_seconds=worker_timeout_seconds,
         heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+        publication=publication,
+        merge_method=merge_method,
+        pre_merge_commands=pre_merge_commands,
+        require_ci=require_ci,
     )
     label_created = ensure_label(metadata["nameWithOwner"], label)
     config_path = Path(paths["config"])
@@ -1107,6 +1126,16 @@ def parser() -> argparse.ArgumentParser:
                                 help="hard timeout in seconds for a running Orca worker")
     install_parser.add_argument("--heartbeat-timeout", type=int, default=900,
                                 help="stall timeout in seconds without new worker output (0 disables)")
+    install_parser.add_argument("--publication", choices=("auto-merge", "pr-only", "never"),
+                                default="auto-merge",
+                                help="post-verification flow: auto-merge (default), pr-only, or never")
+    install_parser.add_argument("--merge-method", choices=("squash", "merge", "rebase"),
+                                default="squash",
+                                help="GitHub PR merge strategy for auto-merge")
+    install_parser.add_argument("--pre-merge-command", action="append", default=[],
+                                help="verification command to run in the worktree before PR publication/merge")
+    install_parser.add_argument("--no-require-ci", action="store_true",
+                                help="do not wait for GitHub PR status checks before auto-merging")
     install_parser.add_argument("--disabled", action="store_true",
                                 help="create or update the Orca Automation without enabling it")
     install_parser.add_argument("--no-load", action="store_true",
@@ -1155,6 +1184,10 @@ def main() -> int:
                 max_attempts=args.max_attempts,
                 worker_timeout_seconds=args.worker_timeout,
                 heartbeat_timeout_seconds=args.heartbeat_timeout,
+                publication=args.publication,
+                merge_method=args.merge_method,
+                pre_merge_commands=args.pre_merge_command,
+                require_ci=not args.no_require_ci,
             )
         elif args.operation == "ensure":
             result = ensure_coordinator(args.config)

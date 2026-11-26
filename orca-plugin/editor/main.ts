@@ -178,11 +178,12 @@ async function fetchSnapshot(silent = false) {
     render()
   }
   try {
-    const snap = await orca.plugin.request('board.snapshot', {
-      repoPath: descriptor.repoPath,
-      repository: descriptor.repository,
-      workspaceId: descriptor.workspaceId
-    })
+    const reqInput: { repoPath?: string; repository?: string; workspaceId?: string } = {}
+    if (descriptor.repoPath) reqInput.repoPath = descriptor.repoPath
+    if (descriptor.repository) reqInput.repository = descriptor.repository
+    if (descriptor.workspaceId) reqInput.workspaceId = descriptor.workspaceId
+
+    const snap = await orca.plugin.request('board.snapshot', reqInput)
     state.snapshot = snap
   } catch (err) {
     showToast('error', `刷新失败：${err instanceof Error ? err.message : String(err)}`)
@@ -212,14 +213,24 @@ async function handleCreateIssue() {
       size,
       base64
     }))
-    const res = await orca.plugin.request('board.createIssue', {
+    const details = state.detailsDraft.trim()
+    const payload: {
+      repoPath: string
+      kind: IssueKind
+      title: string
+      details?: string
+      followUpOf?: number | null
+      attachments?: AttachmentPayload[]
+    } = {
       repoPath,
       kind: state.kind,
-      title,
-      details: state.detailsDraft.trim() || undefined,
-      followUpOf: state.followUpOf,
-      attachments
-    })
+      title
+    }
+    if (details) payload.details = details
+    if (state.followUpOf !== null) payload.followUpOf = state.followUpOf
+    if (attachments.length > 0) payload.attachments = attachments
+
+    const res = await orca.plugin.request('board.createIssue', payload)
     state.titleDraft = ''
     state.detailsDraft = ''
     state.showDetails = false
@@ -249,17 +260,25 @@ async function handleReplyAgent(
   state.busyItemIds.add(item.id)
   render()
   try {
-    await orca.plugin.request('board.replyAgent', {
+    const payload: {
+      terminalId: string
+      message: string
+      repoPath?: string
+      attachments?: AttachmentPayload[]
+    } = {
       terminalId: item.terminalId,
-      message,
-      repoPath: state.snapshot?.repoPath || undefined,
-      attachments: draftAtts.map(({ name, mimeType, size, base64 }) => ({
+      message
+    }
+    if (state.snapshot?.repoPath) payload.repoPath = state.snapshot.repoPath
+    if (draftAtts.length > 0) {
+      payload.attachments = draftAtts.map(({ name, mimeType, size, base64 }) => ({
         name,
         mimeType,
         size,
         base64
       }))
-    })
+    }
+    await orca.plugin.request('board.replyAgent', payload)
     state.replyDrafts.delete(item.id)
     state.replyAttachments.delete(item.id)
     showToast('success', '已发送给助手，正在继续处理')

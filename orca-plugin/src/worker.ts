@@ -1,6 +1,7 @@
 import { basename, resolve } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import {
+  buildAutopilotInstallArgs,
   buildHandoffPrompt,
   createAgentReadyIssue,
   defaultRunner,
@@ -11,6 +12,7 @@ import {
   findAutopilotConfigForRepo,
   findBundledAutopilotAdmin,
   findBundledHandoffSkill,
+  listInstalledAgents,
   mergeBoardItems,
   readLedgerIssues,
   resolveGitRepository,
@@ -183,6 +185,10 @@ export default function activate(orca: OrcaWorkerApi) {
         repoPath: null,
         autopilotInstalled: false,
         autopilotRunning: false,
+        defaultAgent: null,
+        allowedAgents: [],
+        installedAgents: [],
+        preferredAgent: 'codex',
         syncedAt,
         error: '请先在 Orca 左侧选择一个 Git 项目工作区。',
         needsYou: [],
@@ -197,12 +203,19 @@ export default function activate(orca: OrcaWorkerApi) {
     const repository = input?.repository || gitInfo.repository
     const autopilot = findAutopilotConfigForRepo(repoPath, repository)
 
-    const [ledgerRows, githubIssues, pullRequests, agentState] = await Promise.all([
+    const [ledgerRows, githubIssues, pullRequests, agentState, installedAgents] = await Promise.all([
       autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
       fetchGithubIssues(repoPath),
       fetchGithubPullRequests(repoPath),
-      collectAgentState(projectId, repoPath, workspaces)
+      collectAgentState(projectId, repoPath, workspaces),
+      listInstalledAgents()
     ])
+
+    const preferredAgent = await resolvePreferredAgent(
+      autopilot?.defaultAgent ?? null,
+      defaultRunner,
+      installedAgents
+    )
 
     const merged = mergeBoardItems({
       ledgerRows,
@@ -217,6 +230,10 @@ export default function activate(orca: OrcaWorkerApi) {
       repoPath,
       autopilotInstalled: Boolean(autopilot),
       autopilotRunning: Boolean(autopilot),
+      defaultAgent: autopilot?.defaultAgent ?? null,
+      allowedAgents: autopilot?.allowedAgents ?? [],
+      installedAgents,
+      preferredAgent,
       syncedAt,
       error: null,
       needsYou: merged.needsYou,
@@ -405,16 +422,62 @@ export default function activate(orca: OrcaWorkerApi) {
     if (!adminScript) {
       throw new Error('未找到 autopilot_admin.py，请先确认已安装 github-issue-autopilot')
     }
-    const res = await defaultRunner(
-      'python3',
-      [adminScript, 'install', '--repo-path', input.repoPath],
-      { timeoutMs: 45_000 }
-    )
+    const existing = findAutopilotConfigForRepo(input.repoPath, null)
+    const selectedAgent =
+      input.agent?.trim() || (await resolvePreferredAgent(existing?.defaultAgent ?? null))
+    const args = buildAutopilotInstallArgs({
+      adminScript,
+      repoPath: input.repoPath,
+      defaultAgent: selectedAgent,
+      allowedAgents: input.allowedAgents ?? existing?.allowedAgents,
+      existing
+    })
+    const res = await defaultRunner('python3', args, { timeoutMs: 45_000 })
     if (res.exitCode !== 0) {
       throw new Error(res.stderr.trim() || res.stdout.trim() || '开启自动处理失败')
     }
     void refreshStatusBarAndNotify()
-    return { ok: true, message: '已为当前项目开启自动处理循环' }
+    return {
+      ok: true,
+      message: `已为当前项目开启自动处理循环（默认 Agent: ${selectedAgent}）`
+    }
+  })
+
+  orca.panels.handle('board.updateAgentConfig', async (input) => {
+    const defaultAgent = input.defaultAgent.trim()
+    if (!defaultAgent) {
+      throw new Error('请选择一个有效的执行 Agent')
+    }
+    const existing = findAutopilotConfigForRepo(input.repoPath, null)
+    const adminScript =
+      findBundledAutopilotAdmin(pluginRoot) || (existing && existing.runtimeAdminPath)
+    if (!adminScript) {
+      throw new Error('未找到 autopilot_admin.py，请先确认已安装 github-issue-autopilot')
+    }
+    const normalizedAllowed = Array.from(
+      new Set([
+        defaultAgent,
+        ...(input.allowedAgents ?? []).map((a) => a.trim()).filter(Boolean)
+      ])
+    )
+    const args = buildAutopilotInstallArgs({
+      adminScript,
+      repoPath: input.repoPath,
+      defaultAgent,
+      allowedAgents: normalizedAllowed,
+      existing
+    })
+    const res = await defaultRunner('python3', args, { timeoutMs: 45_000 })
+    if (res.exitCode !== 0) {
+      throw new Error(res.stderr.trim() || res.stdout.trim() || '保存 Agent 配置失败')
+    }
+    void refreshStatusBarAndNotify()
+    return {
+      ok: true as const,
+      defaultAgent,
+      allowedAgents: normalizedAllowed,
+      message: `已更新工作树执行 Agent 为 ${defaultAgent}（允许标签切换：${normalizedAllowed.join(', ')}）`
+    }
   })
 
   orca.events.on('agent.status.changed', () => {

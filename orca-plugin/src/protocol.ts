@@ -88,12 +88,22 @@ export type PullRequestItem = {
   mergedAt: string | null
 }
 
+export type InstalledAgent = {
+  id: string
+  name: string
+  isDefault: boolean
+}
+
 export type BoardSnapshot = {
   projectName: string
   repository: string | null
   repoPath: string | null
   autopilotInstalled: boolean
   autopilotRunning: boolean
+  defaultAgent: string | null
+  allowedAgents: string[]
+  installedAgents: InstalledAgent[]
+  preferredAgent: string
   syncedAt: string
   error: string | null
   needsYou: NeedsYouItem[]
@@ -139,6 +149,21 @@ export type IssueActionInput = {
 
 export type EnableAutopilotInput = {
   repoPath: string
+  agent?: string
+  allowedAgents?: string[]
+}
+
+export type UpdateAgentConfigInput = {
+  repoPath: string
+  defaultAgent: string
+  allowedAgents?: string[]
+}
+
+export type UpdateAgentConfigResult = {
+  ok: true
+  defaultAgent: string
+  allowedAgents: string[]
+  message: string
 }
 
 declare module 'orca/host' {
@@ -162,6 +187,10 @@ declare module 'orca/host' {
     'board.enableAutopilot': {
       input: EnableAutopilotInput
       output: { ok: true; message: string }
+    }
+    'board.updateAgentConfig': {
+      input: UpdateAgentConfigInput
+      output: UpdateAgentConfigResult
     }
   }
 

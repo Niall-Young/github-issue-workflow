@@ -10,6 +10,7 @@ import type {
   CreateIssueInput,
   CreateIssueResult,
   InProgressItem,
+  InstalledAgent,
   IssueKind,
   NeedsYouItem,
   PullRequestCheckState,
@@ -57,6 +58,16 @@ export type AutopilotConfigInfo = {
   repoPath: string
   runtimeAdminPath: string
   defaultAgent: string | null
+  allowedAgents: string[]
+  label: string | null
+  maxConcurrentWorkers: number | null
+  maxAttempts: number | null
+  workerTimeoutSeconds: number | null
+  heartbeatTimeoutSeconds: number | null
+  publication: 'auto-merge' | 'pr-only' | 'never' | null
+  mergeMethod: 'squash' | 'merge' | 'rebase' | null
+  preMergeCommands: string[]
+  requireCi: boolean | null
 }
 
 export type HandoffSkillPaths = {
@@ -120,8 +131,18 @@ export function findAutopilotConfigForRepo(
     try {
       const raw = JSON.parse(readFileSync(configPath, 'utf8')) as {
         state_db?: string
-        orca?: { default_agent?: string }
-        repositories?: Array<{ repository?: string; repo_path?: string }>
+        max_concurrent_workers?: number
+        max_attempts?: number
+        worker_timeout_seconds?: number
+        heartbeat_timeout_seconds?: number
+        policy?: {
+          publication?: string
+          merge_method?: string
+          pre_merge_commands?: string[]
+          require_ci?: boolean
+        }
+        orca?: { default_agent?: string; allowed_agents?: string[] }
+        repositories?: Array<{ repository?: string; repo_path?: string; labels?: string[] }>
       }
       const entry = raw.repositories?.[0]
       if (!entry) continue
@@ -134,13 +155,48 @@ export function findAutopilotConfigForRepo(
       if (matchPath || matchRepo) {
         const dbRel = raw.state_db || 'state.sqlite3'
         const dbPath = resolve(dir, dbRel)
+        const defaultAgent = raw.orca?.default_agent?.trim() || null
+        const allowedAgents = Array.isArray(raw.orca?.allowed_agents)
+          ? raw.orca.allowed_agents.map((a) => String(a).trim()).filter(Boolean)
+          : defaultAgent
+            ? [defaultAgent]
+            : []
+        const publication =
+          raw.policy?.publication === 'auto-merge' ||
+          raw.policy?.publication === 'pr-only' ||
+          raw.policy?.publication === 'never'
+            ? raw.policy.publication
+            : null
+        const mergeMethod =
+          raw.policy?.merge_method === 'squash' ||
+          raw.policy?.merge_method === 'merge' ||
+          raw.policy?.merge_method === 'rebase'
+            ? raw.policy.merge_method
+            : null
         return {
           configPath,
           dbPath,
           repository: entry.repository || repository || '',
           repoPath: entryRepoPath || normalizedRepoPath || '',
           runtimeAdminPath: join(dir, 'runtime', 'autopilot_admin.py'),
-          defaultAgent: raw.orca?.default_agent?.trim() || null
+          defaultAgent,
+          allowedAgents,
+          label: entry.labels?.[0]?.trim() || null,
+          maxConcurrentWorkers:
+            typeof raw.max_concurrent_workers === 'number' ? raw.max_concurrent_workers : null,
+          maxAttempts: typeof raw.max_attempts === 'number' ? raw.max_attempts : null,
+          workerTimeoutSeconds:
+            typeof raw.worker_timeout_seconds === 'number' ? raw.worker_timeout_seconds : null,
+          heartbeatTimeoutSeconds:
+            typeof raw.heartbeat_timeout_seconds === 'number'
+              ? raw.heartbeat_timeout_seconds
+              : null,
+          publication,
+          mergeMethod,
+          preMergeCommands: Array.isArray(raw.policy?.pre_merge_commands)
+            ? raw.policy.pre_merge_commands.map((c) => String(c)).filter(Boolean)
+            : [],
+          requireCi: typeof raw.policy?.require_ci === 'boolean' ? raw.policy.require_ci : null
         }
       }
     } catch {
@@ -182,30 +238,100 @@ export function findBundledHandoffSkill(pluginDir: string): HandoffSkillPaths | 
   return null
 }
 
+export async function listInstalledAgents(
+  runner: CommandRunner = defaultRunner
+): Promise<InstalledAgent[]> {
+  const res = await runner('orca', ['agent', 'installed', '--json'], { timeoutMs: 8_000 })
+  if (res.exitCode !== 0 || !res.stdout.trim()) return []
+  try {
+    const parsed = JSON.parse(res.stdout) as {
+      result?: { agents?: Array<{ id?: string; name?: string; default?: boolean }> }
+      agents?: Array<{ id?: string; name?: string; default?: boolean }>
+    }
+    const list = parsed.result?.agents || parsed.agents || []
+    const seen = new Set<string>()
+    const out: InstalledAgent[] = []
+    for (const item of list) {
+      const id = item.id?.trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push({
+        id,
+        name: item.name?.trim() || id,
+        isDefault: Boolean(item.default)
+      })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 export async function resolvePreferredAgent(
   autopilotDefaultAgent: string | null,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner = defaultRunner,
+  installedAgents?: InstalledAgent[]
 ): Promise<string> {
   if (autopilotDefaultAgent && autopilotDefaultAgent.trim()) {
     return autopilotDefaultAgent.trim()
   }
-  const res = await runner('orca', ['agent', 'installed', '--json'], { timeoutMs: 8_000 })
-  if (res.exitCode === 0 && res.stdout.trim()) {
-    try {
-      const parsed = JSON.parse(res.stdout) as {
-        result?: { agents?: Array<{ id?: string; default?: boolean }> }
-        agents?: Array<{ id?: string; default?: boolean }>
-      }
-      const list = parsed.result?.agents || parsed.agents || []
-      const def = list.find((a) => a.default && a.id)
-      if (def?.id) return def.id
-      const first = list.find((a) => a.id)
-      if (first?.id) return first.id
-    } catch {
-      // fall through
+  const list = installedAgents ?? (await listInstalledAgents(runner))
+  const def = list.find((a) => a.isDefault)
+  if (def?.id) return def.id
+  if (list[0]?.id) return list[0].id
+  return 'codex'
+}
+
+export function buildAutopilotInstallArgs(params: {
+  adminScript: string
+  repoPath: string
+  defaultAgent: string
+  allowedAgents?: string[]
+  existing?: AutopilotConfigInfo | null
+}): string[] {
+  const defaultAgent = params.defaultAgent.trim()
+  if (!defaultAgent) {
+    throw new Error('请选择一个有效的执行 Agent')
+  }
+  const existing = params.existing ?? null
+  const args = [params.adminScript, 'install', '--repo-path', params.repoPath, '--agent', defaultAgent]
+
+  const extraAllowed = Array.from(
+    new Set((params.allowedAgents ?? []).map((a) => a.trim()).filter((a) => a && a !== defaultAgent))
+  )
+  for (const agentId of extraAllowed) {
+    args.push('--allow-agent', agentId)
+  }
+
+  if (existing) {
+    if (existing.label) args.push('--label', existing.label)
+    if (existing.maxConcurrentWorkers !== null) {
+      args.push('--max-concurrent', String(existing.maxConcurrentWorkers))
+    }
+    if (existing.maxAttempts !== null) {
+      args.push('--max-attempts', String(existing.maxAttempts))
+    }
+    if (existing.workerTimeoutSeconds !== null) {
+      args.push('--worker-timeout', String(existing.workerTimeoutSeconds))
+    }
+    if (existing.heartbeatTimeoutSeconds !== null) {
+      args.push('--heartbeat-timeout', String(existing.heartbeatTimeoutSeconds))
+    }
+    if (existing.publication) {
+      args.push('--publication', existing.publication)
+    }
+    if (existing.mergeMethod) {
+      args.push('--merge-method', existing.mergeMethod)
+    }
+    for (const cmd of existing.preMergeCommands) {
+      args.push('--pre-merge-command', cmd)
+    }
+    if (existing.requireCi === false) {
+      args.push('--no-require-ci')
     }
   }
-  return 'codex'
+
+  return args
 }
 
 export function buildHandoffPrompt(params: {

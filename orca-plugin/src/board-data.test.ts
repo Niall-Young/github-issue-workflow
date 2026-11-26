@@ -3,11 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assert, test } from 'orca/testing'
 import {
+  buildAutopilotInstallArgs,
   buildHandoffPrompt,
   buildIssueBody,
   extractTerminalQuestion,
   fetchGithubPullRequests,
+  findAutopilotConfigForRepo,
   findBundledHandoffSkill,
+  listInstalledAgents,
   mergeBoardItems,
   normalizePullRequests,
   parseGithubRepoFromRemote,
@@ -314,4 +317,115 @@ test('summarizePrChecks and normalizePullRequests classify CI and sort OPEN PRs 
   assert.equal(fetched.length, 1)
   assert.equal(fetched[0].number, 15)
   assert.equal(fetched[0].ciStatus, 'none')
+})
+
+test('listInstalledAgents parses Orca CLI JSON and deduplicates ids', async () => {
+  const agents = await listInstalledAgents(async () => ({
+    stdout: JSON.stringify({
+      ok: true,
+      result: {
+        agents: [
+          { id: 'claude', name: 'Claude', default: false },
+          { id: 'antigravity', name: 'Antigravity', default: true },
+          { id: 'claude', name: 'Claude Duplicate', default: false }
+        ]
+      }
+    }),
+    stderr: '',
+    exitCode: 0
+  }))
+  assert.equal(agents.length, 2)
+  assert.equal(agents[0].id, 'claude')
+  assert.equal(agents[0].isDefault, false)
+  assert.equal(agents[1].id, 'antigravity')
+  assert.equal(agents[1].isDefault, true)
+
+  const empty = await listInstalledAgents(async () => ({
+    stdout: '',
+    stderr: 'failed',
+    exitCode: 1
+  }))
+  assert.equal(empty.length, 0)
+})
+
+test('findAutopilotConfigForRepo reads agent and policy settings and buildAutopilotInstallArgs preserves them', () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'autopilot-config-test-'))
+  try {
+    const repoDir = join(stateRoot, 'repo-a')
+    mkdirSync(repoDir, { recursive: true })
+    writeFileSync(
+      join(repoDir, 'autopilot.json'),
+      JSON.stringify({
+        schema_version: 3,
+        state_db: 'state.sqlite3',
+        max_concurrent_workers: 2,
+        max_attempts: 3,
+        worker_timeout_seconds: 1800,
+        heartbeat_timeout_seconds: 600,
+        policy: {
+          publication: 'pr-only',
+          merge_method: 'rebase',
+          pre_merge_commands: ['npm test'],
+          require_ci: false
+        },
+        orca: {
+          default_agent: 'codex',
+          allowed_agents: ['codex', 'claude']
+        },
+        repositories: [
+          {
+            repository: 'owner/demo',
+            repo_path: '/Users/demo/project',
+            labels: ['custom-ready']
+          }
+        ]
+      }),
+      'utf8'
+    )
+
+    const found = findAutopilotConfigForRepo('/Users/demo/project', 'owner/demo', stateRoot)
+    assert.equal(found?.defaultAgent, 'codex')
+    assert.deepEqual(found?.allowedAgents, ['codex', 'claude'])
+    assert.equal(found?.publication, 'pr-only')
+    assert.equal(found?.requireCi, false)
+
+    const args = buildAutopilotInstallArgs({
+      adminScript: '/scripts/autopilot_admin.py',
+      repoPath: '/Users/demo/project',
+      defaultAgent: 'antigravity',
+      allowedAgents: ['antigravity', 'claude', 'codex'],
+      existing: found
+    })
+    assert.deepEqual(args, [
+      '/scripts/autopilot_admin.py',
+      'install',
+      '--repo-path',
+      '/Users/demo/project',
+      '--agent',
+      'antigravity',
+      '--allow-agent',
+      'claude',
+      '--allow-agent',
+      'codex',
+      '--label',
+      'custom-ready',
+      '--max-concurrent',
+      '2',
+      '--max-attempts',
+      '3',
+      '--worker-timeout',
+      '1800',
+      '--heartbeat-timeout',
+      '600',
+      '--publication',
+      'pr-only',
+      '--merge-method',
+      'rebase',
+      '--pre-merge-command',
+      'npm test',
+      '--no-require-ci'
+    ])
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
 })

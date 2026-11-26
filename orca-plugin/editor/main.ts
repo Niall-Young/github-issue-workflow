@@ -30,6 +30,10 @@ type UIState = {
   loading: boolean
   submitting: boolean
   enablingAutopilot: boolean
+  showSettings: boolean
+  savingAgentConfig: boolean
+  draftDefaultAgent: string
+  draftAllowedAgents: string[]
   busyItemIds: Set<string>
   activeTab: 'issues' | 'prs'
   kind: IssueKind
@@ -50,6 +54,10 @@ const state: UIState = {
   loading: true,
   submitting: false,
   enablingAutopilot: false,
+  showSettings: false,
+  savingAgentConfig: false,
+  draftDefaultAgent: '',
+  draftAllowedAgents: [],
   busyItemIds: new Set(),
   activeTab: 'issues',
   kind: 'feature',
@@ -183,6 +191,14 @@ function extractFilesFromPaste(e: ClipboardEvent): File[] {
   return files
 }
 
+function syncAgentDraftFromSnapshot(snap: BoardSnapshot | null) {
+  if (!snap) return
+  const def = snap.defaultAgent || snap.preferredAgent || 'codex'
+  state.draftDefaultAgent = def
+  const allowed = snap.allowedAgents.length > 0 ? snap.allowedAgents : [def]
+  state.draftAllowedAgents = Array.from(new Set([def, ...allowed]))
+}
+
 async function fetchSnapshot(silent = false) {
   if (!silent) {
     state.loading = true
@@ -196,6 +212,9 @@ async function fetchSnapshot(silent = false) {
 
     const snap = await orca.plugin.request('board.snapshot', reqInput)
     state.snapshot = snap
+    if (!state.showSettings || !state.draftDefaultAgent) {
+      syncAgentDraftFromSnapshot(snap)
+    }
   } catch (err) {
     showToast('error', `刷新失败：${err instanceof Error ? err.message : String(err)}`)
   } finally {
@@ -340,19 +359,54 @@ async function handleIssueAction(
   }
 }
 
-async function handleEnableAutopilot() {
+async function handleEnableAutopilot(overrideAgent?: string, overrideAllowed?: string[]) {
   const repoPath = state.snapshot?.repoPath
   if (!repoPath) return
   state.enablingAutopilot = true
   render()
   try {
-    const res = await orca.plugin.request('board.enableAutopilot', { repoPath })
+    const agent = overrideAgent || state.draftDefaultAgent || state.snapshot?.preferredAgent
+    const allowedAgents = overrideAllowed ?? state.draftAllowedAgents
+    const res = await orca.plugin.request('board.enableAutopilot', {
+      repoPath,
+      ...(agent ? { agent } : {}),
+      ...(allowedAgents.length > 0 ? { allowedAgents } : {})
+    })
+    state.showSettings = false
     showToast('success', res.message)
     await fetchSnapshot(true)
   } catch (err) {
     showToast('error', err instanceof Error ? err.message : String(err))
   } finally {
     state.enablingAutopilot = false
+    render()
+  }
+}
+
+async function handleSaveAgentConfig() {
+  const repoPath = state.snapshot?.repoPath
+  if (!repoPath) return
+  const defaultAgent = state.draftDefaultAgent.trim()
+  if (!defaultAgent) {
+    showToast('error', '请先选择默认执行 Agent')
+    return
+  }
+  state.savingAgentConfig = true
+  render()
+  try {
+    const allowedAgents = Array.from(new Set([defaultAgent, ...state.draftAllowedAgents]))
+    const res = await orca.plugin.request('board.updateAgentConfig', {
+      repoPath,
+      defaultAgent,
+      allowedAgents
+    })
+    state.showSettings = false
+    showToast('success', res.message)
+    await fetchSnapshot(true)
+  } catch (err) {
+    showToast('error', err instanceof Error ? err.message : String(err))
+  } finally {
+    state.savingAgentConfig = false
     render()
   }
 }
@@ -409,6 +463,25 @@ function renderTopBar(snap: BoardSnapshot | null): HTMLElement {
 
   const right = el('div', 'tui-topbar-right')
   if (snap && !snap.error) {
+    if (snap.repoPath) {
+      const currentAgent = snap.defaultAgent || snap.preferredAgent || 'codex'
+      const cfgBtn = el(
+        'button',
+        `tui-btn${state.showSettings ? ' tui-btn-primary' : ''}`,
+        `⚙ Agent: ${currentAgent}`
+      )
+      cfgBtn.type = 'button'
+      cfgBtn.title = '配置工作树默认执行 Agent 及允许通过 agent:<id> 标签切换的 Agent（快捷键 ,）'
+      cfgBtn.addEventListener('click', () => {
+        state.showSettings = !state.showSettings
+        if (state.showSettings) {
+          syncAgentDraftFromSnapshot(snap)
+        }
+        render()
+      })
+      right.append(cfgBtn)
+    }
+
     if (snap.autopilotInstalled) {
       right.append(el('span', 'tui-state-tag ok', '● 自动处理中'))
     } else if (snap.repoPath) {
@@ -430,6 +503,137 @@ function renderTopBar(snap: BoardSnapshot | null): HTMLElement {
 
   bar.append(left, right)
   return bar
+}
+
+function renderSettingsDrawer(snap: BoardSnapshot): HTMLElement {
+  const drawer = el('section', 'tui-settings')
+
+  const head = el('div', 'tui-settings-head')
+  head.append(
+    el('span', undefined, '⚙ 工作树执行 Agent 配置'),
+    el(
+      'span',
+      'tui-repo',
+      snap.autopilotInstalled ? '保存后将同步更新 Orca Automation 并重启协调器' : '尚未开启自动处理，保存时将以此配置开启'
+    )
+  )
+  drawer.append(head)
+
+  const installed = snap.installedAgents
+  const currentDraft = state.draftDefaultAgent || snap.defaultAgent || snap.preferredAgent || 'codex'
+  const candidateIds = Array.from(
+    new Set([
+      ...installed.map((a) => a.id),
+      currentDraft,
+      ...state.draftAllowedAgents
+    ].filter(Boolean))
+  )
+  const labelFor = (id: string): string => {
+    const found = installed.find((a) => a.id === id)
+    if (!found) return id
+    const base = found.name && found.name !== found.id ? `${found.name} (${found.id})` : found.id
+    return found.isDefault ? `${base} · Orca 默认` : base
+  }
+
+  // Default agent selector
+  const rowDefault = el('div', 'tui-settings-row')
+  rowDefault.append(el('label', 'tui-settings-label', '默认执行 Agent：'))
+  const select = el('select', 'tui-select')
+  select.disabled = state.savingAgentConfig || state.enablingAutopilot
+  for (const id of candidateIds) {
+    const opt = el('option')
+    opt.value = id
+    opt.textContent = labelFor(id)
+    opt.selected = id === currentDraft
+    select.append(opt)
+  }
+  select.addEventListener('change', () => {
+    state.draftDefaultAgent = select.value
+    if (!state.draftAllowedAgents.includes(select.value)) {
+      state.draftAllowedAgents = Array.from(new Set([select.value, ...state.draftAllowedAgents]))
+    }
+    render()
+  })
+  rowDefault.append(select)
+  drawer.append(rowDefault)
+
+  // Allowed agents for per-issue label overrides
+  const rowAllowed = el('div', 'tui-settings-row')
+  rowAllowed.append(el('span', 'tui-settings-label', '允许标签切换 (agent:*)：'))
+  const chipGroup = el('div', 'tui-group')
+  for (const id of candidateIds) {
+    const isDefault = id === currentDraft
+    const isAllowed = isDefault || state.draftAllowedAgents.includes(id)
+    const chip = el(
+      'button',
+      `tui-agent-chip${isAllowed ? ' active' : ''}`,
+      isDefault ? `[✓ ${id} · 默认]` : isAllowed ? `[✓ ${id}]` : `[  ${id}]`
+    )
+    chip.type = 'button'
+    chip.disabled = isDefault || state.savingAgentConfig || state.enablingAutopilot
+    chip.addEventListener('click', () => {
+      if (isDefault) return
+      if (state.draftAllowedAgents.includes(id)) {
+        state.draftAllowedAgents = state.draftAllowedAgents.filter((x) => x !== id)
+      } else {
+        state.draftAllowedAgents = [...state.draftAllowedAgents, id]
+      }
+      render()
+    })
+    chipGroup.append(chip)
+  }
+  rowAllowed.append(chipGroup)
+  drawer.append(rowAllowed)
+
+  // Footer actions
+  const foot = el('div', 'tui-settings-foot')
+  foot.append(
+    el(
+      'span',
+      'tui-drop-hint',
+      '单条 Issue 可通过 GitHub 标签 agent:<id> 临时覆盖默认 Agent；修改对后续新派发的工作树生效'
+    )
+  )
+  const actions = el('div', 'tui-group')
+  const busy = state.savingAgentConfig || state.enablingAutopilot
+
+  if (snap.autopilotInstalled) {
+    const saveBtn = el(
+      'button',
+      'tui-btn tui-btn-primary',
+      state.savingAgentConfig ? '保存并应用中...' : '保存并应用'
+    )
+    saveBtn.type = 'button'
+    saveBtn.disabled = busy
+    saveBtn.addEventListener('click', () => void handleSaveAgentConfig())
+    actions.append(saveBtn)
+  } else {
+    const enableBtn = el(
+      'button',
+      'tui-btn tui-btn-primary',
+      state.enablingAutopilot ? '开启中...' : '使用该 Agent 开启自动处理'
+    )
+    enableBtn.type = 'button'
+    enableBtn.disabled = busy
+    enableBtn.addEventListener(
+      'click',
+      () => void handleEnableAutopilot(currentDraft, state.draftAllowedAgents)
+    )
+    actions.append(enableBtn)
+  }
+
+  const closeBtn = el('button', 'tui-btn', '关闭')
+  closeBtn.type = 'button'
+  closeBtn.disabled = busy
+  closeBtn.addEventListener('click', () => {
+    state.showSettings = false
+    render()
+  })
+  actions.append(closeBtn)
+
+  foot.append(actions)
+  drawer.append(foot)
+  return drawer
 }
 
 function renderComposer(): HTMLElement {
@@ -1012,6 +1216,7 @@ function renderFooter(): HTMLElement {
   const hints: Array<[string, string]> = [
     ['n', '提需求'],
     ['i/p', '切Issues/PR'],
+    [',', '配置Agent'],
     ['r', '刷新'],
     ['1/2/3', '切换类型'],
     ['⌘V', '贴截图'],
@@ -1034,6 +1239,10 @@ function render() {
   root.replaceChildren()
   root.append(renderTopBar(state.snapshot))
 
+  if (state.showSettings && state.snapshot && !state.snapshot.error && state.snapshot.repoPath) {
+    root.append(renderSettingsDrawer(state.snapshot))
+  }
+
   if (state.toast) {
     root.append(el('div', `tui-banner ${state.toast.kind}`, state.toast.text))
   } else if (state.snapshot?.error) {
@@ -1054,10 +1263,26 @@ function render() {
 document.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement | null
   const inInput =
-    target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
+    target?.tagName === 'INPUT' ||
+    target?.tagName === 'TEXTAREA' ||
+    target?.tagName === 'SELECT' ||
+    target?.isContentEditable
   if (inInput || e.metaKey || e.ctrlKey || e.altKey) return
 
-  if (e.key === 'n') {
+  if (e.key === 'Escape' && state.showSettings) {
+    e.preventDefault()
+    state.showSettings = false
+    render()
+  } else if (e.key === ',') {
+    if (state.snapshot && !state.snapshot.error && state.snapshot.repoPath) {
+      e.preventDefault()
+      state.showSettings = !state.showSettings
+      if (state.showSettings) {
+        syncAgentDraftFromSnapshot(state.snapshot)
+      }
+      render()
+    }
+  } else if (e.key === 'n') {
     e.preventDefault()
     if (state.activeTab !== 'issues') {
       state.activeTab = 'issues'

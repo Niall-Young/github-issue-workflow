@@ -180,6 +180,88 @@ html, body {
   color: var(--tui-red);
 }
 
+/* Inline Agent Settings Drawer */
+.tui-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--tui-accent);
+  background: var(--tui-surface);
+  flex-shrink: 0;
+}
+
+.tui-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 5px;
+  border-bottom: 1px dashed var(--tui-border);
+  font-weight: 600;
+}
+
+.tui-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.tui-settings-label {
+  color: var(--tui-muted);
+  font-size: 11.5px;
+  min-width: 150px;
+  flex-shrink: 0;
+}
+
+.tui-select {
+  font-family: var(--tui-mono);
+  font-size: 12px;
+  color: var(--tui-fg);
+  background: var(--tui-bg);
+  border: 1px solid var(--tui-border);
+  padding: 3px 8px;
+  outline: none;
+  min-width: 180px;
+}
+
+.tui-select:focus {
+  border-color: var(--tui-accent);
+}
+
+.tui-agent-chip {
+  appearance: none;
+  font-family: var(--tui-mono);
+  font-size: 11.5px;
+  color: var(--tui-muted);
+  background: var(--tui-bg);
+  border: 1px solid var(--tui-border);
+  padding: 2px 7px;
+  cursor: pointer;
+}
+
+.tui-agent-chip.active {
+  color: var(--tui-accent);
+  border-color: var(--tui-accent);
+  background: color-mix(in srgb, var(--tui-accent) 12%, var(--tui-bg));
+}
+
+.tui-agent-chip:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.tui-settings-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 5px;
+  border-top: 1px dashed var(--tui-border);
+}
+
 /* Two-Column TUI Split */
 .tui-grid {
   display: grid;

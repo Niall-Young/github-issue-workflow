@@ -1822,6 +1822,154 @@ class IssueWatcherTests(unittest.TestCase):
         self.assertEqual(1, len(completed))
         self.assertEqual("ready-for-review", completed[0]["status"], completed)
 
+    def _setup_remote_with_ahead_commit(self) -> tuple[Path, str]:
+        """Configure a bare origin remote and push one new commit to origin/main."""
+        bare = self.root / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], check=True, stdout=subprocess.PIPE)
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "push", "-u", "origin", "main"], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "-C", str(self.repo), "symbolic-ref", "refs/remotes/origin/HEAD",
+                        "refs/remotes/origin/main"], check=True)
+        clone = self.root / "remote-clone"
+        subprocess.run(["git", "clone", "-b", "main", str(bare), str(clone)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["git", "-C", str(clone), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(clone), "config", "user.name", "Test User"], check=True)
+        (clone / "remote-merged.txt").write_text("from remote PR\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(clone), "add", "remote-merged.txt"], check=True)
+        subprocess.run(["git", "-C", str(clone), "commit", "-m", "remote pr merge"], check=True,
+                       stdout=subprocess.PIPE)
+        subprocess.run(["git", "-C", str(clone), "push", "origin", "main"], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        remote_head = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        return bare, remote_head
+
+    def test_sync_local_base_branch_fast_forwards_clean_checked_out_main(self) -> None:
+        _, remote_head = self._setup_remote_with_ahead_commit()
+        result = WATCHER.sync_local_base_branch(self.repo, "main", fetch=True)
+        self.assertEqual("synced", result["status"])
+        self.assertEqual("ff-merge", result["mode"])
+        self.assertEqual(1, result["behind"])
+        local_head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual(remote_head, local_head)
+        self.assertEqual("from remote PR\n", (self.repo / "remote-merged.txt").read_text(encoding="utf-8"))
+
+    def test_sync_local_base_branch_skips_dirty_and_catches_up_on_reconcile(self) -> None:
+        _, remote_head = self._setup_remote_with_ahead_commit()
+        dirty_file = self.repo / "wip.txt"
+        dirty_file.write_text("local edit\n", encoding="utf-8")
+        skipped = WATCHER.sync_local_base_branch(self.repo, "main", fetch=True)
+        self.assertEqual("dirty-skipped", skipped["status"])
+        self.assertEqual("local edit\n", dirty_file.read_text(encoding="utf-8"))
+
+        # Once the user cleans up their working tree, the next reconcile catches up offline.
+        dirty_file.unlink()
+        config = self.config()
+        config["policy"]["sync_local_branch"] = True
+        ledger = self.ledger()
+        WATCHER.reconcile_pull_requests(config, ledger)
+        local_head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual(remote_head, local_head)
+
+    def test_sync_local_base_branch_updates_ref_without_touching_other_checked_out_branch(self) -> None:
+        _, remote_head = self._setup_remote_with_ahead_commit()
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-b", "feat/user-work"], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (self.repo / "wip.txt").write_text("in progress\n", encoding="utf-8")
+
+        result = WATCHER.sync_local_base_branch(self.repo, "main", fetch=True)
+        self.assertEqual("synced", result["status"])
+        self.assertEqual("ref-ff", result["mode"])
+        main_head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "refs/heads/main"], check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual(remote_head, main_head)
+        current_branch = subprocess.run(
+            ["git", "-C", str(self.repo), "branch", "--show-current"], check=True, text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual("feat/user-work", current_branch)
+        self.assertEqual("in progress\n", (self.repo / "wip.txt").read_text(encoding="utf-8"))
+
+    def test_sync_local_base_branch_refuses_diverged_local_commits(self) -> None:
+        _, remote_head = self._setup_remote_with_ahead_commit()
+        (self.repo / "local-only.txt").write_text("mine\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "local-only.txt"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-m", "local diverged"], check=True,
+                       stdout=subprocess.PIPE)
+        local_before = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        result = WATCHER.sync_local_base_branch(self.repo, "main", fetch=True)
+        self.assertEqual("diverged", result["status"])
+        self.assertEqual(1, result["ahead"])
+        self.assertEqual(1, result["behind"])
+        local_after = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual(local_before, local_after)
+        self.assertNotEqual(remote_head, local_after)
+
+    def test_reconcile_pull_requests_syncs_local_main_after_merge_and_respects_disable_flag(self) -> None:
+        _, remote_head = self._setup_remote_with_ahead_commit()
+        config = self.config()
+        config["policy"]["publication"] = "auto-merge"
+        config["policy"]["sync_local_branch"] = True
+        ledger = self.ledger()
+        ledger.enqueue(self.issue("I_SYNC", 7))
+        claimed = ledger.claim_next()
+        ledger.finish(
+            claimed["node_id"], claimed["attempt_number"], "pr-open",
+            pr_number=70, pr_url="https://github.com/owner/repo/pull/70", summary="PR opened",
+        )
+        with mock.patch.object(WATCHER, "github_pr_view", return_value={
+            "number": 70, "url": "https://github.com/owner/repo/pull/70",
+            "state": "MERGED", "baseRefName": "main", "headRefName": "repair/issue-7",
+        }), mock.patch.object(WATCHER, "close_github_issue"), mock.patch.object(WATCHER, "cleanup_attempt"):
+            updated = WATCHER.reconcile_pull_requests(config, ledger)
+        self.assertEqual(1, len(updated))
+        self.assertEqual("merged", updated[0]["status"])
+        self.assertEqual("synced", updated[0]["local_sync"]["status"])
+        local_head = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual(remote_head, local_head)
+
+        # When sync_local_branch is False, PR merge fetches origin without fast-forwarding local main.
+        clone = self.root / "remote-clone"
+        (clone / "remote-second.txt").write_text("second merge\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(clone), "add", "remote-second.txt"], check=True)
+        subprocess.run(["git", "-C", str(clone), "commit", "-m", "second remote merge"], check=True,
+                       stdout=subprocess.PIPE)
+        subprocess.run(["git", "-C", str(clone), "push", "origin", "main"], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        config["policy"]["sync_local_branch"] = False
+        ledger.enqueue(self.issue("I_SYNC2", 8))
+        claimed2 = ledger.claim_next()
+        ledger.finish(
+            claimed2["node_id"], claimed2["attempt_number"], "pr-open",
+            pr_number=71, pr_url="https://github.com/owner/repo/pull/71", summary="PR opened",
+        )
+        with mock.patch.object(WATCHER, "github_pr_view", return_value={
+            "number": 71, "url": "https://github.com/owner/repo/pull/71",
+            "state": "MERGED", "baseRefName": "main", "headRefName": "repair/issue-8",
+        }), mock.patch.object(WATCHER, "close_github_issue"), mock.patch.object(WATCHER, "cleanup_attempt"):
+            updated2 = WATCHER.reconcile_pull_requests(config, ledger)
+        self.assertEqual({"status": "disabled"}, updated2[0]["local_sync"])
+        local_head_after = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        self.assertEqual(remote_head, local_head_after)
+
 
 if __name__ == "__main__":
     unittest.main()

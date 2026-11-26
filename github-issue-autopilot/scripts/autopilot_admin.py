@@ -230,7 +230,8 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
                  publication: str = "auto-merge",
                  merge_method: str = "squash",
                  pre_merge_commands: list[str] | None = None,
-                 require_ci: bool = True) -> dict[str, Any]:
+                 require_ci: bool = True,
+                 sync_local_branch: bool = True) -> dict[str, Any]:
     return {
         "schema_version": 3,
         "state_db": str(paths["database"]),
@@ -246,6 +247,7 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
             "merge_method": merge_method,
             "pre_merge_commands": list(pre_merge_commands or []),
             "require_ci": bool(require_ci),
+            "sync_local_branch": bool(sync_local_branch),
             "max_risk": "medium",
         },
         "repositories": [{

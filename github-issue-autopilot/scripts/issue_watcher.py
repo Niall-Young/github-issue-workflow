@@ -169,6 +169,7 @@ def load_config(path: Path) -> dict[str, Any]:
         raise WatcherError("policy.pre_merge_commands must be an array of non-empty command strings")
     policy["pre_merge_commands"] = pre_merge_commands
     policy["require_ci"] = bool(policy.get("require_ci", True))
+    policy["sync_local_branch"] = bool(policy.get("sync_local_branch", True))
     max_conflict_resolutions = int(policy.get("max_conflict_resolutions", 2))
     if max_conflict_resolutions < 0:
         raise WatcherError("policy.max_conflict_resolutions must be non-negative")
@@ -2148,6 +2149,118 @@ def merge_github_pr(pr_url: str, method: str) -> None:
         raise WatcherError(f"PR remained in state {confirmed.get('state')} after merge")
 
 
+def _git_operation_in_progress(repo: Path) -> bool:
+    for marker in ("MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"):
+        resolved = command(["git", "-C", str(repo), "rev-parse", "--git-path", marker])
+        if resolved.returncode != 0:
+            continue
+        raw = resolved.stdout.strip()
+        if not raw:
+            continue
+        marker_path = Path(raw)
+        if not marker_path.is_absolute():
+            marker_path = (repo / marker_path).resolve()
+        if marker_path.exists():
+            return True
+    return False
+
+
+def _resolve_local_base_branch(repo: Path, base_branch: str | None = None) -> str | None:
+    if isinstance(base_branch, str) and base_branch.strip():
+        return base_branch.strip().removeprefix("refs/heads/")
+    remote_head = command(["git", "-C", str(repo), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if remote_head.returncode == 0:
+        ref = remote_head.stdout.strip()
+        if ref.startswith("origin/") and len(ref) > len("origin/"):
+            return ref.removeprefix("origin/")
+    current = command(["git", "-C", str(repo), "branch", "--show-current"])
+    if current.returncode == 0:
+        branch = current.stdout.strip()
+        if branch:
+            return branch
+    return None
+
+
+def sync_local_base_branch(
+    repo: Path,
+    base_branch: str | None = None,
+    *,
+    fetch: bool = True,
+) -> dict[str, Any]:
+    """Deterministically fast-forward local base_branch to origin/<base_branch>.
+
+    Never uses AI, never force-resets, never overwrites uncommitted changes, and
+    never clobbers diverged local commits.
+    """
+    if not repo.is_dir():
+        return {"status": "skipped", "reason": "repository path not found"}
+    if fetch:
+        fetched = command(["git", "-C", str(repo), "fetch", "origin"])
+        if fetched.returncode != 0:
+            return {
+                "status": "fetch-failed",
+                "reason": fetched.stderr.strip() or fetched.stdout.strip() or "git fetch origin failed",
+            }
+    branch = _resolve_local_base_branch(repo, base_branch)
+    if not branch:
+        return {"status": "skipped", "reason": "unknown base branch"}
+    remote_ref = f"refs/remotes/origin/{branch}"
+    local_ref = f"refs/heads/{branch}"
+    if command(["git", "-C", str(repo), "rev-parse", "--verify", remote_ref]).returncode != 0:
+        return {"status": "skipped", "branch": branch, "reason": f"origin/{branch} not found"}
+    if command(["git", "-C", str(repo), "rev-parse", "--verify", local_ref]).returncode != 0:
+        return {"status": "skipped", "branch": branch, "reason": f"local branch {branch} not found"}
+    counts = command(["git", "-C", str(repo), "rev-list", "--left-right", "--count", f"{local_ref}...{remote_ref}"])
+    if counts.returncode != 0:
+        return {"status": "skipped", "branch": branch, "reason": "failed to compare local and remote refs"}
+    parts = counts.stdout.strip().split()
+    if len(parts) != 2:
+        return {"status": "skipped", "branch": branch, "reason": "unexpected rev-list output"}
+    try:
+        ahead, behind = int(parts[0]), int(parts[1])
+    except ValueError:
+        return {"status": "skipped", "branch": branch, "reason": "non-integer rev-list counts"}
+    if behind == 0:
+        return {"status": "up-to-date", "branch": branch, "ahead": ahead, "behind": 0}
+    if ahead > 0:
+        return {
+            "status": "diverged",
+            "branch": branch,
+            "ahead": ahead,
+            "behind": behind,
+            "reason": f"local {branch} has {ahead} unpushed commit(s) and is {behind} behind origin/{branch}",
+        }
+    current_result = command(["git", "-C", str(repo), "branch", "--show-current"])
+    current_branch = current_result.stdout.strip() if current_result.returncode == 0 else ""
+    if current_branch == branch:
+        dirty = command(["git", "-C", str(repo), "status", "--porcelain"])
+        if dirty.returncode != 0 or dirty.stdout.strip() or _git_operation_in_progress(repo):
+            return {
+                "status": "dirty-skipped",
+                "branch": branch,
+                "behind": behind,
+                "reason": "working tree has uncommitted changes or an in-progress git operation",
+            }
+        merged = command(["git", "-C", str(repo), "merge", "--ff-only", remote_ref])
+        if merged.returncode == 0:
+            return {"status": "synced", "branch": branch, "behind": behind, "mode": "ff-merge"}
+        return {
+            "status": "failed",
+            "branch": branch,
+            "behind": behind,
+            "reason": merged.stderr.strip() or merged.stdout.strip() or "git merge --ff-only failed",
+        }
+    updated_ref = command(["git", "-C", str(repo), "branch", "-f", branch, remote_ref])
+    if updated_ref.returncode == 0:
+        return {"status": "synced", "branch": branch, "behind": behind, "mode": "ref-ff"}
+    return {
+        "status": "skipped",
+        "branch": branch,
+        "behind": behind,
+        "reason": updated_ref.stderr.strip() or updated_ref.stdout.strip() or f"cannot update {branch}",
+    }
+
+
 def reconcile_pull_requests(
     config: dict[str, Any],
     ledger: Ledger,
@@ -2157,10 +2270,12 @@ def reconcile_pull_requests(
     publication = policy.get("publication", "auto-merge")
     merge_method = policy.get("merge_method", "squash")
     require_ci = bool(policy.get("require_ci", True))
+    sync_local_branch = bool(policy.get("sync_local_branch", True))
     pre_merge_commands = list(policy.get("pre_merge_commands", []))
     orca_cli = config.get("orca", {}).get("cli")
     current = at or now()
     updated: list[dict[str, Any]] = []
+    synced_repos: set[Path] = set()
     for attempt in ledger.open_pr_attempts():
         pr_url = attempt.get("pr_url")
         if not pr_url:
@@ -2187,8 +2302,16 @@ def reconcile_pull_requests(
                 cleanup_attempt(repository["repo_path"], attempt, force=True, orca_cli=orca_cli)
             except WatcherError:
                 pass
-            command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
-            updated.append({"url": attempt["url"], "status": "merged", "pr_url": pr_url})
+            base_branch = str(pr.get("baseRefName") or "").strip() or None
+            if sync_local_branch:
+                local_sync = sync_local_base_branch(repository["repo_path"], base_branch, fetch=True)
+                synced_repos.add(Path(repository["repo_path"]))
+            else:
+                command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
+                local_sync = {"status": "disabled"}
+            updated.append({
+                "url": attempt["url"], "status": "merged", "pr_url": pr_url, "local_sync": local_sync,
+            })
             continue
         if pr_state == "CLOSED":
             summary = f"PR was closed without merging: {pr_url}"
@@ -2322,8 +2445,22 @@ def reconcile_pull_requests(
             cleanup_attempt(repository["repo_path"], attempt, force=True, orca_cli=orca_cli)
         except WatcherError:
             pass
-        command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
-        updated.append({"url": attempt["url"], "status": "merged", "pr_url": pr_url})
+        base_branch = str(pr.get("baseRefName") or "").strip() or None
+        if sync_local_branch:
+            local_sync = sync_local_base_branch(repository["repo_path"], base_branch, fetch=True)
+            synced_repos.add(Path(repository["repo_path"]))
+        else:
+            command(["git", "-C", str(repository["repo_path"]), "fetch", "origin"])
+            local_sync = {"status": "disabled"}
+        updated.append({
+            "url": attempt["url"], "status": "merged", "pr_url": pr_url, "local_sync": local_sync,
+        })
+    if sync_local_branch:
+        for repository in config.get("repositories", []):
+            repo_path = Path(repository["repo_path"])
+            if repo_path not in synced_repos:
+                sync_local_base_branch(repo_path, None, fetch=False)
+                synced_repos.add(repo_path)
     return updated
 
 

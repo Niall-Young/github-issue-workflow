@@ -61,6 +61,8 @@ export class IssueBoardTui {
   private lastBuffer: ScreenBuffer | null = null
   private lastRenderedLines: string[] | null = null
   private lastCursor: CursorPosition | null = null
+  private lastWidth = 0
+  private lastHeight = 0
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private errorTimer: ReturnType<typeof setTimeout> | null = null
   private cleanedUp = false
@@ -105,12 +107,12 @@ export class IssueBoardTui {
     process.stdin.resume()
     process.stdin.setEncoding('utf8')
 
-    process.stdout.write(
+    this.writeOutput(
       ANSI.altScreenOn +
+        ANSI.autoWrapOff +
         ANSI.cursorHide +
         ANSI.mouseOn +
-        ANSI.bracketedPasteOn +
-        ANSI.clearScreen
+        ANSI.bracketedPasteOn
     )
 
     process.stdin.on('data', this.onStdinData)
@@ -155,8 +157,13 @@ export class IssueBoardTui {
     } catch {
       // ignore
     }
-    process.stdout.write(
-      ANSI.bracketedPasteOff + ANSI.mouseOff + ANSI.cursorShow + ANSI.altScreenOff + ANSI.reset
+    this.writeOutput(
+      ANSI.bracketedPasteOff +
+        ANSI.mouseOff +
+        ANSI.autoWrapOn +
+        ANSI.cursorShow +
+        ANSI.altScreenOff +
+        ANSI.reset
     )
     process.exit(code)
   }
@@ -194,18 +201,23 @@ export class IssueBoardTui {
   private render(forceClear = false) {
     const width = process.stdout.columns || 100
     const height = process.stdout.rows || 30
+    const sizeChanged = this.lastWidth !== width || this.lastHeight !== height
+    const shouldClear = forceClear || sizeChanged
+    this.lastWidth = width
+    this.lastHeight = height
+
     const buf = renderTui(this.state, width, height)
     this.lastBuffer = buf
-    if (forceClear) {
+    if (shouldClear) {
       this.lastRenderedLines = null
       this.lastCursor = null
-      this.writeOutput(ANSI.cursorHide + ANSI.clearScreen)
     }
     const { output, lines, cursor } = buf.diffOutput(this.lastRenderedLines, this.lastCursor)
     this.lastRenderedLines = lines
     this.lastCursor = cursor
-    if (output) {
-      this.writeOutput(output)
+    const frame = (shouldClear ? ANSI.cursorHide + ANSI.clearScreen : '') + output
+    if (frame) {
+      this.writeOutput(ANSI.syncStart + frame + ANSI.syncEnd)
     }
   }
 

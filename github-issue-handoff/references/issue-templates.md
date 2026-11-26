@@ -4,6 +4,8 @@ Choose exactly one template based on the primary deliverable. Preserve the headi
 
 Every acceptance criterion must describe an observable result. Use `待确认` only for a non-blocking unknown and explain how the implementing agent can resolve it. If an unknown changes the goal, scope, or acceptance criteria, ask the user before publishing.
 
+When the Issue depends on another Issue in the same repository finishing first, declare it explicitly on its own line in `参考信息` using `Blocked by: #123` or `Depends on: #123` (comma-separated for multiple dependencies) so `github-issue-autopilot` can schedule it in dependency order.
+
 ## Feature
 
 Title: `[Feature] <用结果描述功能>`

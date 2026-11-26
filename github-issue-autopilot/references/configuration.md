@@ -21,6 +21,8 @@ Version 3 has this shape:
   "state_db": "/Users/me/.local/state/github-issue-autopilot/state.sqlite3",
   "poll_interval_seconds": 180,
   "lease_timeout_seconds": 3000,
+  "worker_timeout_seconds": 2700,
+  "heartbeat_timeout_seconds": 900,
   "max_attempts": 2,
   "max_concurrent_workers": 3,
   "policy": {
@@ -59,7 +61,9 @@ Version 3 has this shape:
 
 `author` is required, and `@me` resolves through the authenticated GitHub CLI. Every poll scans the current open Issues that match the configured author and all intake labels, including matching Issues created before installation. Immutable Issue node IDs in the SQLite ledger keep active, review-ready, and human-stopped work idempotent. A failed attempt is requeued when the same Issue remains open and eligible, up to `max_attempts` total automatic attempts; the default is two. Explicit `retry` remains available beyond that automatic limit. Existing configurations may retain `activate_after` as ignored compatibility metadata. `repository_id` is optional but recommended to detect a renamed or transferred repository.
 
-`max_concurrent_workers` accepts 1–3. Polling records every eligible Issue; the coordinator starts only the available number of Orca workers and fills a free slot on a later cycle. Orca is the source of truth for Task, Dispatch, agent terminal, worktree lineage, comments, and workspace status. SQLite stores immutable Issue node IDs, attempt history, and those Orca IDs for recovery.
+`max_concurrent_workers` accepts 1–3. Polling records every eligible Issue and parses same-repository dependency declarations (`Blocked by: #123`, `Depends on: #123`, `前置依赖: #123`) from the Issue body; the coordinator skips any Issue whose dependencies are not yet `accepted` locally or `CLOSED` on GitHub, and blocks dependency cycles visibly instead of deadlocking. The coordinator starts only the available number of Orca workers and fills a free slot on a later cycle. Orca is the source of truth for Task, Dispatch, agent terminal, worktree lineage, comments, and workspace status. SQLite (schema v4) stores immutable Issue node IDs, dependency lists, attempt history, heartbeats, failure patch paths, and those Orca IDs for recovery.
+
+During reconciliation, each `running` worker's recent output is hashed to refresh `last_heartbeat`. If a worker exceeds `worker_timeout_seconds` (default 2700s / 45m) or produces no new output for `heartbeat_timeout_seconds` (default 900s / 15m; `0` disables stall detection), the coordinator stops and releases the Orca Dispatch, exports any uncommitted or committed worktree diff to `<state_dir>/patches/issue-<num>-attempt-<n>.patch`, and records `failed` (retryable while below `max_attempts`) or `needs-human` (once `max_attempts` is exhausted or if stopping the worker fails). Failed, human-stopped, and blocked runs also archive their local diff patch automatically. Use `autopilot_admin.py prune --older-than-hours 24 [--dry-run]` to safely remove stale `failed`/`discarded`/`rejected` worktrees after confirming no live worker and preserving their patch archives.
 
 Workers run in visible `new-child` worktrees under the configured Orca project. They update comments at investigation, implementation, and verification checkpoints. A successful worker sends Orca `worker_done` and leaves one `AUTOPILOT_RESULT` in its final transcript. The watcher reads the preserved worker transcript and independently validates the worktree, branch, repair ledger, and base/head SHAs before marking it `ready-for-review`.
 

@@ -1006,6 +1006,210 @@ class IssueWatcherTests(unittest.TestCase):
         close_issue.assert_called_once_with(self.issue()["url"])
         self.assertEqual("accepted", ledger.snapshot()["issues"][0]["status"])
 
+    def test_parse_issue_dependencies_supports_english_chinese_and_urls(self) -> None:
+        body = (
+            "## 参考信息\n"
+            "- Blocked by: #12, #4\n"
+            "- **Depends on**: https://github.com/owner/repo/issues/7\n"
+            "- 前置依赖：#4, #9\n"
+            "- Blocked by: https://github.com/other/repo/issues/99\n"
+        )
+        deps = WATCHER.parse_issue_dependencies(body, "owner/repo")
+        self.assertEqual([4, 7, 9, 12], deps)
+
+    def test_claim_many_blocks_dependent_issue_until_dependency_accepted_or_closed(self) -> None:
+        ledger = self.ledger()
+        issue1 = self.issue("I_1", 1)
+        issue2 = {**self.issue("I_2", 2), "body": "Blocked by: #1"}
+        issue3 = {**self.issue("I_3", 3), "body": "Depends on: #99"}
+        issue4 = self.issue("I_4", 4)
+        for item in (issue1, issue2, issue3, issue4):
+            ledger.enqueue(item)
+
+        first_batch = ledger.claim_many(3, is_dependency_satisfied=lambda repo, num: False)
+        self.assertEqual([1, 4], [item["issue_number"] for item in first_batch])
+
+        snapshot = ledger.snapshot()
+        self.assertEqual(2, snapshot["summary"]["waiting_on_dependencies"])
+        by_num = {item["issue_number"]: item for item in snapshot["issues"]}
+        self.assertEqual([1], by_num[2]["waiting_on"])
+        self.assertEqual([99], by_num[3]["waiting_on"])
+
+        # Once external #99 is closed, #3 can be claimed even while #1 is still running.
+        second_batch = ledger.claim_many(3, is_dependency_satisfied=lambda repo, num: num == 99)
+        self.assertEqual([3], [item["issue_number"] for item in second_batch])
+
+        # Mark #1 accepted directly in ledger to simulate local merge & closure.
+        ledger.connection.execute("UPDATE issues SET status='accepted' WHERE node_id='I_1'")
+        third_batch = ledger.claim_many(3, is_dependency_satisfied=lambda repo, num: False)
+        self.assertEqual([2], [item["issue_number"] for item in third_batch])
+
+    def test_claim_many_detects_dependency_cycle_and_blocks_issue(self) -> None:
+        ledger = self.ledger()
+        ledger.enqueue({**self.issue("I_1", 1), "body": "Blocked by: #2"})
+        ledger.enqueue({**self.issue("I_2", 2), "body": "Blocked by: #1"})
+
+        claimed = ledger.claim_many(3)
+        self.assertEqual([], claimed)
+        by_num = {item["issue_number"]: item for item in ledger.snapshot()["issues"]}
+        self.assertEqual("blocked", by_num[1]["status"])
+        self.assertEqual("blocked", by_num[2]["status"])
+        self.assertIn("dependency cycle", by_num[1]["summary"])
+
+    def test_reconcile_refreshes_heartbeat_on_new_output_and_stops_stalled_worker(self) -> None:
+        config = self.config()
+        config["worker_timeout_seconds"] = 2700
+        config["heartbeat_timeout_seconds"] = 600
+        ledger = self.ledger(attempts=2)
+        ledger.enqueue(self.issue())
+        t0 = dt.datetime(2026, 8, 27, 1, 0, 0, tzinfo=dt.timezone.utc)
+        claimed = ledger.claim_next(at=t0)
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-1",
+            orca_worktree_id=f"repo::{self.root / 'wt-1'}",
+            worktree_path=str(self.root / "wt-1"), branch="owner/issue-1-attempt-1",
+            last_heartbeat=WATCHER.iso(t0),
+        )
+
+        # At t0 + 500s, new output arrives -> heartbeat refreshes, worker stays running.
+        t1 = t0 + dt.timedelta(seconds=500)
+        with mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"status": "running"}},
+            {"ok": True, "result": {"rows": [{"text": "running tests..."}]}},
+        ]):
+            completed = WATCHER.reconcile_workers(config, ledger, at=t1)
+        self.assertEqual([], completed)
+        attempt = ledger.snapshot()["issues"][0]["attempt_history"][0]
+        self.assertEqual(WATCHER.iso(t1), attempt["last_heartbeat"])
+
+        # At t1 + 650s, same output -> heartbeat stalled -> worker stopped & marked failed (retryable).
+        t2 = t1 + dt.timedelta(seconds=650)
+        with mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"status": "running"}},
+            {"ok": True, "result": {"rows": [{"text": "running tests..."}]}},
+            {"ok": True, "result": {}},  # worker-stop
+            {"ok": True, "result": {}},  # worktree set
+            {"ok": True, "result": {}},  # worker-release
+        ]) as call:
+            completed = WATCHER.reconcile_workers(config, ledger, at=t2)
+        self.assertEqual(1, len(completed))
+        self.assertEqual("failed", completed[0]["status"])
+        self.assertIn("heartbeat stalled", completed[0]["summary"])
+        self.assertIn(mock.call(config, "orchestration", "worker-stop", "--dispatch", "dispatch-1"),
+                      call.call_args_list)
+
+    def test_reconcile_stops_worker_exceeding_hard_timeout_and_exports_patch(self) -> None:
+        config = self.config()
+        config["worker_timeout_seconds"] = 1000
+        config["heartbeat_timeout_seconds"] = 900
+        config["max_attempts"] = 1
+        ledger = self.ledger(attempts=1)
+        ledger.enqueue(self.issue())
+        t0 = dt.datetime(2026, 8, 27, 1, 0, 0, tzinfo=dt.timezone.utc)
+        claimed = ledger.claim_next(at=t0)
+        worktree = self.root / "wt-timeout"
+        branch = "repair/issue-1-attempt-1"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True, stdout=subprocess.PIPE,
+        )
+        (worktree / "partial.txt").write_text("wip\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(worktree), "add", "partial.txt"], check=True)
+        ledger.assign_orca(
+            claimed["node_id"], claimed["attempt_number"], run_id=str(uuid.uuid4()), agent_id="codex",
+            orca_task_id="task-1", orca_dispatch_id="dispatch-1",
+            orca_worktree_id=f"repo::{worktree}",
+            worktree_path=str(worktree), branch=branch,
+            last_heartbeat=WATCHER.iso(t0),
+        )
+
+        t_late = t0 + dt.timedelta(seconds=1200)
+        with mock.patch.object(WATCHER, "orca_call", side_effect=[
+            {"ok": True, "result": {"status": "running"}},
+            {"ok": True, "result": {"rows": [{"text": "still printing"}]}},
+            {"ok": True, "result": {}},  # worker-stop
+            {"ok": True, "result": {}},  # worktree set
+            {"ok": True, "result": {}},  # worker-release
+        ]):
+            completed = WATCHER.reconcile_workers(config, ledger, at=t_late)
+        self.assertEqual(1, len(completed))
+        self.assertEqual("needs-human", completed[0]["status"])
+        self.assertIn("hard timeout", completed[0]["summary"])
+        patch_path = Path(completed[0]["failure_patch_path"])
+        self.assertTrue(patch_path.is_file())
+        self.assertIn("partial.txt", patch_path.read_text(encoding="utf-8"))
+
+    def test_prune_cleans_old_failed_worktrees_after_exporting_patch(self) -> None:
+        ledger = self.ledger()
+        t0 = dt.datetime(2026, 8, 25, 0, 0, 0, tzinfo=dt.timezone.utc)
+        ledger.enqueue(self.issue("I_1", 1))
+        claimed = ledger.claim_next(at=t0)
+        worktree = self.root / "wt-old-failed"
+        branch = "repair/issue-1-attempt-1"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(worktree), "HEAD"],
+            check=True, stdout=subprocess.PIPE,
+        )
+        (worktree / "leftover.txt").write_text("broken\n", encoding="utf-8")
+        ledger.finish(
+            claimed["node_id"], claimed["attempt_number"], "failed",
+            run_id=str(uuid.uuid4()), worktree_path=str(worktree), branch=branch,
+            summary="failed attempt",
+        )
+
+        # Dry run lists candidate without deleting.
+        now_time = t0 + dt.timedelta(hours=30)
+        dry = ledger.prune(self.repo, older_than_hours=24.0, dry_run=True, at=now_time)
+        self.assertEqual("dry-run", dry["status"])
+        self.assertEqual(1, len(dry["candidates"]))
+        self.assertEqual(0, len(dry["pruned"]))
+        self.assertTrue(worktree.exists())
+
+        # Real prune exports patch and removes worktree.
+        done = ledger.prune(self.repo, older_than_hours=24.0, dry_run=False, at=now_time)
+        self.assertEqual("pruned", done["status"])
+        self.assertEqual(1, len(done["pruned"]))
+        self.assertFalse(worktree.exists())
+        patch_path = Path(done["pruned"][0]["failure_patch_path"])
+        self.assertTrue(patch_path.is_file())
+        self.assertIn("leftover.txt", patch_path.read_text(encoding="utf-8"))
+
+    def test_ledger_migrates_v3_database_to_v4(self) -> None:
+        import sqlite3
+        conn = sqlite3.connect(self.db)
+        conn.executescript(
+            """
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO metadata VALUES ('schema_version', '3');
+            CREATE TABLE issues (
+              node_id TEXT PRIMARY KEY, repository TEXT NOT NULL, issue_number INTEGER NOT NULL,
+              url TEXT NOT NULL UNIQUE, title TEXT NOT NULL, created_at TEXT NOT NULL,
+              issue_updated_at TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+              lease_started_at TEXT, lease_owner TEXT, pid INTEGER, summary TEXT,
+              returncode INTEGER, log_path TEXT
+            );
+            CREATE TABLE events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, node_id TEXT NOT NULL, at TEXT NOT NULL,
+              kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE attempts (
+              node_id TEXT NOT NULL, attempt_number INTEGER NOT NULL, status TEXT NOT NULL,
+              lease_started_at TEXT, lease_owner TEXT, pid INTEGER, run_id TEXT,
+              worktree_path TEXT, branch TEXT, base_sha TEXT, head_sha TEXT, summary TEXT,
+              returncode INTEGER, log_path TEXT, agent_id TEXT, orca_task_id TEXT,
+              orca_dispatch_id TEXT, orca_worktree_id TEXT, PRIMARY KEY(node_id, attempt_number)
+            );
+            """
+        )
+        conn.close()
+        ledger = self.ledger()
+        self.assertEqual("4", ledger.metadata("schema_version"))
+        issue_cols = {row[1] for row in ledger.connection.execute("PRAGMA table_info(issues)")}
+        attempt_cols = {row[1] for row in ledger.connection.execute("PRAGMA table_info(attempts)")}
+        self.assertIn("depends_on", issue_cols)
+        self.assertTrue({"last_heartbeat", "output_digest", "failure_patch_path"}.issubset(attempt_cols))
+
 
 if __name__ == "__main__":
     unittest.main()

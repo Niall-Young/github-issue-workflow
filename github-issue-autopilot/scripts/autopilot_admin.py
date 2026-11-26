@@ -222,14 +222,20 @@ def ledger_summary(path: Path) -> dict[str, Any]:
 
 def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, label: str,
                  paths: dict[str, Path | str], default_agent: str,
-                 allowed_agents: list[str]) -> dict[str, Any]:
+                 allowed_agents: list[str], *,
+                 max_concurrent_workers: int = 3,
+                 max_attempts: int = 2,
+                 worker_timeout_seconds: int = 2700,
+                 heartbeat_timeout_seconds: int = 900) -> dict[str, Any]:
     return {
         "schema_version": 3,
         "state_db": str(paths["database"]),
         "poll_interval_seconds": 180,
         "lease_timeout_seconds": 3000,
-        "max_attempts": 2,
-        "max_concurrent_workers": 3,
+        "worker_timeout_seconds": max(1, int(worker_timeout_seconds)),
+        "heartbeat_timeout_seconds": max(0, int(heartbeat_timeout_seconds)),
+        "max_attempts": max(1, int(max_attempts)),
+        "max_concurrent_workers": max(1, min(3, int(max_concurrent_workers))),
         "policy": {"scope_approval": "eligible-issue", "publication": "never", "max_risk": "medium"},
         "repositories": [{
             "repository": metadata["nameWithOwner"], "repository_id": metadata["id"],
@@ -723,7 +729,11 @@ def restore_legacy_launch_agent(paths: dict[str, Path | str], was_loaded: bool) 
 
 
 def install(repo_path: Path, label: str, default_agent: str, allowed_agents: list[str],
-            load: bool = True) -> dict[str, Any]:
+            load: bool = True, *,
+            max_concurrent_workers: int = 3,
+            max_attempts: int = 2,
+            worker_timeout_seconds: int = 2700,
+            heartbeat_timeout_seconds: int = 900) -> dict[str, Any]:
     repo = repository_root(repo_path)
     login_result = command(["gh", "api", "user", "--jq", ".login"])
     if login_result.returncode:
@@ -735,8 +745,14 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
     metadata = repository_metadata(repo)
     login = login_result.stdout.strip()
     paths = build_paths(metadata["id"])
-    config = build_config(repo, metadata, login, str(Path(orca).resolve()), label, paths,
-                          default_agent, allowed_agents)
+    config = build_config(
+        repo, metadata, login, str(Path(orca).resolve()), label, paths,
+        default_agent, allowed_agents,
+        max_concurrent_workers=max_concurrent_workers,
+        max_attempts=max_attempts,
+        worker_timeout_seconds=worker_timeout_seconds,
+        heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+    )
     label_created = ensure_label(metadata["nameWithOwner"], label)
     config_path = Path(paths["config"])
     marker_path = git_common_dir(repo) / "github-issue-autopilot.json"
@@ -1083,6 +1099,14 @@ def parser() -> argparse.ArgumentParser:
     install_parser.add_argument("--agent", default="codex", help="repository default Orca agent ID")
     install_parser.add_argument("--allow-agent", action="append", default=[],
                                 help="additional agent:<id> label override allowed for this repository")
+    install_parser.add_argument("--max-concurrent", type=int, default=3,
+                                help="maximum concurrent Orca workers (1-3)")
+    install_parser.add_argument("--max-attempts", type=int, default=2,
+                                help="maximum automatic attempts per Issue")
+    install_parser.add_argument("--worker-timeout", type=int, default=2700,
+                                help="hard timeout in seconds for a running Orca worker")
+    install_parser.add_argument("--heartbeat-timeout", type=int, default=900,
+                                help="stall timeout in seconds without new worker output (0 disables)")
     install_parser.add_argument("--disabled", action="store_true",
                                 help="create or update the Orca Automation without enabling it")
     install_parser.add_argument("--no-load", action="store_true",
@@ -1113,6 +1137,10 @@ def parser() -> argparse.ArgumentParser:
     accept.add_argument("--repo-path", type=Path, default=Path.cwd())
     accept.add_argument("--issue-url", required=True)
     accept.add_argument("--target-branch", required=True)
+    prune = commands.add_parser("prune")
+    prune.add_argument("--repo-path", type=Path, default=Path.cwd())
+    prune.add_argument("--older-than-hours", type=float, default=24.0)
+    prune.add_argument("--dry-run", action="store_true")
     return main
 
 
@@ -1120,8 +1148,14 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.operation == "install":
-            result = install(args.repo_path, args.label, args.agent, args.allow_agent,
-                             not (args.disabled or args.no_load))
+            result = install(
+                args.repo_path, args.label, args.agent, args.allow_agent,
+                not (args.disabled or args.no_load),
+                max_concurrent_workers=args.max_concurrent,
+                max_attempts=args.max_attempts,
+                worker_timeout_seconds=args.worker_timeout,
+                heartbeat_timeout_seconds=args.heartbeat_timeout,
+            )
         elif args.operation == "ensure":
             result = ensure_coordinator(args.config)
         elif args.operation == "automation-precheck":
@@ -1145,6 +1179,11 @@ def main() -> int:
             result = run_watcher(args.repo_path, "retry", extra)
         elif args.operation == "discard":
             result = run_watcher(args.repo_path, "discard", ["--issue-url", args.issue_url])
+        elif args.operation == "prune":
+            extra = ["--older-than-hours", str(args.older_than_hours)]
+            if args.dry_run:
+                extra.append("--dry-run")
+            result = run_watcher(args.repo_path, "prune", extra)
         else:
             result = run_watcher(args.repo_path, "accept",
                                  ["--issue-url", args.issue_url, "--target-branch", args.target_branch])

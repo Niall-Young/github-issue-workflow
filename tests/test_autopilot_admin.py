@@ -525,6 +525,33 @@ class AutopilotAdminTests(unittest.TestCase):
         ), mock.patch("builtins.print"):
             self.assertEqual(2, ADMIN.main())
 
+    def test_build_config_supports_timeout_and_concurrency_options(self) -> None:
+        paths = {"database": self.root / "state.sqlite3", "key": "abc123",
+                 "runtime_admin": self.root / "runtime" / "autopilot_admin.py"}
+        value = ADMIN.build_config(
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "codex", ["codex"],
+            max_concurrent_workers=2, max_attempts=3,
+            worker_timeout_seconds=1800, heartbeat_timeout_seconds=600,
+        )
+        self.assertEqual(2, value["max_concurrent_workers"])
+        self.assertEqual(3, value["max_attempts"])
+        self.assertEqual(1800, value["worker_timeout_seconds"])
+        self.assertEqual(600, value["heartbeat_timeout_seconds"])
+
+    def test_prune_cli_forwards_arguments_to_watcher(self) -> None:
+        with mock.patch.object(
+            ADMIN.sys, "argv",
+            ["autopilot_admin.py", "prune", "--repo-path", str(self.repo),
+             "--older-than-hours", "12", "--dry-run"],
+        ), mock.patch.object(
+            ADMIN, "run_watcher", return_value={"status": "dry-run", "candidates": []}
+        ) as run_watcher, mock.patch("builtins.print"):
+            self.assertEqual(0, ADMIN.main())
+        run_watcher.assert_called_once_with(
+            self.repo, "prune", ["--older-than-hours", "12.0", "--dry-run"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

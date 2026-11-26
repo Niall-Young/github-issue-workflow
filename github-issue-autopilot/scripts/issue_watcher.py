@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -16,14 +17,20 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 CONFIG_VERSIONS = {2, 3}
-LEDGER_VERSION = 3
+LEDGER_VERSION = 4
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 RECEIPT = re.compile(r"(?m)^AUTOPILOT_RESULT: (\{[^\r\n]+\})[ \t]*$")
+DEPENDENCY_LINE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?(?:blocked[\s_-]*by|depends[\s_-]*on|前置依赖|依赖|阻塞于)(?:\*\*)?\s*[:：]\s*(.+)$"
+)
+ISSUE_REF = re.compile(r"(?:#|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/)(\d+)\b")
 CHILD_STATES = {"succeeded", "ready-for-review", "needs-human", "blocked", "failed"}
 STOPPED_STATES = {"ready-for-review", "needs-human", "blocked", "failed", "discarded"}
+PRUNABLE_ATTEMPT_STATES = {"failed", "discarded", "rejected"}
+PROTECTED_ISSUE_STATES = {"claimed", "running", "ready-for-review", "needs-human"}
 
 
 class WatcherError(RuntimeError):
@@ -123,6 +130,14 @@ def load_config(path: Path) -> dict[str, Any]:
     if lease < 1:
         raise WatcherError("lease_timeout_seconds must be positive")
     config["lease_timeout_seconds"] = lease
+    worker_timeout = int(config.get("worker_timeout_seconds", 2700))
+    if worker_timeout < 1:
+        raise WatcherError("worker_timeout_seconds must be positive")
+    config["worker_timeout_seconds"] = worker_timeout
+    heartbeat_timeout = int(config.get("heartbeat_timeout_seconds", 900))
+    if heartbeat_timeout < 0:
+        raise WatcherError("heartbeat_timeout_seconds must be non-negative")
+    config["heartbeat_timeout_seconds"] = heartbeat_timeout
     config["poll_interval_seconds"] = max(1, int(config.get("poll_interval_seconds", 180)))
     config["max_attempts"] = int(config.get("max_attempts", 2))
     if config["max_attempts"] < 1:
@@ -144,6 +159,63 @@ def load_config(path: Path) -> dict[str, Any]:
                 or not scheduler["automation_id"]):
             raise WatcherError("schema v3 requires an Orca Automation scheduler ID")
     return config
+
+
+def parse_issue_dependencies(body: str, repository: str | None = None) -> list[int]:
+    if not isinstance(body, str) or not body:
+        return []
+    found: set[int] = set()
+    for match in DEPENDENCY_LINE.finditer(body):
+        segment = match.group(1)
+        for ref in ISSUE_REF.finditer(segment):
+            raw = ref.group(0)
+            if repository and raw.startswith("https://github.com/"):
+                expected_prefix = f"https://github.com/{repository.lower()}/issues/"
+                if not raw.lower().startswith(expected_prefix):
+                    continue
+            number = int(ref.group(1))
+            if number > 0:
+                found.add(number)
+    return sorted(found)
+
+
+def normalize_depends_on(value: Any) -> list[int]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(value, list):
+        return []
+    result: set[int] = set()
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool) and item > 0:
+            result.add(item)
+    return sorted(result)
+
+
+def find_dependency_cycle(start: int, graph: dict[int, list[int]]) -> list[int] | None:
+    path: list[int] = []
+    index: dict[int, int] = {}
+    visited: set[int] = set()
+
+    def dfs(node: int) -> list[int] | None:
+        if node in index:
+            return [*path[index[node]:], node]
+        if node in visited:
+            return None
+        index[node] = len(path)
+        path.append(node)
+        for dep in graph.get(node, []):
+            cycle = dfs(dep)
+            if cycle is not None:
+                return cycle
+        path.pop()
+        del index[node]
+        visited.add(node)
+        return None
+
+    return dfs(start)
 
 
 class Ledger:
@@ -169,7 +241,7 @@ class Ledger:
               url TEXT NOT NULL UNIQUE, title TEXT NOT NULL, created_at TEXT NOT NULL,
               issue_updated_at TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
               lease_started_at TEXT, lease_owner TEXT, pid INTEGER, summary TEXT,
-              returncode INTEGER, log_path TEXT
+              returncode INTEGER, log_path TEXT, depends_on TEXT NOT NULL DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS events (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +254,7 @@ class Ledger:
               run_id TEXT, worktree_path TEXT, branch TEXT, base_sha TEXT, head_sha TEXT,
               summary TEXT, returncode INTEGER, log_path TEXT, agent_id TEXT,
               orca_task_id TEXT, orca_dispatch_id TEXT, orca_worktree_id TEXT,
+              last_heartbeat TEXT, output_digest TEXT, failure_patch_path TEXT,
               PRIMARY KEY(node_id, attempt_number)
             );
             """
@@ -193,10 +266,16 @@ class Ledger:
         elif row[0] == "1":
             self._migrate_v1()
             self._migrate_v2()
+            self._migrate_v3()
             self.connection.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
                                     (str(LEDGER_VERSION),))
         elif row[0] == "2":
             self._migrate_v2()
+            self._migrate_v3()
+            self.connection.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
+                                    (str(LEDGER_VERSION),))
+        elif row[0] == "3":
+            self._migrate_v3()
             self.connection.execute("UPDATE metadata SET value=? WHERE key='schema_version'",
                                     (str(LEDGER_VERSION),))
         elif row[0] != str(LEDGER_VERSION):
@@ -220,6 +299,15 @@ class Ledger:
             if name not in existing:
                 self.connection.execute(f"ALTER TABLE attempts ADD COLUMN {name} TEXT")
 
+    def _migrate_v3(self) -> None:
+        issue_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(issues)")}
+        if "depends_on" not in issue_columns:
+            self.connection.execute("ALTER TABLE issues ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'")
+        attempt_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(attempts)")}
+        for name in ("last_heartbeat", "output_digest", "failure_patch_path"):
+            if name not in attempt_columns:
+                self.connection.execute(f"ALTER TABLE attempts ADD COLUMN {name} TEXT")
+
     def metadata(self, key: str) -> str | None:
         row = self.connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
         return str(row[0]) if row else None
@@ -231,24 +319,37 @@ class Ledger:
         )
 
     def enqueue(self, issue: dict[str, Any]) -> bool:
+        depends_on = normalize_depends_on(
+            issue.get("depends_on")
+            if "depends_on" in issue
+            else parse_issue_dependencies(str(issue.get("body", "")), issue.get("repository"))
+        )
+        depends_json = json.dumps(depends_on, separators=(",", ":"))
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             cursor = self.connection.execute(
                 """INSERT OR IGNORE INTO issues
-                   (node_id, repository, issue_number, url, title, created_at, issue_updated_at, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')""",
+                   (node_id, repository, issue_number, url, title, created_at, issue_updated_at,
+                    status, depends_on)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)""",
                 (issue["id"], issue["repository"], issue["number"], issue["url"], issue.get("title", ""),
-                 issue["createdAt"], issue["updatedAt"]),
+                 issue["createdAt"], issue["updatedAt"], depends_json),
             )
             if cursor.rowcount:
-                self._event(issue["id"], "discovered", {"url": issue["url"]})
+                self._event(issue["id"], "discovered", {"url": issue["url"], "depends_on": depends_on})
             else:
+                self.connection.execute(
+                    """UPDATE issues SET depends_on=?
+                       WHERE node_id=? AND status IN ('queued', 'retry-pending', 'failed')""",
+                    (depends_json, issue["id"]),
+                )
                 cursor = self.connection.execute(
                     """UPDATE issues SET status='retry-pending', title=?, issue_updated_at=?,
-                       lease_started_at=NULL, lease_owner=NULL, pid=NULL, summary=NULL,
+                       depends_on=?, lease_started_at=NULL, lease_owner=NULL, pid=NULL, summary=NULL,
                        returncode=NULL, log_path=NULL
                        WHERE node_id=? AND status='failed' AND attempts < ?""",
-                    (issue.get("title", ""), issue["updatedAt"], issue["id"], self.max_attempts),
+                    (issue.get("title", ""), issue["updatedAt"], depends_json, issue["id"],
+                     self.max_attempts),
                 )
                 if cursor.rowcount:
                     self._event(issue["id"], "automatic_retry_queued", {
@@ -263,8 +364,49 @@ class Ledger:
             self.connection.execute("ROLLBACK")
             raise
 
-    def claim_many(self, limit: int, at: dt.datetime | None = None) -> list[dict[str, Any]]:
+    def _repository_graph(self, repository: str) -> tuple[dict[int, str], dict[int, list[int]]]:
+        statuses: dict[int, str] = {}
+        graph: dict[int, list[int]] = {}
+        for row in self.connection.execute(
+            "SELECT issue_number, status, depends_on FROM issues WHERE repository=?", (repository,)
+        ).fetchall():
+            number = int(row["issue_number"])
+            statuses[number] = str(row["status"])
+            graph[number] = normalize_depends_on(row["depends_on"])
+        return statuses, graph
+
+    def _resolve_external_dependencies(
+        self, is_dependency_satisfied: Callable[[str, int], bool] | None
+    ) -> dict[tuple[str, int], bool]:
+        if is_dependency_satisfied is None:
+            return {}
+        candidates = self.connection.execute(
+            "SELECT repository, depends_on FROM issues WHERE status IN ('queued', 'retry-pending')"
+        ).fetchall()
+        known = {
+            (str(row["repository"]), int(row["issue_number"]))
+            for row in self.connection.execute("SELECT repository, issue_number FROM issues").fetchall()
+        }
+        resolved: dict[tuple[str, int], bool] = {}
+        for row in candidates:
+            repo = str(row["repository"])
+            for dep in normalize_depends_on(row["depends_on"]):
+                key = (repo, dep)
+                if key not in known and key not in resolved:
+                    try:
+                        resolved[key] = bool(is_dependency_satisfied(repo, dep))
+                    except Exception:
+                        resolved[key] = False
+        return resolved
+
+    def claim_many(
+        self,
+        limit: int,
+        at: dt.datetime | None = None,
+        is_dependency_satisfied: Callable[[str, int], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         current = at or now()
+        external_satisfied = self._resolve_external_dependencies(is_dependency_satisfied)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             for row in self.connection.execute(
@@ -281,10 +423,47 @@ class Ledger:
                 "SELECT COUNT(*) FROM issues WHERE status IN ('claimed', 'running')"
             ).fetchone()[0])
             available = max(0, limit - active)
-            chosen = self.connection.execute(
+            if available <= 0:
+                self.connection.execute("COMMIT")
+                return []
+            candidates = self.connection.execute(
                 """SELECT * FROM issues WHERE status IN ('queued', 'retry-pending')
-                   ORDER BY created_at, issue_number LIMIT ?""", (available,)
+                   ORDER BY created_at, issue_number"""
             ).fetchall()
+            if not candidates:
+                self.connection.execute("COMMIT")
+                return []
+            repo_cache: dict[str, tuple[dict[int, str], dict[int, list[int]]]] = {}
+            chosen: list[sqlite3.Row] = []
+            for row in candidates:
+                if len(chosen) >= available:
+                    break
+                deps = normalize_depends_on(row["depends_on"])
+                if deps:
+                    repo = str(row["repository"])
+                    if repo not in repo_cache:
+                        repo_cache[repo] = self._repository_graph(repo)
+                    statuses, graph = repo_cache[repo]
+                    cycle = find_dependency_cycle(int(row["issue_number"]), graph)
+                    if cycle is not None:
+                        chain = " -> ".join(f"#{num}" for num in cycle)
+                        summary = f"dependency cycle detected: {chain}"
+                        self.connection.execute(
+                            "UPDATE issues SET status='blocked', summary=? WHERE node_id=?",
+                            (summary, row["node_id"]),
+                        )
+                        self._event(row["node_id"], "dependency_cycle", {"cycle": cycle})
+                        continue
+                    unmet = []
+                    for dep in deps:
+                        if dep in statuses:
+                            if statuses[dep] != "accepted":
+                                unmet.append(dep)
+                        elif not external_satisfied.get((repo, dep), False):
+                            unmet.append(dep)
+                    if unmet:
+                        continue
+                chosen.append(row)
             if not chosen:
                 self.connection.execute("COMMIT")
                 return []
@@ -301,11 +480,12 @@ class Ledger:
                     (attempt, started, owner, row["node_id"]),
                 )
                 self.connection.execute(
-                    "INSERT INTO attempts(node_id, attempt_number, status, lease_started_at, lease_owner) "
-                    "VALUES (?, ?, 'claimed', ?, ?)", (row["node_id"], attempt, started, owner),
+                    "INSERT INTO attempts(node_id, attempt_number, status, lease_started_at, lease_owner, last_heartbeat) "
+                    "VALUES (?, ?, 'claimed', ?, ?, ?)", (row["node_id"], attempt, started, owner, started),
                 )
                 self._event(row["node_id"], "claimed", {"attempt": attempt})
                 value = dict(row)
+                value["depends_on"] = normalize_depends_on(row["depends_on"])
                 value["attempt_number"] = attempt
                 claimed.append(value)
             self.connection.execute("COMMIT")
@@ -314,8 +494,12 @@ class Ledger:
             self.connection.execute("ROLLBACK")
             raise
 
-    def claim_next(self, at: dt.datetime | None = None) -> dict[str, Any] | None:
-        values = self.claim_many(1, at)
+    def claim_next(
+        self,
+        at: dt.datetime | None = None,
+        is_dependency_satisfied: Callable[[str, int], bool] | None = None,
+    ) -> dict[str, Any] | None:
+        values = self.claim_many(1, at, is_dependency_satisfied=is_dependency_satisfied)
         return values[0] if values else None
 
     def _finish_stale(self, row: sqlite3.Row) -> None:
@@ -343,7 +527,36 @@ class Ledger:
         worktree = Path(fields["worktree_path"])
         if not worktree.is_absolute():
             raise OrcaIdentityError("Orca worktree path must be absolute")
+        fields.setdefault("last_heartbeat", iso())
         self._update(node_id, attempt, "running", fields, "orca_dispatched", validate_orca=True)
+
+    def heartbeat(
+        self,
+        node_id: str,
+        attempt: int,
+        at: dt.datetime | None = None,
+        output_digest: str | None = None,
+    ) -> None:
+        timestamp = iso(at)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            if output_digest is None:
+                cursor = self.connection.execute(
+                    "UPDATE attempts SET last_heartbeat=? WHERE node_id=? AND attempt_number=? AND status='running'",
+                    (timestamp, node_id, attempt),
+                )
+            else:
+                cursor = self.connection.execute(
+                    "UPDATE attempts SET last_heartbeat=?, output_digest=? "
+                    "WHERE node_id=? AND attempt_number=? AND status='running'",
+                    (timestamp, output_digest, node_id, attempt),
+                )
+            if cursor.rowcount:
+                self._event(node_id, "heartbeat", {"attempt": attempt, "at": timestamp})
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def ensure_orca_identity_available(self, node_id: str, attempt: int, name: str, value: str) -> None:
         if name not in {"orca_task_id", "orca_dispatch_id", "orca_worktree_id", "worktree_path"}:
@@ -380,7 +593,8 @@ class Ledger:
                 validate_orca: bool = False) -> None:
         allowed = {"pid", "run_id", "worktree_path", "branch", "base_sha", "head_sha",
                    "summary", "returncode", "log_path", "agent_id", "orca_task_id",
-                   "orca_dispatch_id", "orca_worktree_id"}
+                   "orca_dispatch_id", "orca_worktree_id", "last_heartbeat",
+                   "output_digest", "failure_patch_path"}
         if any(key not in allowed for key in fields):
             raise WatcherError("unsupported attempt field")
         self.connection.execute("BEGIN IMMEDIATE")
@@ -553,15 +767,148 @@ class Ledger:
             response["cleanup_warning"] = str(exc)
         return response
 
+    def prune(
+        self,
+        repo: Path,
+        older_than_hours: float = 24.0,
+        dry_run: bool = False,
+        orca_cli: str | None = None,
+        at: dt.datetime | None = None,
+    ) -> dict[str, Any]:
+        if older_than_hours < 0:
+            raise WatcherError("older_than_hours must be non-negative")
+        current = at or now()
+        cutoff_seconds = older_than_hours * 3600.0
+        rows = self.connection.execute(
+            """SELECT attempts.*, issues.issue_number, issues.status AS issue_status,
+                      issues.attempts AS latest_attempt, issues.url
+               FROM attempts JOIN issues USING(node_id)
+               WHERE attempts.status IN ('failed', 'discarded', 'rejected')
+                 AND attempts.worktree_path IS NOT NULL
+               ORDER BY issues.issue_number, attempts.attempt_number"""
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        pruned: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for row in rows:
+            attempt = dict(row)
+            if (attempt["attempt_number"] == attempt["latest_attempt"]
+                    and attempt["issue_status"] in PROTECTED_ISSUE_STATES):
+                continue
+            worktree_path = Path(attempt["worktree_path"])
+            branch = attempt.get("branch")
+            branch_exists = bool(branch) and command(
+                ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
+            ).returncode == 0
+            if not worktree_path.exists() and not branch_exists:
+                continue
+            ref_time = attempt.get("last_heartbeat") or attempt.get("lease_started_at")
+            if not ref_time:
+                continue
+            age_seconds = (current - parse_time(ref_time)).total_seconds()
+            if age_seconds < cutoff_seconds:
+                continue
+            if pid_alive(int(attempt.get("pid") or 0)):
+                skipped.append({"url": attempt["url"], "attempt": attempt["attempt_number"],
+                                "reason": "local worker PID is still running"})
+                continue
+            dispatch_id = attempt.get("orca_dispatch_id")
+            if dispatch_id and orca_cli:
+                try:
+                    state = json_command([orca_cli, "orchestration", "worker-show", "--dispatch",
+                                          dispatch_id, "--json"])
+                except WatcherError:
+                    state = {}
+                if state and worker_state(state) == "running":
+                    skipped.append({"url": attempt["url"], "attempt": attempt["attempt_number"],
+                                    "reason": "Orca worker is still running"})
+                    continue
+            entry = {
+                "url": attempt["url"],
+                "issue_number": attempt["issue_number"],
+                "attempt": attempt["attempt_number"],
+                "status": attempt["status"],
+                "worktree_path": attempt["worktree_path"],
+                "branch": branch,
+                "age_hours": round(age_seconds / 3600.0, 2),
+                "failure_patch_path": attempt.get("failure_patch_path"),
+            }
+            candidates.append(entry)
+            if dry_run:
+                continue
+            patch_path = attempt.get("failure_patch_path")
+            if not patch_path and worktree_path.is_dir():
+                patch_path = export_failure_patch(repo, self.path, attempt)
+                if patch_path:
+                    entry["failure_patch_path"] = patch_path
+                    self.connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        self.connection.execute(
+                            "UPDATE attempts SET failure_patch_path=? WHERE node_id=? AND attempt_number=?",
+                            (patch_path, attempt["node_id"], attempt["attempt_number"]),
+                        )
+                        self.connection.execute("COMMIT")
+                    except Exception:
+                        self.connection.execute("ROLLBACK")
+                        raise
+            try:
+                cleanup_attempt(repo, attempt, force=True, orca_cli=orca_cli)
+            except WatcherError as exc:
+                skipped.append({"url": attempt["url"], "attempt": attempt["attempt_number"],
+                                "reason": str(exc)})
+                continue
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._event(attempt["node_id"], "pruned", {
+                    "attempt": attempt["attempt_number"],
+                    "worktree_path": attempt["worktree_path"],
+                    "failure_patch_path": patch_path,
+                })
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+            pruned.append(entry)
+        return {
+            "status": "dry-run" if dry_run else "pruned",
+            "older_than_hours": older_than_hours,
+            "candidates": candidates,
+            "pruned": pruned,
+            "skipped": skipped,
+        }
+
     def snapshot(self) -> dict[str, Any]:
         issues = [dict(row) for row in self.connection.execute(
             "SELECT * FROM issues ORDER BY created_at, issue_number"
         )]
+        repo_statuses: dict[str, dict[int, str]] = {}
         for issue in issues:
+            repo_statuses.setdefault(issue["repository"], {})[int(issue["issue_number"])] = str(issue["status"])
+        status_counts: dict[str, int] = {}
+        waiting_on_dependencies = 0
+        for issue in issues:
+            deps = normalize_depends_on(issue.get("depends_on"))
+            issue["depends_on"] = deps
+            waiting = [
+                dep for dep in deps
+                if repo_statuses.get(issue["repository"], {}).get(dep) != "accepted"
+            ] if issue["status"] in {"queued", "retry-pending"} and deps else []
+            issue["waiting_on"] = waiting
+            if waiting:
+                waiting_on_dependencies += 1
+            status_counts[issue["status"]] = status_counts.get(issue["status"], 0) + 1
             issue["attempt_history"] = [dict(row) for row in self.connection.execute(
                 "SELECT * FROM attempts WHERE node_id=? ORDER BY attempt_number", (issue["node_id"],)
             )]
-        return {"schema_version": LEDGER_VERSION, "issues": issues}
+        return {
+            "schema_version": LEDGER_VERSION,
+            "summary": {
+                "total": len(issues),
+                "by_status": status_counts,
+                "waiting_on_dependencies": waiting_on_dependencies,
+            },
+            "issues": issues,
+        }
 
     def _event(self, node_id: str, kind: str, detail: dict[str, Any]) -> None:
         self.connection.execute("INSERT INTO events(node_id, at, kind, detail) VALUES (?, ?, ?, ?)",
@@ -827,6 +1174,39 @@ def git_common_dir(repo: Path) -> Path:
     return (value if value.is_absolute() else repo / value).resolve()
 
 
+def export_failure_patch(repo: Path, state_db: Path, attempt: dict[str, Any]) -> str | None:
+    worktree_value = attempt.get("worktree_path")
+    if not isinstance(worktree_value, str) or not worktree_value:
+        return None
+    worktree = Path(worktree_value)
+    if not worktree.is_dir():
+        return None
+    sections: list[str] = []
+    try:
+        base_sha = attempt.get("base_sha")
+        if isinstance(base_sha, str) and base_sha:
+            committed = command(["git", "-C", str(worktree), "diff", f"{base_sha}..HEAD"])
+            if committed.returncode == 0 and committed.stdout.strip():
+                sections.append(f"# Committed diff ({base_sha}..HEAD)\n{committed.stdout}")
+        unstaged = command(["git", "-C", str(worktree), "diff", "HEAD"])
+        if unstaged.returncode == 0 and unstaged.stdout.strip():
+            sections.append(f"# Working tree diff (HEAD)\n{unstaged.stdout}")
+        status = command(["git", "-C", str(worktree), "status", "--short"])
+        if status.returncode == 0 and status.stdout.strip():
+            sections.append(f"# Working tree status\n{status.stdout}")
+    except OSError:
+        return None
+    if not sections:
+        return None
+    patch_dir = state_db.parent / "patches"
+    patch_dir.mkdir(parents=True, exist_ok=True)
+    issue_num = attempt.get("issue_number", "unknown")
+    attempt_num = attempt.get("attempt_number", 0)
+    patch_path = patch_dir / f"issue-{issue_num}-attempt-{attempt_num}.patch"
+    patch_path.write_text("\n".join(sections).rstrip() + "\n", encoding="utf-8")
+    return str(patch_path)
+
+
 def cleanup_attempt(repo: Path, attempt: dict[str, Any], force: bool, orca_cli: str | None = None) -> None:
     worktree_value, branch = attempt.get("worktree_path"), attempt.get("branch")
     if not worktree_value and not branch:
@@ -899,7 +1279,7 @@ def list_issues(repository: dict[str, Any], login: str,
     slug = repository["repository"]
     author = login if repository["author"] == "@me" else repository["author"]
     result = command(["gh", "issue", "list", "--repo", slug, "--state", "open", "--limit", "1000",
-                      "--author", author, "--json", "id,number,url,title,author,labels,createdAt,updatedAt"])
+                      "--author", author, "--json", "id,number,url,title,body,author,labels,createdAt,updatedAt"])
     if result.returncode:
         raise WatcherError(result.stderr.strip() or f"failed to list Issues for {slug}")
     values = json.loads(result.stdout)
@@ -912,6 +1292,7 @@ def list_issues(repository: dict[str, Any], login: str,
                 and labels.issubset(actual_labels)
                 and (created_through is None or created <= created_through)):
             issue["repository"] = slug
+            issue["depends_on"] = parse_issue_dependencies(str(issue.get("body", "")), slug)
             eligible.append(issue)
     return eligible
 
@@ -1218,7 +1599,15 @@ def worker_state(value: dict[str, Any]) -> str:
     return "running"
 
 
-def reconcile_workers(config: dict[str, Any], ledger: Ledger) -> list[dict[str, Any]]:
+def reconcile_workers(
+    config: dict[str, Any],
+    ledger: Ledger,
+    at: dt.datetime | None = None,
+) -> list[dict[str, Any]]:
+    current = at or now()
+    worker_timeout = int(config.get("worker_timeout_seconds", 2700))
+    heartbeat_timeout = int(config.get("heartbeat_timeout_seconds", 900))
+    max_attempts = int(config.get("max_attempts", ledger.max_attempts))
     completed: list[dict[str, Any]] = []
     for attempt in ledger.active_attempts():
         dispatch_id = attempt.get("orca_dispatch_id")
@@ -1229,7 +1618,71 @@ def reconcile_workers(config: dict[str, Any], ledger: Ledger) -> list[dict[str, 
         except WatcherError:
             continue
         state = worker_state(show)
+        repository = next((item for item in config["repositories"]
+                           if item["repository"] == attempt["repository"]), None)
         if state == "running":
+            last_hb_str = attempt.get("last_heartbeat") or attempt.get("lease_started_at")
+            try:
+                probe = orca_call(config, "orchestration", "worker-read", "--dispatch", dispatch_id,
+                                  "--source", "auto", "--limit", "50")
+                probe_text = string_content(probe)
+                if probe_text:
+                    digest = hashlib.sha256(probe_text.encode("utf-8")).hexdigest()
+                    if digest != attempt.get("output_digest") or not attempt.get("last_heartbeat"):
+                        ledger.heartbeat(attempt["node_id"], attempt["attempt_number"],
+                                         at=current, output_digest=digest)
+                        last_hb_str = iso(current)
+            except WatcherError:
+                pass
+            started_str = attempt.get("lease_started_at")
+            elapsed = (current - parse_time(started_str)).total_seconds() if started_str else 0.0
+            silent = (current - parse_time(last_hb_str)).total_seconds() if last_hb_str else elapsed
+            timeout_reason: str | None = None
+            if worker_timeout > 0 and elapsed > worker_timeout:
+                timeout_reason = f"worker exceeded hard timeout of {worker_timeout}s ({int(elapsed)}s elapsed)"
+            elif heartbeat_timeout > 0 and silent > heartbeat_timeout:
+                timeout_reason = (
+                    f"worker heartbeat stalled for {int(silent)}s without new output "
+                    f"(limit {heartbeat_timeout}s)"
+                )
+            if timeout_reason is None:
+                continue
+            stop_failed: str | None = None
+            try:
+                orca_call(config, "orchestration", "worker-stop", "--dispatch", dispatch_id)
+            except WatcherError as exc:
+                stop_failed = str(exc)
+            patch_path = (
+                export_failure_patch(repository["repo_path"], ledger.path, attempt)
+                if repository is not None else None
+            )
+            extra: dict[str, Any] = {}
+            if patch_path:
+                extra["failure_patch_path"] = patch_path
+            if stop_failed:
+                status = "needs-human"
+                summary = f"{timeout_reason}; failed to stop Orca worker: {stop_failed}"
+            elif int(attempt["attempt_number"]) >= max_attempts:
+                status = "needs-human"
+                summary = f"{timeout_reason}; worker stopped after reaching max attempts ({max_attempts})"
+            else:
+                status = "failed"
+                summary = f"{timeout_reason}; worker stopped"
+            ledger.finish(attempt["node_id"], attempt["attempt_number"], status,
+                          summary=summary, **extra)
+            if attempt.get("orca_worktree_id"):
+                try:
+                    orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
+                              "--workspace-status", "in-review", "--comment", f"{status}: {summary[:180]}")
+                except WatcherError:
+                    pass
+            if not stop_failed:
+                try:
+                    orca_call(config, "orchestration", "worker-release", "--dispatch", dispatch_id)
+                except WatcherError:
+                    pass
+            completed.append({"url": attempt["url"], "status": status, "summary": summary,
+                              **({"failure_patch_path": patch_path} if patch_path else {})})
             continue
         receipt = None
         receipt_output = ""
@@ -1254,9 +1707,14 @@ def reconcile_workers(config: dict[str, Any], ledger: Ledger) -> list[dict[str, 
                                    "--source", "auto", "--limit", "200")
                 receipt_output = string_content(output)
                 receipt = parse_receipt(receipt_output)
-            repository = next(item for item in config["repositories"]
-                              if item["repository"] == attempt["repository"])
+            if repository is None:
+                repository = next(item for item in config["repositories"]
+                                  if item["repository"] == attempt["repository"])
             status, summary, evidence = verified_receipt(receipt, repository, attempt, output=receipt_output)
+        if status in {"failed", "needs-human", "blocked"} and repository is not None:
+            patch_path = export_failure_patch(repository["repo_path"], ledger.path, attempt)
+            if patch_path:
+                evidence = {**evidence, "failure_patch_path": patch_path}
         ledger.finish(attempt["node_id"], attempt["attempt_number"], status, summary=summary, **evidence)
         if attempt.get("orca_worktree_id"):
             orca_call(config, "worktree", "set", "--worktree", f"id:{attempt['orca_worktree_id']}",
@@ -1266,9 +1724,27 @@ def reconcile_workers(config: dict[str, Any], ledger: Ledger) -> list[dict[str, 
     return completed
 
 
+def external_dependency_checker() -> Callable[[str, int], bool]:
+    cache: dict[tuple[str, int], bool] = {}
+
+    def check(repository: str, issue_number: int) -> bool:
+        key = (repository, issue_number)
+        if key not in cache:
+            url = f"https://github.com/{repository}/issues/{issue_number}"
+            try:
+                cache[key] = github_issue_state(url) == "CLOSED"
+            except WatcherError:
+                cache[key] = False
+        return cache[key]
+
+    return check
+
+
 def work_available(config: dict[str, Any], ledger: Ledger, run_id: str) -> list[dict[str, Any]]:
+    checker = external_dependency_checker()
     return [dispatch_one(config, ledger, run_id, run)
-            for run in ledger.claim_many(config["max_concurrent_workers"])]
+            for run in ledger.claim_many(config["max_concurrent_workers"],
+                                         is_dependency_satisfied=checker)]
 
 
 def doctor(config: dict[str, Any]) -> dict[str, Any]:
@@ -1354,7 +1830,7 @@ def repository_for_issue(config: dict[str, Any], url: str) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     main = argparse.ArgumentParser(description=__doc__)
     commands = main.add_subparsers(dest="command_name", required=True)
-    for name in ("doctor", "poll", "work", "once", "run", "status", "retry", "discard", "accept"):
+    for name in ("doctor", "poll", "work", "once", "run", "status", "retry", "discard", "accept", "prune"):
         sub = commands.add_parser(name)
         sub.add_argument("--config", type=Path, required=True)
         if name in {"retry", "discard", "accept"}:
@@ -1363,6 +1839,9 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("--discard-worktree", action="store_true")
         if name == "accept":
             sub.add_argument("--target-branch", required=True)
+        if name == "prune":
+            sub.add_argument("--older-than-hours", type=float, default=24.0)
+            sub.add_argument("--dry-run", action="store_true")
     return main
 
 
@@ -1392,6 +1871,12 @@ def main() -> int:
                 repository = repository_for_issue(config, args.issue_url)
                 result, code = ledger.accept(args.issue_url, repository["repo_path"], args.target_branch,
                                              config["orca"]["cli"]), 0
+            elif args.command_name == "prune":
+                repository = config["repositories"][0]
+                result, code = ledger.prune(
+                    repository["repo_path"], older_than_hours=args.older_than_hours,
+                    dry_run=args.dry_run, orca_cli=config["orca"]["cli"],
+                ), 0
             elif args.command_name == "poll":
                 result, code = poll(config, ledger), 0
             elif args.command_name == "work":

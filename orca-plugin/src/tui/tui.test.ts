@@ -26,8 +26,10 @@ import {
 } from '../board-data'
 import {
   collectOrcaAgentState,
+  detectAutopilotRunning,
   loadBoardSnapshot,
   parseAgentLaunchResult,
+  stopAutopilot,
   submitIssueFromTui,
   type PendingHandoff
 } from './orca-cli'
@@ -1565,4 +1567,102 @@ test('handoff tracking avoids false exit alert for outcome.handle launches, synt
   assert.equal(adoptedSnap.inProgress.length, 1)
   assert.equal(adoptedSnap.inProgress[0]?.title, '兜底认领正在运行的提单任务')
   assert.equal(syntheticPending.get('handoff-synthetic-1')?.terminalId, launchedHandle)
+})
+
+test('stop slash command and header autopilot toggle button hitboxes', () => {
+  const stopCmd = parseSlashCommand('/stop')
+  assert.equal(stopCmd?.kind, 'command')
+  if (stopCmd?.kind === 'command') {
+    assert.equal(stopCmd.command.id, 'stop')
+  }
+
+  const pauseAlias = parseSlashCommand('/pause')
+  assert.equal(pauseAlias?.kind, 'command')
+  if (pauseAlias?.kind === 'command') {
+    assert.equal(pauseAlias.command.id, 'stop')
+  }
+
+  const offArg = parseSlashCommand('/autopilot off')
+  assert.equal(offArg?.kind, 'command')
+  if (offArg?.kind === 'command') {
+    assert.equal(offArg.command.id, 'autopilot')
+    assert.equal(offArg.arg, 'off')
+  }
+
+  const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const runningState = makeBaseState()
+  runningState.snapshot = { ...makeSampleSnapshot(), autopilotInstalled: true, autopilotRunning: true }
+  const runningBuf = renderTui(runningState, 120, 30)
+  const runningHeader = strip(runningBuf.renderLines()[0] ?? '')
+  assert.match(runningHeader, /● 自动处理 \[关闭\]/)
+  const stopHit = runningBuf.hitBoxes.find((h) => h.action === 'stop-autopilot')
+  assert.ok(stopHit, 'running header should expose clickable stop-autopilot hitbox')
+
+  const pausedState = makeBaseState()
+  pausedState.snapshot = { ...makeSampleSnapshot(), autopilotInstalled: true, autopilotRunning: false }
+  const pausedBuf = renderTui(pausedState, 120, 30)
+  const pausedHeader = strip(pausedBuf.renderLines()[0] ?? '')
+  assert.match(pausedHeader, /○ 已暂停自动处理 \[开启\]/)
+  const resumeHit = pausedBuf.hitBoxes.find((h) => h.action === 'enable-autopilot')
+  assert.ok(resumeHit, 'paused header should expose clickable enable-autopilot hitbox')
+})
+
+test('detectAutopilotRunning and stopAutopilot call orca automation and admin stop', async () => {
+  const baseConfig = {
+    configPath: '/tmp/autopilot.json',
+    dbPath: '/tmp/state.sqlite3',
+    repository: 'acme/demo-app',
+    repoPath: '/tmp/demo-app',
+    runtimeAdminPath: '/tmp/autopilot_admin.py',
+    defaultAgent: 'codex',
+    allowedAgents: ['codex'],
+    label: 'agent-ready',
+    maxConcurrentWorkers: 3,
+    maxAttempts: 2,
+    pollIntervalSeconds: 60,
+    workerTimeoutSeconds: 2700,
+    heartbeatTimeoutSeconds: 900,
+    publication: 'auto-merge' as const,
+    mergeMethod: 'squash' as const,
+    preMergeCommands: [],
+    requireCi: true,
+    automationId: 'auto-123'
+  }
+
+  const pausedRunner: CommandRunner = async (cmd, args) => {
+    if (cmd === 'orca' && args[0] === 'automations' && args[1] === 'show') {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ result: { automation: { id: 'auto-123', enabled: false } } }),
+        stderr: ''
+      }
+    }
+    return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+  }
+  assert.equal(await detectAutopilotRunning(baseConfig, pausedRunner), false)
+
+  const enabledRunner: CommandRunner = async (cmd, args) => {
+    if (cmd === 'orca' && args[0] === 'automations' && args[1] === 'show') {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ result: { automation: { id: 'auto-123', enabled: true } } }),
+        stderr: ''
+      }
+    }
+    return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+  }
+  assert.equal(await detectAutopilotRunning(baseConfig, enabledRunner), true)
+
+  const calls: Array<{ cmd: string; args: string[] }> = []
+  const stopRunner: CommandRunner = async (cmd, args) => {
+    calls.push({ cmd, args })
+    return { exitCode: 0, stdout: '{"status":"stopped"}', stderr: '' }
+  }
+  const msg = await stopAutopilot({ repoPath: '/tmp/demo-app', runner: stopRunner })
+  assert.match(msg, /已暂停自动处理循环/)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]?.cmd, 'python3')
+  assert.equal(calls[0]?.args[1], 'stop')
+  assert.equal(calls[0]?.args[2], '--repo-path')
+  assert.equal(calls[0]?.args[3], '/tmp/demo-app')
 })

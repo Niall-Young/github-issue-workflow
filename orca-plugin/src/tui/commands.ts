@@ -11,6 +11,7 @@ export type SlashCommandId =
   | 'issues'
   | 'prs'
   | 'autopilot'
+  | 'stop'
   | 'paste'
   | 'clear'
   | 'quit'
@@ -97,8 +98,16 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
     id: 'autopilot',
     name: '/autopilot',
     aliases: ['auto'],
-    label: '开启自动处理',
-    description: '为当前项目配置或启用自动处理循环'
+    label: '自动处理开关',
+    description: '开启或暂停自动处理循环 (/autopilot on|off)',
+    takesArg: true
+  },
+  {
+    id: 'stop',
+    name: '/stop',
+    aliases: ['pause', 'off'],
+    label: '暂停自动处理',
+    description: '暂停当前项目的自动处理循环（保留状态，可随时重开）'
   },
   {
     id: 'paste',

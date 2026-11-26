@@ -24,6 +24,7 @@ import {
   readLedgerIssues,
   resolveGitRepository,
   resolvePreferredAgent,
+  type AutopilotConfigInfo,
   type CommandRunner
 } from '../board-data'
 import type {
@@ -402,6 +403,38 @@ export async function collectOrcaAgentState(
   }
 }
 
+export async function detectAutopilotRunning(
+  autopilot: AutopilotConfigInfo | null,
+  runner: CommandRunner = defaultRunner
+): Promise<boolean> {
+  if (!autopilot) return false
+  if (!autopilot.automationId) return true
+  try {
+    const res = await runner(
+      'orca',
+      ['automations', 'show', autopilot.automationId, '--json'],
+      { timeoutMs: 6_000 }
+    )
+    if (res.exitCode !== 0 || !res.stdout.trim()) return true
+    const parsed = JSON.parse(res.stdout) as {
+      enabled?: unknown
+      isEnabled?: unknown
+      automation?: { enabled?: unknown; isEnabled?: unknown }
+      result?: {
+        enabled?: unknown
+        isEnabled?: unknown
+        automation?: { enabled?: unknown; isEnabled?: unknown }
+      }
+    }
+    const target = parsed.result?.automation ?? parsed.automation ?? parsed.result ?? parsed
+    if (typeof target?.enabled === 'boolean') return target.enabled
+    if (typeof target?.isEnabled === 'boolean') return target.isEnabled
+    return true
+  } catch {
+    return true
+  }
+}
+
 export async function loadBoardSnapshot(
   targetPath: string,
   pendingHandoffs: Map<string, PendingHandoff>,
@@ -418,13 +451,15 @@ export async function loadBoardSnapshot(
   const repository = gitInfo.repository
   const autopilot = findAutopilotConfigForRepo(repoPath, repository)
 
-  const [ledgerRows, ghResult, pullRequests, agentState, installedAgents] = await Promise.all([
-    autopilot ? readLedgerIssues(autopilot.dbPath, runner) : Promise.resolve([]),
-    fetchGithubIssuesWithStatus(repoPath, runner),
-    fetchGithubPullRequests(repoPath, runner),
-    collectOrcaAgentState(repoPath, runner),
-    listInstalledAgents(runner)
-  ])
+  const [ledgerRows, ghResult, pullRequests, agentState, installedAgents, autopilotRunning] =
+    await Promise.all([
+      autopilot ? readLedgerIssues(autopilot.dbPath, runner) : Promise.resolve([]),
+      fetchGithubIssuesWithStatus(repoPath, runner),
+      fetchGithubPullRequests(repoPath, runner),
+      collectOrcaAgentState(repoPath, runner),
+      listInstalledAgents(runner),
+      detectAutopilotRunning(autopilot, runner)
+    ])
   const githubIssues = ghResult.issues
 
   const preferredAgent = await resolvePreferredAgent(
@@ -863,7 +898,7 @@ export async function loadBoardSnapshot(
     repository: autopilot?.repository || repository,
     repoPath,
     autopilotInstalled: Boolean(autopilot),
-    autopilotRunning: Boolean(autopilot),
+    autopilotRunning,
     defaultAgent: autopilot?.defaultAgent ?? null,
     allowedAgents: autopilot?.allowedAgents ?? [],
     installedAgents,
@@ -1082,6 +1117,29 @@ export async function saveAgentConfig(params: {
     throw new Error(res.stderr.trim() || res.stdout.trim() || '保存 Agent 配置失败')
   }
   return `已更新执行 Agent 为 ${params.defaultAgent.trim()}（允许：${normalizedAllowed.join(', ')}）`
+}
+
+export async function stopAutopilot(params: {
+  repoPath: string
+  runner?: CommandRunner
+}): Promise<string> {
+  const runner = params.runner ?? defaultRunner
+  const existing = findAutopilotConfigForRepo(params.repoPath, null)
+  const adminScript =
+    findBundledAutopilotAdmin(resolvePluginRootFromTui()) ||
+    (existing && existing.runtimeAdminPath)
+  if (!adminScript) {
+    throw new Error('未找到 autopilot_admin.py，请先确认已安装 github-issue-autopilot')
+  }
+  const res = await runner(
+    'python3',
+    [adminScript, 'stop', '--repo-path', params.repoPath],
+    { timeoutMs: 30_000 }
+  )
+  if (res.exitCode !== 0) {
+    throw new Error(res.stderr.trim() || res.stdout.trim() || '暂停自动处理循环失败')
+  }
+  return '已暂停自动处理循环（保留状态，可随时重新开启）'
 }
 
 export async function openUrlInBrowser(

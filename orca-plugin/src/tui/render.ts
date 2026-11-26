@@ -251,8 +251,31 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   }
   col += 2
   if (snap) {
-    if (snap.autopilotInstalled) {
-      col += buf.writeText(col, 0, '● 自动处理', PALETTE.green)
+    if (snap.autopilotInstalled && snap.autopilotRunning) {
+      const badgeStart = col
+      const maxBadgeW = Math.max(0, width - col - rightStatusW - 3)
+      const activeW = buf.writeText(col, 0, '● 自动处理', PALETTE.green, maxBadgeW)
+      col += activeW
+      const remainW = Math.max(0, maxBadgeW - activeW)
+      const stopW =
+        remainW >= 7 ? buf.writeText(col, 0, ' [关闭]', PALETTE.dim, remainW) : 0
+      col += stopW
+      const totalW = activeW + stopW
+      if (totalW > 0) {
+        buf.addHitBox(badgeStart, 0, totalW, 1, 'stop-autopilot')
+      }
+    } else if (snap.autopilotInstalled && !snap.autopilotRunning) {
+      const autoW = buf.writeText(
+        col,
+        0,
+        '○ 已暂停自动处理 [开启]',
+        PALETTE.amber,
+        Math.max(0, width - col - rightStatusW - 3)
+      )
+      if (autoW > 0) {
+        buf.addHitBox(col, 0, autoW, 1, 'enable-autopilot')
+        col += autoW
+      }
     } else {
       const autoW = buf.writeText(
         col,

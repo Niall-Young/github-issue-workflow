@@ -69,6 +69,7 @@ export type AutopilotConfigInfo = {
   mergeMethod: 'squash' | 'merge' | 'rebase' | null
   preMergeCommands: string[]
   requireCi: boolean | null
+  automationId?: string | null
 }
 
 export type HandoffSkillPaths = {
@@ -147,6 +148,7 @@ export function findAutopilotConfigForRepo(
           require_ci?: boolean
         }
         orca?: { default_agent?: string; allowed_agents?: string[] }
+        scheduler?: { backend?: string; automation_id?: string }
         repositories?: Array<{ repository?: string; repo_path?: string; labels?: string[] }>
       }
       const entry = raw.repositories?.[0]
@@ -203,7 +205,8 @@ export function findAutopilotConfigForRepo(
           preMergeCommands: Array.isArray(raw.policy?.pre_merge_commands)
             ? raw.policy.pre_merge_commands.map((c) => String(c)).filter(Boolean)
             : [],
-          requireCi: typeof raw.policy?.require_ci === 'boolean' ? raw.policy.require_ci : null
+          requireCi: typeof raw.policy?.require_ci === 'boolean' ? raw.policy.require_ci : null,
+          automationId: raw.scheduler?.automation_id?.trim() || null
         }
       }
     } catch {

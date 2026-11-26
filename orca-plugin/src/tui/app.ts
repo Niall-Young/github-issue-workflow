@@ -28,6 +28,7 @@ import {
   replyToAgentTerminal,
   runIssueAdminAction,
   saveAgentConfig,
+  stopAutopilot,
   submitIssueFromTui,
   type PendingHandoff
 } from './orca-cli'
@@ -362,8 +363,21 @@ export class IssueBoardTui {
       case 'prs':
         this.dispatchAction('switch-tab', 'prs')
         return
-      case 'autopilot':
-        void this.handleEnableAutopilot()
+      case 'autopilot': {
+        const lower = arg.trim().toLowerCase()
+        if (['off', 'stop', 'pause', 'disable', '关闭', '暂停'].includes(lower)) {
+          void this.handleStopAutopilot()
+        } else if (['on', 'start', 'resume', 'enable', '开启', '恢复'].includes(lower)) {
+          void this.handleEnableAutopilot()
+        } else if (this.state.snapshot?.autopilotInstalled && this.state.snapshot?.autopilotRunning) {
+          void this.handleStopAutopilot()
+        } else {
+          void this.handleEnableAutopilot()
+        }
+        return
+      }
+      case 'stop':
+        void this.handleStopAutopilot()
         return
       case 'paste':
         void this.handlePasteClipboardImage()
@@ -447,6 +461,9 @@ export class IssueBoardTui {
         return
       case 'enable-autopilot':
         void this.handleEnableAutopilot()
+        return
+      case 'stop-autopilot':
+        void this.handleStopAutopilot()
         return
       case 'open-url':
         if (typeof payload === 'string' && payload.trim()) {
@@ -985,14 +1002,36 @@ export class IssueBoardTui {
     const snap = this.state.snapshot
     const repoPath = snap?.repoPath || this.targetPath
     const agent = snap?.defaultAgent || snap?.preferredAgent || 'codex'
+    const allowedAgents = snap?.allowedAgents?.length ? snap.allowedAgents : [agent]
     this.state.loading = true
     this.render()
     try {
       await saveAgentConfig({
         repoPath,
         defaultAgent: agent,
-        allowedAgents: [agent]
+        allowedAgents
       })
+      void this.refresh(true)
+    } catch (err) {
+      this.state.loading = false
+      this.showError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  private async handleStopAutopilot() {
+    const snap = this.state.snapshot
+    if (snap && !snap.autopilotInstalled) {
+      this.showError('当前项目尚未开启自动处理循环')
+      return
+    }
+    const repoPath = snap?.repoPath || this.targetPath
+    this.state.loading = true
+    this.render()
+    try {
+      await stopAutopilot({ repoPath })
+      if (this.state.snapshot) {
+        this.state.snapshot.autopilotRunning = false
+      }
       void this.refresh(true)
     } catch (err) {
       this.state.loading = false

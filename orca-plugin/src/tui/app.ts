@@ -101,7 +101,7 @@ export class IssueBoardTui {
 
   start() {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
-      console.error('orca-board 需要在交互式终端（TTY）中运行。')
+      console.error('orca-autopilot 需要在交互式终端（TTY）中运行。')
       process.exit(1)
     }
 

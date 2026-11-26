@@ -127,8 +127,8 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
     id: 'quit',
     name: '/quit',
     aliases: ['exit', 'q'],
-    label: '退出看板',
-    description: '关闭 orca-board 返回终端'
+    label: '退出控制台',
+    description: '关闭 orca-autopilot 返回终端'
   }
 ] as const
 

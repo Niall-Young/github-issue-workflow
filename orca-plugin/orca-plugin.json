@@ -1,9 +1,9 @@
 {
   "manifestVersion": 2,
-  "id": "issue-board",
-  "name": "Issue 看板",
+  "id": "orca-autopilot",
+  "name": "Orca Autopilot",
   "version": "0.2.1",
-  "description": "面向终端的轻量 Issue 看板：在 Orca 状态栏展示待处理徽标，点击或快捷键一键在终端打开纯 TUI 看板。",
+  "description": "Orca 的 GitHub Issue 自动驾驶插件：状态栏展示待处理徽标，点击或快捷键一键在终端打开纯 TUI 控制台。",
   "license": "MIT",
   "repository": "https://github.com/Niall-Young/github-issue-workflow",
   "engines": {
@@ -22,24 +22,24 @@
   "contributes": {
     "commands": [
       {
-        "id": "open-board",
-        "title": "在终端打开当前项目的 Issue 看板 (TUI)"
+        "id": "open-autopilot",
+        "title": "在终端打开当前项目的 Orca Autopilot 控制台 (TUI)"
       }
     ],
     "keybindings": [
       {
-        "command": "open-board",
+        "command": "open-autopilot",
         "key": "Mod+Shift+I"
       }
     ],
     "statusBarItems": [
       {
-        "id": "board-status",
-        "text": "Issue 看板",
+        "id": "autopilot-status",
+        "text": "Autopilot",
         "icon": "terminal",
         "tone": "neutral",
-        "tooltip": "在终端打开当前项目的 Issue 看板 (TUI)",
-        "command": "open-board"
+        "tooltip": "在终端打开当前项目的 Orca Autopilot 控制台 (TUI)",
+        "command": "open-autopilot"
       }
     ],
     "events": [

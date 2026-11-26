@@ -383,7 +383,7 @@ export function buildHandoffPrompt(params: {
 
   const lines: string[] = [
     `请严格按照 \`github-issue-handoff\` Skill 为目标仓库创建一条高质量、Agent 可直接执行的中文 GitHub Issue。`,
-    `用户已在 Orca Issue 看板中明确点击提交，本请求已授权直接创建符合门禁的单条 Issue（无需额外预览确认；仅当关键信息缺失无法通过门禁、检测到高置信度重复 Issue、或需要拆分为多条独立任务时，再在当前终端向用户提问确认）。`
+    `用户已在 Orca Autopilot 控制台中明确点击提交，本请求已授权直接创建符合门禁的单条 Issue（无需额外预览确认；仅当关键信息缺失无法通过门禁、检测到高置信度重复 Issue、或需要拆分为多条独立任务时，再在当前终端向用户提问确认）。`
   ]
 
   if (params.skillPaths) {

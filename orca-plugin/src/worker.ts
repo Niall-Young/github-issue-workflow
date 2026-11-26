@@ -191,13 +191,13 @@ export default function activate(orca: OrcaWorkerApi) {
       if (!summary) return
       const count = summary.needsYou.length
       await orca.host.call('statusBar.update', {
-        id: 'board-status',
-        text: count > 0 ? `Issue 看板 · ${count} 待处理` : 'Issue 看板',
+        id: 'autopilot-status',
+        text: count > 0 ? `Autopilot · ${count} 待处理` : 'Autopilot',
         tone: count > 0 ? 'warning' : 'neutral',
         tooltip:
           count > 0
-            ? `${summary.projectName} 有 ${count} 件事需要你回复或确认（点击打开终端 TUI）`
-            : `在终端打开 ${summary.projectName} 的 Issue 看板 (TUI)`
+            ? `${summary.projectName} 有 ${count} 件事需要你回复或确认（点击打开 Orca Autopilot）`
+            : `在终端打开 ${summary.projectName} 的 Orca Autopilot 控制台 (TUI)`
       })
 
       for (const item of summary.needsYou) {
@@ -218,7 +218,7 @@ export default function activate(orca: OrcaWorkerApi) {
     const { workspaceId, repoPath } = await resolveActiveWorkspace()
     if (!workspaceId || !repoPath) {
       void orca.host.call('notifications.show', {
-        title: '无法打开 Issue 看板',
+        title: '无法打开 Orca Autopilot',
         body: '请先在 Orca 左侧选择一个项目工作区。'
       })
       return '未检测到当前项目工作区'
@@ -229,7 +229,7 @@ export default function activate(orca: OrcaWorkerApi) {
       try {
         const focused = await orca.host.call('terminal.focus', { terminalId: existingTerminalId })
         if (focused.focused) {
-          return `已切换到 ${basename(repoPath)} 的终端 Issue 看板`
+          return `已切换到 ${basename(repoPath)} 的 Orca Autopilot 终端控制台`
         }
       } catch {
         activeBoardTerminals.delete(workspaceId)
@@ -239,7 +239,7 @@ export default function activate(orca: OrcaWorkerApi) {
     const command = `if command -v bun >/dev/null 2>&1; then exec bun ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; else exec node ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; fi`
     const created = await orca.host.call('terminal.create', {
       workspaceId,
-      title: `Issue 看板 · ${basename(repoPath)}`,
+      title: `Orca Autopilot · ${basename(repoPath)}`,
       command
     })
     activeBoardTerminals.set(workspaceId, created.terminalId)
@@ -248,10 +248,10 @@ export default function activate(orca: OrcaWorkerApi) {
     } catch {
       // ignore focus failure on headless host
     }
-    return `已在终端打开 ${basename(repoPath)} 的 Issue 看板`
+    return `已在终端打开 ${basename(repoPath)} 的 Orca Autopilot 控制台`
   }
 
-  orca.commands.register('open-board', async () => {
+  orca.commands.register('open-autopilot', async () => {
     return await openTerminalBoard()
   })
 

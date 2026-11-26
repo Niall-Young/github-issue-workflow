@@ -232,7 +232,7 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   const snap = state.snapshot
 
   // ── Top Header (rows 0..1) ────────────────────────────────────────────────
-  const projectLabel = snap ? snap.projectName : 'Issue 看板'
+  const projectLabel = snap ? snap.projectName : 'Orca Autopilot'
   const repoLabel = snap?.repository ? ` ${snap.repository}` : ''
   const agentName = snap?.defaultAgent || snap?.preferredAgent || 'Agent'
   const syncText = state.loading

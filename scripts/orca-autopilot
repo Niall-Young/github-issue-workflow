@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command terminal TUI launcher and installer for the Orca Issue Board."""
+"""One-command terminal TUI launcher and installer for Orca Autopilot."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO_ROOT / "orca-plugin"
 TUI_ENTRY = PLUGIN_DIR / "src" / "tui" / "app.ts"
-DEFAULT_PLUGIN_KEY = "local.issue-board"
-CLI_NAMES = ("orca-board", "issue-board")
+DEFAULT_PLUGIN_KEY = "local.orca-autopilot"
+CLI_NAMES = ("orca-autopilot", "orca-board")
 
 
 def run_cmd(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -76,7 +76,7 @@ def find_plugin(runner=run_cmd) -> tuple[dict | None, str | None]:
         key = plugin.get("pluginKey", "")
         if key == DEFAULT_PLUGIN_KEY:
             return plugin, None
-        if key.endswith(".issue-board") and fallback is None:
+        if key.endswith(".orca-autopilot") and fallback is None:
             fallback = plugin
     return fallback, None
 
@@ -87,7 +87,7 @@ def extract_fingerprint(text: str) -> str | None:
 
 
 def prompt_for_approval(plugin_key: str, fingerprint: str, input_fn=input) -> bool:
-    print(f"首次使用（或插件权限更新后）需要授权 Orca 状态栏插件（{plugin_key}）。")
+    print(f"首次使用（或插件权限更新后）需要授权 Orca Autopilot 插件（{plugin_key}）。")
     try:
         answer = input_fn("按回车确认授权，输入 n 取消 [Y/n]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -190,8 +190,8 @@ def launch_tui(target: Path) -> int:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="orca-board",
-        description="在当前终端运行纯终端 Issue 看板 (TUI)，支持鼠标点击与快捷键。",
+        prog="orca-autopilot",
+        description="在当前终端运行 Orca Autopilot 控制台 (TUI)，支持鼠标点击与快捷键。",
     )
     parser.add_argument(
         "path",
@@ -202,7 +202,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--install",
         action="store_true",
-        help="安装 orca-board / issue-board 命令到 ~/.local/bin，并可选同步 Orca 状态栏启动器插件",
+        help="安装 orca-autopilot（含兼容别名 orca-board）到 ~/.local/bin，并可选同步 Orca 状态栏插件",
     )
     parser.add_argument(
         "--no-plugin",
@@ -238,10 +238,10 @@ def main(argv: list[str] | None = None) -> int:
             if not args.no_plugin:
                 try:
                     ensure_plugin_ready()
-                    print("Orca 状态栏插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开 TUI）。")
+                    print("Orca Autopilot 状态栏插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开控制台）。")
                 except (RuntimeError, FileNotFoundError) as exc:
-                    print(f"提示：Orca 状态栏插件跳过（{exc}），不影响终端直接运行 `orca-board`。")
-            print("以后在任意项目目录直接运行 `orca-board` 即可启动终端 Issue 看板。")
+                    print(f"提示：Orca 状态栏插件跳过（{exc}），不影响终端直接运行 `orca-autopilot`。")
+            print("以后在任意项目目录直接运行 `orca-autopilot` 即可启动终端控制台。")
             return 0
 
         target = Path(args.path).expanduser() if args.path else Path.cwd()

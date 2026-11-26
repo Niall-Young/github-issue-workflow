@@ -56,7 +56,7 @@ def build(tag: str, commit: str, output: Path, *, full: bool = False) -> tuple[P
         if plugin_manifest["version"] != version:
             raise SystemExit(f"tag {tag} does not match Orca plugin version")
         board_files = [
-            ROOT / "LICENSE", ROOT / "README.md", ROOT / "ROADMAP.md", ROOT / "scripts/orca-board",
+            ROOT / "LICENSE", ROOT / "README.md", ROOT / "ROADMAP.md", ROOT / "scripts/orca-autopilot",
             plugin / "orca-plugin.json", plugin / "README.md", plugin / "tsconfig.json",
             plugin / plugin_manifest["main"], plugin / "src/tui/app.ts",
             *(plugin / "src").rglob("*.ts"),

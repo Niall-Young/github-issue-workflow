@@ -1,10 +1,10 @@
-# GitHub Issue Workflow
+# Orca Autopilot
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-创建 Agent 可直接接手的 GitHub Issue，自动发现新任务，并在干净 Agent 上下文中完成受控修复。
+面向 Orca 的 GitHub Issue 自动驾驶插件与纯终端控制台：一句话提单，Agent 在隔离 worktree 中自动修复、独立 Review、开 PR、解冲突并自动合并，仅把需要你拍板的事项送到「待处理」队列。
 
-Create agent-ready GitHub Issues, detect new assignments automatically, and run controlled repairs in clean agent contexts.
+An Orca plugin and pure-terminal console for unattended GitHub Issue autopilot: file an Issue in plain language, let Agents fix it in isolated worktrees with independent review, PR creation, conflict resolution, and auto-merge, while surfacing only human decisions in a Needs You queue.
 
 [中文](#中文) | [English](#english)
 
@@ -15,201 +15,213 @@ Create agent-ready GitHub Issues, detect new assignments automatically, and run 
 
 ### 项目简介
 
-这是一个面向 Agent 开发流程的技能包，包含四个权限独立、可组合的 Skill：`github-issue-handoff` 把仓库上下文和用户意图交接成可执行 Issue；`github-issue-repair` 在隔离 worktree 中修复既有 Issue；`github-issue-autopilot` 自动发现符合本地策略的 open Issue，并在 Orca 中启动可见的 Agent 任务；`github-issue-workflow-update` 从最新稳定 Release 更新整套本地安装。
+**Orca Autopilot** 将 GitHub Issue 从「提出需求」到「代码合入主干」的全流程接入 Orca 工作区，由三层组件协同构成：
 
-从旧版本升级时，请删除运行时中的 `github-issue-creator/` 安装副本，再安装 `github-issue-handoff/`，并把显式调用改为 `$github-issue-handoff`，避免新旧技能同时被发现。
+```text
+一句话提单 (TUI / Skill)
+  → 自动认领带 agent-ready 的 Issue（最多 3 并发隔离 worktree）
+  → Agent 实现 + 自测 + 独立 Reviewer 复核
+  → 自动 pre-merge 检查、push、建 PR、轮询 CI、自动解冲突、squash 合并、同步本地分支
+  → 仅将提问、权限审批、冲突熔断或待验收项推送到「待处理」队列与 Orca 状态栏
+```
+
+- **极简 Orca 插件**（`orca-plugin/`）：在 Orca 状态栏实时展示 `Autopilot · N 待处理` 徽标与桌面通知，点击状态栏或按 `Cmd+Shift+I` 一键在终端标签页打开控制台。
+- **纯终端 TUI 控制台**（`orca-autopilot`）：零外部依赖的原生全屏终端界面（无 Webview 开销），支持鼠标点击、滚轮、拖拽文件与粘贴截图，在任意项目目录秒开。
+- **四个可独立组合的底层 Skill**：`github-issue-handoff`（规范提单）、`github-issue-repair`（受控修复）、`github-issue-autopilot`（本地自动调度器）与 `github-issue-workflow-update`（稳定 Release 更新器），既驱动插件闭环，也可在 Agent 会话中单独调用。
 
 ### 核心能力
 
-- `github-issue-handoff`：校验仓库、检索重复项、套用 Feature / Bug / Refactor / Research 模板，通过可执行性门禁后创建并回读中文 Issue。
-- `github-issue-repair`：把 Issue 归一化为工作包，识别依赖、重复、同根因与冲突关系；仓库 URL 默认只做只读分诊。
-- `github-issue-autopilot`：一句话为当前仓库安装本地循环，领取由当前用户创建且带 `agent-ready` 的全部 open Issue，包括启用前已创建的积压任务，并调用 `$github-issue-repair`。
-- `github-issue-workflow-update`：用户说“检查 issue-workflow 更新”时只读比较版本，说“更新 issue-workflow”时覆盖当前 Agent 运行时中的四个官方 Skill，并同步已安装的 Autopilot runtime。
-- `orca-plugin` + `orca-board`（纯终端 Issue 看板 TUI）：零外部依赖的原生全屏终端 TUI（Alternate Screen + SGR 1006 鼠标点击/滚轮，无 Webview 开销），任意项目目录运行 `orca-board` 即可在当前终端秒开；采用类 AI 对话式**常驻底部输入框**（输入需求按 `Enter` 直接提单，默认启用 `github-issue-handoff` Skill 规范提单 `handoff` 唤起 Agent 查重并按模板提单，可在底部状态栏点击模式项或通过 `/direct` 切换为「快速直提」；支持 `Shift+Enter` 换行、`Ctrl+V` 粘贴 macOS 剪贴板截图与拖入文件路径，附件会自动转为内联 `[Image #1]` / `[File #1]` 标识符，单行内联展示、支持 `Backspace` 整块退格删除；输入框下方以类 Codex 状态栏直接展示当前选中的 Issue 类型（默认「新功能」，支持 `Shift+Tab` 快捷键或点击轮询切换「新功能 / 修 Bug / 体验优化」）与提单模式（默认高亮显示 `✓ handoff 规范提单`，切换为直提后灰显 `○ direct 快速直提`）），并内置 Claude Code 风格**内联斜杠命令列表**（输入 `/` 选择 `/bug`、`/feature`、`/polish`、`/handoff`、`/direct`、`/agent`、`/refresh`、`/issues`、`/prs`、`/autopilot`、`/stop`、`/paste`、`/clear`、`/quit`；顶部状态标识支持点击 `● 自动处理 [关闭]` / `○ 已暂停自动处理 [开启]` 一键暂停或恢复自动处理循环），支持 Issues（进行中 / 已完成）与 PRs（打开中 / 历史、CI 与冲突状态）双视图切换，以及右侧「待处理」队列（涵盖 Agent 提问/权限审批、提单或自动修复纯文字停顿追问、提单中断/卡死告警、非自动合并模式下的待验收/待 Review Issue、本地分支与远端分叉/冲突告警及「一键自动合并」、GitHub CLI 鉴权与 Autopilot 停摆告警，支持一键同意/回复、重试/放弃、重新提单、一键自动合并与忽略）；保留极简 Orca 插件仅用于状态栏待处理徽标（同步覆盖 `blocked`/`waiting`/`permission`/`done`/`idle` 与系统告警）、桌面通知与 `Cmd+Shift+I` 一键在终端标签页唤起 TUI。
-- 修复 worker 使用 Orca 管理的项目子 worktree，不修改用户正在使用的工作树；当本地当前分支领先远端或无上游跟踪分支时，自动通过 `--base-branch` 基于本地最新分支创建子 worktree，无需先手动 `git push`；看板插件也会自动检测并刷新过期的 Autopilot runtime 副本。一次记录全部合格 Issue，最多并发 3 个任务。
-- 独立 reviewer 核对验收标准、验证证据、范围漂移和测试弱化。
-- 双层账本（SQLite schema v5）以 Issue node ID 防止重复派单，记录跨 Issue 前置依赖、每次 attempt 的所选 Agent、Orca Task/Dispatch/worktree、分支、base/head SHA、PR 链接、合并时间、心跳与失败 `.patch` 归档路径。
-- 交互模式仍由用户批准本地修改与发布；Autopilot 默认采用 `publication: "auto-merge"` 无人值守双闭环——Worker 在隔离 worktree 内完成实现、自测和独立 review，协调器确定性执行 `pre_merge_commands`、自动 push 与建 PR、验证 CI 通过且无冲突后自动合并 PR、关闭 Issue 并清理 worktree，用户只需最终 review 合并成果（也可切换为 `pr-only` 或 `never`）。
+#### 1. 纯终端控制台 TUI（`orca-autopilot`）
+- **对话式底部输入框**：固定单行输入，长文本横向滚动，`Shift+Enter` 换行；支持 `Ctrl+V` 粘贴 macOS 剪贴板截图与拖入文件路径，附件以内联 `[Image #1]` / `[File #1]` 标识符展示，按 `Backspace` 可整块删除。
+- **双模式提单与类型切换**：默认以 `✓ handoff 规范提单` 唤起 `github-issue-handoff` 查重并套用模板，也可点击底部状态栏或执行 `/direct` 切换为 `○ direct 快速直提`；按 `Shift+Tab` 或点击可在「新功能 / 修 Bug / 体验优化」间切换。
+- **内联斜杠命令**：输入 `/` 展开 Claude Code 风格命令菜单（`/bug`、`/feature`、`/polish`、`/handoff`、`/direct`、`/agent`、`/refresh`、`/issues`、`/prs`、`/autopilot`、`/stop`、`/paste`、`/clear`、`/quit`），顶部状态徽标支持一键暂停/恢复自动处理循环。
+- **双视图与「待处理」介入队列**：支持 Issues（进行中 / 已完成）与 PRs（打开中 / 历史、CI 与冲突状态）切换；右侧「待处理」集中汇总 Agent 提问/权限审批、纯文字停顿追问、提单卡死告警、待验收任务、本地分支分叉冲突（「一键自动合并」）以及 `gh` 鉴权/Autopilot 停摆告警，支持一键同意、回复（可附截图/文件）、重试/放弃、重新提单与忽略。
+
+#### 2. 无人值守 Autopilot 闭环
+- **隔离并发调度**：通过 Orca 原生 Automation 每 3 分钟无模型预检一次（仅协调器缺失时恢复），一次入账全部符合策略的 open Issue（含启用前积压），最多 3 个任务在 Orca 子 worktree 中并发执行，不修改用户当前工作树；本地分支领先远端或无上游时自动传入 `--base-branch`。
+- **依赖图与超时保护**：识别正文中的同仓前置依赖（`Blocked by: #1`、`Depends on: #1`、`前置依赖: #1`），前置未完成前自动等待并检测依赖环标记为 `blocked`；运行中持续刷新心跳，超过硬超时（默认 45 分钟）或无输出心跳超时（默认 15 分钟）自动回收 Dispatch 并归档 `.patch`。
+- **双闭环自动合并**：默认采用 `publication: "auto-merge"`——Worker 完成实现、自测与独立 Reviewer 核对后，协调器确定性执行 `pre_merge_commands`、push 并建 PR、轮询 CI 与合并状态；若出现冲突先尝试无冲突合并最新基线，必要时在 `policy.max_conflict_resolutions`（默认 `2` 次）上限内自动派发解冲突 Worker 原地更新 PR；CI 通过后自动 `squash` 合并、关 Issue、清 worktree，并零 token 同步本地分支（`policy.sync_local_branch`，默认 `true`），失败则熔断为 `needs-human` 并保留 `.patch`。也可切换为 `pr-only` 或 `never`。
+- **双层防重账本**：SQLite schema v5 以不可变 Issue node ID 防止重复派单，记录前置依赖、所选 Agent、Orca Task/Dispatch/worktree、分支、base/head SHA、PR 链接、合并时间、心跳与失败 `.patch` 路径；未完成的 `failed` attempt 默认最多自动重试至总计 2 次。
+
+#### 3. 四个底层 Agent Skill（可独立使用）
+- `github-issue-handoff`：校验仓库、查重、套用 Feature / Bug / Refactor / Research 模板并通过可执行性门禁后创建中文 Issue；安全问题自动走私有上报渠道。
+- `github-issue-repair`：将既有 Issue 归一化为工作包，交互模式下先只读分析、获批后再本地修改，用户检查 diff 后才 push / 建 draft PR；仅给仓库 URL 时只做只读分诊。
+- `github-issue-autopilot`：一句话为当前仓库安装/管理本地自动循环，支持单 Issue 通过 `agent:<id>` 标签覆盖默认 Agent。
+- `github-issue-workflow-update`：按需只读检查版本，或从最新稳定 Release 事务式更新四个官方 Skill 并同步已安装的 Autopilot runtime。
 
 ### 快速开始
 
 #### 环境要求
 
-- 正在运行的 Orca，以及至少一个可由 Orca 启动的 Agent（如 Codex、Claude 或 OMP）
-- 已认证的 GitHub CLI（`gh`）
+- 正在运行的 Orca（状态栏插件需要 Orca **1.4.259** 或更高版本），以及至少一个可由 Orca 启动的 Agent（如 Codex、Claude、OMP）
+- 已登录认证的 GitHub CLI（`gh`）
+- Python 3，以及 Bun（推荐）或 Node.js >= 22
 
-#### 安装
+#### 安装插件与终端命令
 
-从 [GitHub Release](https://github.com/Niall-Young/github-issue-workflow/releases/latest) 下载 `github-issue-workflow-full-vX.Y.Z.tar.gz`，内含终端看板 CLI、Orca 插件和四个 Skill。将它解压到长期保留的目录，在解压目录运行 `./scripts/orca-board --install`，按提示授权插件。安装器将两个命令链接到该目录，请将 `~/.local/bin` 加入 PATH。安装 Python 3 和 Bun 后即可在项目里运行 `orca-board`；状态栏入口需要 Orca 1.4.259 或更高版本。仅安装终端命令可加 `--no-plugin`。四个 Skill 可按下文从解压目录复制，已有安装的 Skill 更新器继续使用同版本的 `github-issue-workflow-vX.Y.Z.tar.gz`。
+**方式一：从 Release 下载完整包（推荐）**
 
-推荐将下面的提示词直接复制到你的 Agent 会话中，让 Agent 根据其运行环境完成安装：
+从 [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest) 下载 `github-issue-workflow-full-vX.Y.Z.tar.gz`，解压到长期保留的目录后执行：
 
-```text
-帮我安装这个 skill 仓库中的四个技能：https://github.com/Niall-Young/github-issue-workflow
+```sh
+./scripts/orca-autopilot --install
 ```
 
-Agent 可能会根据运行环境请求必要的授权，或说明无法自动安装时的限制。
-
-如需手动安装，可克隆仓库，再将四个技能目录复制到 Agent 运行时的 skill 目录。以下命令以 Claude Code 的 `~/.claude/skills/` 为例；安装后请重新启动会话：
+**方式二：从源码仓库安装**
 
 ```sh
 git clone https://github.com/Niall-Young/github-issue-workflow.git
-cp -R github-issue-workflow/github-issue-handoff ~/.claude/skills/github-issue-handoff
-cp -R github-issue-workflow/github-issue-repair ~/.claude/skills/github-issue-repair
-cp -R github-issue-workflow/github-issue-autopilot ~/.claude/skills/github-issue-autopilot
-cp -R github-issue-workflow/github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
+cd github-issue-workflow
+./scripts/orca-autopilot --install
 ```
 
-#### 运行
+安装器会将 `orca-autopilot`（以及兼容别名 `orca-board`）链接到 `~/.local/bin`，并自动加载和引导授权 Orca 状态栏插件：
+- 请确保 `~/.local/bin` 在你的 `PATH` 中；
+- 如只需终端命令、不装 Orca 状态栏插件，可加 `--no-plugin`。
 
-单次创建和修复可在 Agent 会话中显式调用；自动调度器是本地常驻/定时命令：
+#### 打开与运行
+
+安装完成后，任选一种方式即可进入控制台：
+- 在 Orca 底部状态栏点击 **Autopilot**，或按快捷键 **`Cmd+Shift+I`**；
+- 在**任意项目目录的终端**直接运行：
 
 ```sh
-$github-issue-handoff <GitHub URL>
-$github-issue-repair <GitHub Issue URL>
-$github-issue-repair <GitHub Repository URL>
-python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex
-$github-issue-workflow-update 更新 issue-workflow
+orca-autopilot
 ```
+
+#### （可选）安装四个底层 Skill
+
+如果需要在 Agent 会话中直接调用 `$github-issue-handoff` / `$github-issue-repair` / `$github-issue-autopilot` / `$github-issue-workflow-update`，可将下面提示词发给你的 Agent：
+
+```text
+帮我安装这个仓库中的四个技能：https://github.com/Niall-Young/github-issue-workflow
+```
+
+或手动复制到你的 Agent Skill 目录（以 Claude Code 为例，安装后重启会话）：
+
+```sh
+cp -R github-issue-handoff ~/.claude/skills/github-issue-handoff
+cp -R github-issue-repair ~/.claude/skills/github-issue-repair
+cp -R github-issue-autopilot ~/.claude/skills/github-issue-autopilot
+cp -R github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
+```
+
+> 从旧版本升级时，请先删除运行时中的 `github-issue-creator/` 副本，再安装 `github-issue-handoff/`。
 
 ### 使用方法
 
-给出最小示例。显式调用技能即授权创建一条 Issue：
+#### 1. 在终端控制台中日常操作
+
+打开 `orca-autopilot` 后，直接在底部输入框输入需求并回车即可提单；常用快捷键与斜杠命令：
+
+| 操作 / 命令 | 说明 |
+| :--- | :--- |
+| `Enter` / `Shift+Enter` | 提交需求 / 换行 |
+| `Shift+Tab` | 轮询切换 Issue 类型（新功能 / 修 Bug / 体验优化） |
+| `Ctrl+V` 或拖入文件 | 粘贴 macOS 剪贴板截图或附加文件（生成 `[Image #1]` / `[File #1]`） |
+| `/bug` `/feature` `/polish` | 切换类型或直接附带描述提单 |
+| `/handoff` `/direct` | 切换「Skill 规范提单」与「快速直提」 |
+| `/agent` | 配置默认执行 Agent 与允许的 `agent:<id>` 覆盖列表 |
+| `/autopilot` `/stop` | 开启或暂停当前仓库的自动处理循环 |
+| `/issues` `/prs` `/refresh` `/quit` | 切换视图、手动刷新、退出控制台 |
+
+更多 TUI 交互细节见 [`orca-plugin/README.md`](orca-plugin/README.md)。
+
+#### 2. 管理仓库的 Autopilot 循环
+
+可在控制台执行 `/autopilot`，或在项目会话中对 Agent 说「构建 Issue 循环检查机制」，也可直接用命令行管理：
+
+```sh
+# 为仓库安装自动循环（支持 --publication auto-merge|pr-only|never 等策略参数）
+python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex
+
+# 查看已安装仓库与只读健康检查
+python3 github-issue-autopilot/scripts/autopilot_admin.py list
+python3 github-issue-autopilot/scripts/autopilot_admin.py doctor --repo-path /absolute/repository/root
+
+# 清理超过 24 小时的历史失败/废弃 worktree（保留 .patch 归档）
+python3 github-issue-autopilot/scripts/autopilot_admin.py prune --repo-path /absolute/repository/root --older-than-hours 24
+```
+
+移除 Orca 项目或删除本地仓库前，建议先结算未决任务再卸载：
+
+```sh
+python3 github-issue-autopilot/scripts/autopilot_admin.py stop --repository owner/repo
+python3 github-issue-autopilot/scripts/autopilot_admin.py discard --repo-path /absolute/repository/root --issue-url URL
+python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
+```
+
+`uninstall` 会拒绝未决任务，导出 Automation 历史，并将配置、SQLite 账本、日志与 runtime 副本归档到 `~/.local/state/github-issue-autopilot/archives/`，不会删除本地仓库。完整配置项见 [`github-issue-autopilot/references/configuration.md`](github-issue-autopilot/references/configuration.md)。
+
+#### 3. 单独调用底层 Skill
 
 ```sh
 $github-issue-handoff https://github.com/owner/repo 帮我排查登录接口偶发超时的问题
-```
-
-预期结果：技能按 Bug 模板生成一份中文 Issue，通过创建前门禁与去重检查后提交，并返回标题与可点击的 Issue URL。若仓库存在安全风险，则按 Security Policy 走私有上报渠道，不创建公开 Issue。
-
-修复一条既有 Issue：
-
-```sh
 $github-issue-repair https://github.com/owner/repo/issues/123
+$github-issue-repair https://github.com/owner/repo
 ```
-
-预期结果：技能先只读分析并展示工作包、base SHA、风险、预算和验证方案。用户批准后才允许本地修改；用户检查 diff 与证据并授权发布后，才允许 push 和创建 draft PR。仅提供仓库 URL 时，技能只输出有限候选批次，不会自动修复所有 Issue。
-
-在任意 GitHub 项目中说“构建 Issue 循环检查机制”，Autopilot 会运行确定性安装器，创建缺失的 `agent-ready` 标签、仓库独立配置、Orca 原生 Automation 与 Orca 协调器。Automation 可在 GUI 中暂停、恢复和查看历史；它每三分钟预检一次，只有协调器缺失时才调用 Agent 恢复，不会每轮消耗模型。全部合格 Issue 都会入账，最多三个在 Orca 左侧作为项目子 worktree 同时运行。若 Issue 正文声明了同仓前置依赖（如 `Blocked by: #1`、`Depends on: #1` 或 `前置依赖: #1`），调度器会在所有前置 Issue 于本地 `merged`/`accepted` 或在 GitHub 上 `CLOSED` 之前跳过领取，并自动检测依赖环标记为 `blocked`。运行中的 worker 会基于最新输出刷新 `last_heartbeat`；超过硬超时（`worker_timeout_seconds`，默认 45 分钟）或持续无新输出超过心跳阈值（`heartbeat_timeout_seconds`，默认 15 分钟）时，协调器会自动停止并释放 Dispatch，并把未提交/已提交改动归档为本地 `.patch` 文件。Worker 完成实现、自测与独立 review 后，默认 `publication: "auto-merge"` 模式下协调器会自动执行可选 `pre_merge_commands`、push 分支并创建 PR（`pr-open`），随后由 PR Loop 轮询 GitHub CI 与冲突状态；若 PR 出现合并冲突（`CONFLICTING` / `DIRTY`），协调器会先尝试在既有 worktree 内无冲突合并最新基线并推送更新，若存在真实冲突则在 `policy.max_conflict_resolutions`（默认 `2` 次，设为 `0` 可关闭）上限内自动重排冲突修复 worker，把解冲突并验证后的提交原地推送回同一个 PR 分支继续走 CI 与自动合并；全部通过后自动合并 PR（默认 `squash`）、关闭对应 Issue、清理 worktree，并零 AI / 零 token 消耗地安全同步本地目标分支（`policy.sync_local_branch`，默认 `true`：严格落后时 fast-forward，工作区干净且 `git merge-tree` 预检零冲突的分叉提交自动 rebase 同步；存在真实冲突或未提交改动时安全跳过，由看板右侧「待处理」提供「一键自动合并」交给 Agent 解决）（`merged`）并立即解锁下游依赖 Issue，用户只需最终 review 合并后的成果；若 CI 失败或自动解冲突次数用尽仍存在冲突，则熔断为 `needs-human` 并保留 `.patch` 现场。未完成的 `failed` attempt 若对应 Issue 仍 open 且符合策略，会在下一轮自动重试，默认总计最多两次；`pr-open`、`merged`、待验收、明确需人工或策略阻塞的结果不会自动重做。每个 Issue 的每次 attempt 必须使用从未被历史 attempt 或其他 Issue 使用过的 Orca Task、Dispatch、worktree ID 和绝对路径；身份复用或成功证据不完整会停止等待人工处理，不会退回手工或共享 worktree。安装时可用 `--agent`、`--publication`（`auto-merge`/`pr-only`/`never`）、`--merge-method`、`--pre-merge-command`、`--max-concurrent`、`--max-attempts`、`--worker-timeout`、`--heartbeat-timeout` 配置策略；单个 Issue 可用唯一 `agent:ID` 标签覆盖，冲突、禁用或不可用的 Agent 会停在可见的人工处理状态。历史失败/废弃且超过保留窗口的 worktree 可通过 `prune --older-than-hours 24 [--dry-run]` 在归档 `.patch` 后安全清理；如选择 `publication: "never"`，也仍支持显式 `accept` / `retry` / `discard`。详见 [`configuration.md`](github-issue-autopilot/references/configuration.md)。
 
 ### 更新机制
 
-更新不会在后台自动运行。首次安装 `github-issue-workflow-update` 后，只有用户明确要求检查或更新时，Agent 才会调用更新器：
+更新不会在后台自动运行。安装 `github-issue-workflow-update` 后，按需显式调用：
 
 ```sh
 $github-issue-workflow-update 检查 issue-workflow 更新
 $github-issue-workflow-update 更新 issue-workflow
 ```
 
-- **检查**是只读操作，只返回当前安装版本、最新稳定版本和是否有更新，不修改 Skill 或 Autopilot。
-- **更新**从 `Niall-Young/github-issue-workflow` 获取最新已发布的稳定 Release。即使版本号相同，也会重新安装官方文件以清除本地漂移；四个受管 Skill 中的手工修改会被覆盖。成功后建议新开会话，让 Agent 重新加载 Skill 指令。
-- 更新器先校验 Release 来源、版本、归档 SHA-256、清单、文件白名单和逐文件哈希，再对所有已安装的 Autopilot runtime 做只读预检。预检通过后，它事务式替换四个 Skill，同步 runtime，并回读验证 Orca Automation 和 runtime 文件。
-- Autopilot 的配置、SQLite 账本、日志、attempt 历史和 worktree 会保留。Skill、runtime 或 Automation 更新失败时会自动恢复旧状态；只有回滚本身也失败的罕见 `partial-update` 才需要人工恢复，Agent 必须明确报告受影响组件。
-- 更新范围仅限当前 Agent 运行时中的四个官方 Skill，以及由它们管理的已安装 Autopilot runtime。它不会执行 `git pull`、修改源码 checkout、更新其他 Skill，也不会扫描或改动其他 Agent 运行时。
-
-发布端以 `vMAJOR.MINOR.PATCH` tag 触发 GitHub Actions：先运行测试，再构建带版本清单、逐文件哈希和归档校验和的可复现包，最后发布稳定 Release。更新器只消费已发布的稳定 Release，拒绝 draft、prerelease、降级、校验失败和异常归档；仅推送 tag、但尚未成功生成稳定 Release 时，不会成为可安装更新。`v0.1.0` 是首个声明的发行版本。
-
-### 配置
-
-- 四个 Skill 的 `agents/openai.yaml` 提供 OpenAI 兼容 Agent 的界面配置并允许自动发现；技能发现本身不构成修改代码或远程写入授权。
-- `github-issue-repair/scripts/run_state.py` 使用 Python 标准库，在仓库 Git 公共目录中维护运行账本，无需额外依赖。
-- `github-issue-autopilot/scripts/autopilot_admin.py` 幂等安装、列举、检查、停用、验收、放弃、重做、清理陈旧失败 worktree（`prune`）、刷新 runtime 或卸载仓库循环；`issue_watcher.py` 负责全部合格 open Issue 的扫描、跨 Issue 依赖图阻塞调度、最多三任务领取、Orca 调度、心跳与硬超时回收、自动 push/建 PR、CI 检查与自动合并 PR、attempt 账本、失败 `.patch` 归档和 Git 证据回读。
-- `github-issue-workflow-update/scripts/update_workflow.py` 校验正式 Release 并事务式替换当前运行时；`scripts/build_release.py` 生成包含版本清单、逐文件哈希和归档校验和的可复现发布包。
-- 管理员级 `doctor` 同时检查 watcher、Orca Automation 的启用状态与安全字段，以及是否残留重复的旧 LaunchAgent，全程只读并返回可诊断字段。每轮扫描包含启用前已创建但当前仍符合作者与标签策略的 open Issue；不可变 Issue node ID 防止活动中、待验收或需人工的任务重复派单，同时允许失败任务在 `max_attempts` 上限内于下一轮续做。
-
-移除 Orca 项目或删除本地仓库前，先处理待验收和运行中的任务，再卸载自动化：
-
-```sh
-python3 github-issue-autopilot/scripts/autopilot_admin.py list
-python3 github-issue-autopilot/scripts/autopilot_admin.py stop --repository owner/repo
-python3 github-issue-autopilot/scripts/autopilot_admin.py discard --repo-path /absolute/repository/root --issue-url URL
-python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
-```
-
-仓库路径丢失、不再是原 Git 根目录或被移出 Orca 时，预检和协调器会自动暂停 Automation，不会删除账本或启动恢复 Agent。`list`、`stop`、`uninstall` 可在仓库已删除后按仓库名或不可变 ID 定位安装。`uninstall` 会拒绝未决任务，导出 Automation 历史，并把配置、SQLite、日志与 runtime 副本移入 `~/.local/state/github-issue-autopilot/archives/`；它不会删除本地仓库。
+- **检查**为只读操作，仅比较当前版本与最新稳定 Release；
+- **更新**从 `Niall-Young/github-issue-workflow` 拉取稳定 Release，校验来源、SHA-256、清单与逐文件哈希后事务式替换四个官方 Skill 并同步已安装的 Autopilot runtime，失败自动回滚（保留配置、SQLite 账本、日志、attempt 历史和 worktree）；
+- 插件与终端控制台的升级可通过下载最新 `github-issue-workflow-full-vX.Y.Z.tar.gz`（或 `git pull`）后重新运行 `./scripts/orca-autopilot --install` 完成。
 
 ### 项目结构
 
-```
+```text
 .
-├── LICENSE                        # MIT 许可证
-├── README.md                      # 项目说明与安装文档
-├── ROADMAP.md                     # Issue 创建到修复的分阶段计划
-├── github-issue-handoff/          # Issue 创建与交接 Skill
-├── github-issue-autopilot/        # 自动发现、领取与 Orca 可见任务调度
-│   ├── SKILL.md
-│   ├── references/configuration.md
-│   ├── references/orca-automation.md
-│   └── scripts/
-│       ├── autopilot_admin.py     # 一句话安装与生命周期命令
-│       └── issue_watcher.py       # 轮询、attempt 与防重复调度
-├── github-issue-repair/           # Issue 分诊与修复 Skill
-│   ├── SKILL.md
-│   ├── agents/openai.yaml
-│   ├── references/repair-contract.md
-│   └── scripts/run_state.py       # 状态、审批与回执账本
-├── github-issue-workflow-update/  # 最新稳定 Release 检查与事务式更新
-│   ├── SKILL.md
-│   ├── VERSION
-│   └── scripts/update_workflow.py
-├── orca-plugin/                   # 纯终端 Issue 看板 TUI 与极简 Orca 状态栏启动器插件
-│   ├── orca-plugin.json
-│   ├── README.md
-│   └── src/                       # 终端 TUI 渲染引擎（src/tui/）、状态栏 worker、数据桥接与单测
+├── orca-plugin/                   # Orca Autopilot 纯终端 TUI 控制台与状态栏插件
+│   ├── orca-plugin.json           # Orca 插件清单（id: orca-autopilot）
+│   ├── README.md                  # 插件与 TUI 交互详细说明
+│   └── src/                       # 终端 TUI 引擎（src/tui/）、状态栏 worker、数据桥接与测试
 ├── scripts/
-│   ├── build_release.py           # 构建带清单与校验和的正式发布包
-│   └── orca-board                 # 安装并在任意项目终端一键启动 Issue 看板 TUI 的 CLI
-├── .github/workflows/release.yml  # 通过版本 tag 测试并发布稳定包
-└── tests/                         # 修复账本与自动调度单元测试
+│   ├── orca-autopilot             # 一键安装并启动 Orca Autopilot 终端控制台的 CLI
+│   └── build_release.py           # 构建带清单与校验和的可复现发布包
+├── github-issue-handoff/          # 规范提单与交接 Skill
+├── github-issue-repair/           # Issue 分诊与受控修复 Skill（含 run_state.py 账本）
+├── github-issue-autopilot/        # 自动发现、依赖调度、并发修复与 PR 自动合并引擎
+├── github-issue-workflow-update/  # 稳定 Release 检查与事务式更新 Skill
+├── tests/                         # CLI、修复账本、自动调度与更新器单元测试
+├── .github/workflows/release.yml  # Tag 触发测试、构建并发布稳定包
+├── ROADMAP.md                     # 分阶段演进路线图
+└── LICENSE                        # MIT 许可证
 ```
 
 ### 开发与验证
 
-运行自动化测试和 Skill 校验：
-
 ```sh
+# 1. 运行 Python 单元测试（CLI、账本、调度器、更新器）
 python3 -m unittest discover -s tests -v
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
-python3 scripts/build_release.py --tag "v$(cat github-issue-workflow-update/VERSION)" --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+
+# 2. 验证 Orca 插件与 TUI 测试
+bun test ./orca-plugin/src
 orca plugin validate ./orca-plugin --json
 orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json
+
+# 3. 本地构建发布包验证
+python3 scripts/build_release.py --tag "v$(cat github-issue-workflow-update/VERSION)" --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 ```
 
-一键安装全局终端命令与 Orca 状态栏启动器（首次启用插件时按回车确认授权即可，可加 `--no-plugin` 仅装终端命令）：
+真实 GitHub 提单与回读需通过 `gh repo view`、`gh issue create`、`gh issue view` 进行端到端验证。
 
-```sh
-./scripts/orca-board --install
-```
+### 成熟度与安全边界
 
-安装完成后，在**任意项目目录的终端**执行一行命令即可直接渲染纯终端 Issue 看板（支持鼠标点击、滚轮与快捷键）：
-
-```sh
-orca-board
-```
-
-底部输入框固定为一行。长文本在框内横向滚动，按 `Shift+Enter` 后显示新的一行，提交时保留完整草稿。
-
-也可点击 Orca 底部状态栏「Issue 看板」或按 `Cmd+Shift+I` 在终端标签页中打开。详见 [`orca-plugin/README.md`](orca-plugin/README.md)。
-
-真实 GitHub 操作还需通过 CLI 端到端回读：
-
-- `gh repo view` 校验仓库信息与 Issues 可用性
-- `gh issue create` 提交 Issue（正文经 stdin 或临时文件传递）
-- `gh issue view` 回读并核对提交结果
-
-### 成熟度
-
-当前已提供单机 Orca 原生 Automation 一键安装、SQLite 幂等领取、Orca 可见子 worktree、可配置 Agent、最多三任务并发，以及基于稳定 Release 的整套本地更新与 runtime 回滚代码；更新入口要求 GitHub 上存在已发布的稳定 Release。成功后保留本地分支等待人工接受；失败任务保留可见现场，并在仍 open 且符合策略时进行有上限的下一轮续做。自动 draft PR 与多机调度仍未启用。普通用户进程属于“降低风险的隔离”，不是保护全部本地秘密的强安全边界；处理不可信仓库时应使用低权限账户或更强沙箱。完整门禁和扩展指标见 [ROADMAP.md](ROADMAP.md#中文)。
+当前已完成单机 Orca 状态栏插件、零依赖终端控制台、SQLite 幂等账本、隔离 worktree 并发调度、自动建 PR / 解冲突 / 自动合并、本地分支同步以及稳定 Release 事务式更新；多机分布式调度尚未启用。普通用户进程属于「降低风险的隔离」，不是保护全部本地机密的强安全沙箱；处理不可信仓库时请使用低权限账户或更强隔离环境。详见 [ROADMAP.md](ROADMAP.md#中文)。
 
 ### 许可证
 
 本项目使用 [MIT License](LICENSE)。
 
-[English](#english) · [返回顶部](#github-issue-workflow)
+[English](#english) · [返回顶部](#orca-autopilot)
 
 ---
 
@@ -218,198 +230,210 @@ orca-board
 
 ### Overview
 
-This package contains four composable Skills with separate permission surfaces. `github-issue-handoff` turns repository context and user intent into an executable Issue. `github-issue-repair` repairs existing Issues in isolated worktrees. `github-issue-autopilot` discovers eligible open Issues and starts visible Agent tasks in Orca. `github-issue-workflow-update` updates the complete local installation from the latest stable Release.
+**Orca Autopilot** brings the full GitHub Issue lifecycle—from plain-language request to merged PR—directly into Orca workspaces through three coordinated layers:
 
-When upgrading, remove the installed `github-issue-creator/` copy before installing `github-issue-handoff/`, and update explicit invocations to `$github-issue-handoff` so runtimes do not discover both skills.
+```text
+Plain-language request (TUI / Skill)
+  → Claim eligible agent-ready Issues (up to 3 concurrent isolated worktrees)
+  → Agent implementation + self-testing + independent Reviewer verification
+  → Deterministic pre-merge checks, push, PR creation, CI polling, conflict resolution, squash merge & local branch sync
+  → Surface only questions, permission prompts, conflict circuit-breaks, or review-ready items in Needs You & Orca status bar
+```
+
+- **Minimal Orca Plugin** (`orca-plugin/`): shows a live `Autopilot · N 待处理` status-bar badge and desktop notifications, and opens the terminal console in an Orca tab on click or `Cmd+Shift+I`.
+- **Pure-Terminal TUI Console** (`orca-autopilot`): zero-dependency full-screen ANSI terminal UI (zero webview overhead) with SGR 1006 mouse click/scroll, file drag-and-drop, and clipboard screenshot paste, launchable in any project terminal.
+- **Four Composable Skills**: `github-issue-handoff`, `github-issue-repair`, `github-issue-autopilot`, and `github-issue-workflow-update` power the automated loop and can also be invoked directly in any Agent session.
 
 ### Features
 
-- `github-issue-handoff` validates repositories, detects duplicates, applies Feature / Bug / Refactor / Research templates, and creates a Chinese Issue only after its executability gate passes.
-- `github-issue-repair` normalizes Issues into work packages and models dependencies, duplicates, shared root causes, and conflicts; repository URLs default to read-only triage.
-- `github-issue-autopilot` installs a local loop with one request, claims every open Issue created by the current user carrying `agent-ready`, including eligible backlog created before activation, and invokes `$github-issue-repair`.
-- `github-issue-workflow-update` checks versions read-only when asked to check and replaces all four official Skills plus installed Autopilot runtimes when asked to update issue-workflow.
-- `orca-plugin` + `orca-board` (Pure Terminal Issue Board TUI): a zero-dependency full-screen terminal TUI (Alternate Screen + SGR 1006 mouse click/scroll, with zero webview overhead) launched directly in any terminal via `orca-board`, featuring an AI-chat-style **persistent bottom composer** (type a request and press `Enter` to submit via `github-issue-handoff` in `handoff` mode by default, or switch to fast `direct` submission via the footer mode toggle or `/direct`, plus `Shift+Enter` newlines, `Ctrl+V` macOS clipboard screenshot paste, and dragged file-path attachments inserted as inline `[Image #1]` / `[File #1]` tokens on the same input line and deleted atomically with `Backspace`, plus a Codex-style bottom status bar showing the active issue kind—defaulting to `新功能` and cycling through `新功能 / 修 Bug / 体验优化` via `Shift+Tab` or click—and a clickable submit-mode indicator showing highlighted `✓ handoff 规范提单` by default and dimmed `○ direct 快速直提` when switched to direct mode) plus an **inline Claude Code-style slash-command list** (`/` for `/bug`, `/feature`, `/polish`, `/handoff`, `/direct`, `/agent`, `/refresh`, `/issues`, `/prs`, `/autopilot`, `/stop`, `/paste`, `/clear`, `/quit`, plus clickable header status badges `● 自动处理 [关闭]` / `○ 已暂停自动处理 [开启]` to pause or resume the autopilot loop directly), dual Issues (In Progress / Completed) and Pull Requests (Open / Merged & Closed with CI and conflict badges) views, and a Needs You queue covering agent questions/permission prompts, plain-text pauses in handoff or repair workers, handoff crash/stall alerts, manual-review (`ready-for-review` / `pr-only`) Issues, diverged/conflicting local-branch alerts with one-click auto-merge, and `gh` auth or stalled-Autopilot health alerts with one-click approve/reply, retry/discard, re-submit, auto-sync, and dismiss actions; the slimmed-down Orca plugin handles only status-bar badges (tracking `blocked`/`waiting`/`permission`/`done`/`idle` and health alerts), desktop notifications, and launching the TUI in an Orca terminal tab (`Cmd+Shift+I`).
-- Repair workers use Orca-managed child worktrees and never edit the user's active tree; when the local branch is ahead of its upstream (or has no upstream), dispatch automatically passes `--base-branch` so child worktrees branch from local latest commits without requiring a manual `git push`, and the board plugin automatically refreshes stale Autopilot runtime copies. Every eligible Issue is recorded, with at most three tasks running concurrently.
-- An independent reviewer checks acceptance criteria, verification evidence, scope drift, and weakened tests.
-- A two-level ledger (SQLite schema v5) deduplicates immutable Issue node IDs and records cross-Issue dependencies, every attempt's selected Agent, Orca Task/Dispatch/worktree, branch, base/head SHAs, PR URLs, merge timestamps, heartbeats, and archived failure `.patch` paths.
-- Interactive repairs still require user approval. Autopilot defaults to `publication: "auto-merge"` for a full unattended dual loop: workers implement, self-test, and independently review inside isolated worktrees, while the deterministic coordinator runs optional `pre_merge_commands`, pushes the branch, opens a PR, verifies CI checks and conflict-free mergeability, auto-merges the PR, closes the Issue, and cleans up the worktree so the user only reviews the merged result (`pr-only` and `never` remain configurable).
+#### 1. Pure-Terminal TUI Console (`orca-autopilot`)
+- **Chat-style persistent composer**: single-row input with horizontal scroll and `Shift+Enter` newlines; supports `Ctrl+V` macOS clipboard screenshot paste and dragged file paths as inline `[Image #1]` / `[File #1]` tokens deleted atomically with `Backspace`.
+- **Dual submission modes & kind cycling**: defaults to `✓ handoff 规范提单` (deduplication + template enforcement via `github-issue-handoff`), switchable to `○ direct 快速直提` via the footer toggle or `/direct`; press `Shift+Tab` or click to cycle through Feature / Bug / Polish.
+- **Inline slash commands**: type `/` for a Claude Code-style menu (`/bug`, `/feature`, `/polish`, `/handoff`, `/direct`, `/agent`, `/refresh`, `/issues`, `/prs`, `/autopilot`, `/stop`, `/paste`, `/clear`, `/quit`), plus clickable header badges to pause or resume the autopilot loop.
+- **Dual views & Needs You queue**: switch between Issues (In Progress / Completed) and Pull Requests (Open / Merged & Closed with CI and conflict indicators); the Needs You pane aggregates agent questions/permission prompts, plain-text pauses, stalled handoff alerts, manual-review tasks, diverged/conflicting local-branch alerts (with one-click auto-merge), and `gh` auth or stalled-Autopilot health alerts with one-click approve, reply (with attachments), retry/discard, resubmit, and dismiss actions.
+
+#### 2. Unattended Autopilot Loop
+- **Isolated concurrent dispatch**: a native Orca Automation prechecks every 3 minutes with zero model turns when healthy, records all eligible open Issues (including backlog created before activation), and runs up to 3 tasks concurrently in Orca child worktrees without touching your active checkout; passes `--base-branch` automatically when the local branch is ahead of upstream or untracked.
+- **Dependency graph & timeout recovery**: parses same-repo prerequisites (`Blocked by: #1`, `Depends on: #1`, `前置依赖: #1`), waits until dependencies are locally `merged`/`accepted` or `CLOSED` on GitHub, and flags cycles as `blocked`; refreshes worker heartbeats continuously and stops/releases timed-out workers (default 45m hard timeout, 15m heartbeat timeout) while archiving diffs to `.patch`.
+- **Dual-loop auto-merge**: defaults to `publication: "auto-merge"`—after implementation, self-testing, and independent review, the coordinator deterministically runs `pre_merge_commands`, pushes the branch, opens a PR, monitors CI and mergeability, attempts clean base merges or bounded conflict-resolution workers (up to `policy.max_conflict_resolutions`, default `2`), auto-merges (`squash` by default), closes the Issue, cleans up the worktree, and syncs the local base branch with zero AI tokens (`policy.sync_local_branch`, default `true`). Failures circuit-break visibly to `needs-human` with a `.patch` archive. `pr-only` and `never` remain configurable.
+- **Two-level idempotent ledger**: SQLite schema v5 deduplicates immutable Issue node IDs and tracks dependencies, selected Agents, Orca Task/Dispatch/worktree IDs, branches, base/head SHAs, PR URLs, merge timestamps, heartbeats, and `.patch` archives; unfinished `failed` attempts retry automatically up to 2 total attempts by default.
+
+#### 3. Four Composable Agent Skills
+- `github-issue-handoff`: validates repos, detects duplicates, applies Feature / Bug / Refactor / Research templates, and creates an Issue only after its executability gate passes (routing security reports privately).
+- `github-issue-repair`: normalizes Issues into work packages; interactive mode requires scope approval before local edits and explicit authorization before push/draft PR; repository URLs default to read-only triage.
+- `github-issue-autopilot`: installs and manages the per-repository local loop, supporting per-Issue `agent:<id>` label overrides.
+- `github-issue-workflow-update`: checks versions read-only or transactionally updates all four official Skills and installed Autopilot runtimes from the latest stable Release.
 
 ### Quick Start
 
 #### Prerequisites
 
-- A running Orca instance and at least one Agent Orca can launch, such as Codex, Claude, or OMP
+- A running Orca instance (**1.4.259+** for the status-bar plugin) and at least one Agent Orca can launch (such as Codex, Claude, or OMP)
 - An authenticated GitHub CLI (`gh`)
+- Python 3, plus Bun (recommended) or Node.js >= 22
 
-#### Install
+#### Install the Plugin & CLI
 
-Download `github-issue-workflow-full-vX.Y.Z.tar.gz` from the [GitHub Release](https://github.com/Niall-Young/github-issue-workflow/releases/latest) for the terminal board CLI, Orca plugin, and four Skills. Extract it to a directory you will keep, run `./scripts/orca-board --install` there, and follow the plugin approval prompt. The installer links both commands to that directory. Add `~/.local/bin` to PATH. With Python 3 and Bun installed, run `orca-board` in your project. The status bar entry requires Orca 1.4.259 or later. Add `--no-plugin` to install only the terminal commands. Copy the four Skills from the extracted directory as described below. Existing Skill updaters use the matching `github-issue-workflow-vX.Y.Z.tar.gz` archive.
+**Option 1: Download the full Release bundle (recommended)**
 
-For the easiest setup, copy the following prompt directly into your agent session and let the agent install the skill for its runtime:
+Download `github-issue-workflow-full-vX.Y.Z.tar.gz` from [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest), extract it to a permanent directory, and run:
+
+```sh
+./scripts/orca-autopilot --install
+```
+
+**Option 2: Install from a source checkout**
+
+```sh
+git clone https://github.com/Niall-Young/github-issue-workflow.git
+cd github-issue-workflow
+./scripts/orca-autopilot --install
+```
+
+The installer symlinks `orca-autopilot` (plus the legacy `orca-board` alias) into `~/.local/bin` and loads/enables the Orca status-bar plugin:
+- Add `~/.local/bin` to your `PATH`;
+- Pass `--no-plugin` to install only the terminal CLI.
+
+#### Run
+
+Open the console using either entry point:
+- Click **Autopilot** in Orca's status bar or press **`Cmd+Shift+I`**;
+- Or run in **any project terminal**:
+
+```sh
+orca-autopilot
+```
+
+#### (Optional) Install the Four Underlying Skills
+
+To invoke `$github-issue-handoff`, `$github-issue-repair`, `$github-issue-autopilot`, or `$github-issue-workflow-update` directly in an Agent session, paste this prompt into your Agent:
 
 ```text
 Please install all four skills from this repository: https://github.com/Niall-Young/github-issue-workflow
 ```
 
-Depending on the runtime and its permissions, the agent may request authorization or explain why it cannot install the skill automatically.
-
-For manual installation, clone the repository and copy all four skill directories into the skill directory used by your runtime. The commands below use Claude Code's `~/.claude/skills/` as an example; restart the session after installation:
+Or copy them manually (example for Claude Code; restart the session afterward):
 
 ```sh
-git clone https://github.com/Niall-Young/github-issue-workflow.git
-cp -R github-issue-workflow/github-issue-handoff ~/.claude/skills/github-issue-handoff
-cp -R github-issue-workflow/github-issue-repair ~/.claude/skills/github-issue-repair
-cp -R github-issue-workflow/github-issue-autopilot ~/.claude/skills/github-issue-autopilot
-cp -R github-issue-workflow/github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
+cp -R github-issue-handoff ~/.claude/skills/github-issue-handoff
+cp -R github-issue-repair ~/.claude/skills/github-issue-repair
+cp -R github-issue-autopilot ~/.claude/skills/github-issue-autopilot
+cp -R github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
 ```
 
-#### Run
-
-Create and repair one-off tasks in an Agent session; run the dispatcher locally for automatic execution:
-
-```sh
-$github-issue-handoff <GitHub URL>
-$github-issue-repair <GitHub Issue URL>
-$github-issue-repair <GitHub Repository URL>
-python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex
-$github-issue-workflow-update update issue-workflow
-```
+> When upgrading from older versions, remove any installed `github-issue-creator/` copy before installing `github-issue-handoff/`.
 
 ### Usage
 
-Minimal example. An explicit skill invocation authorizes creating one Issue:
+#### 1. Daily Workflow in the Terminal Console
+
+Launch `orca-autopilot`, type your request in the bottom composer, and press `Enter`:
+
+| Action / Command | Description |
+| :--- | :--- |
+| `Enter` / `Shift+Enter` | Submit request / insert newline |
+| `Shift+Tab` | Cycle Issue kind (Feature / Bug / Polish) |
+| `Ctrl+V` or drag files | Paste macOS clipboard screenshot or attach files as `[Image #1]` / `[File #1]` |
+| `/bug` `/feature` `/polish` | Switch kind or submit directly with description |
+| `/handoff` `/direct` | Toggle structured Skill handoff vs. fast direct submission |
+| `/agent` | Configure default execution Agent and allowed `agent:<id>` overrides |
+| `/autopilot` `/stop` | Start or pause the repository's autopilot loop |
+| `/issues` `/prs` `/refresh` `/quit` | Switch views, refresh data, or exit the console |
+
+See [`orca-plugin/README.md`](orca-plugin/README.md) for full TUI interaction details.
+
+#### 2. Manage Repository Autopilot Loops
+
+Run `/autopilot` inside the console, ask your Agent to “build an Issue loop,” or manage loops via CLI:
+
+```sh
+# Install a repository loop (supports --publication auto-merge|pr-only|never and other policy flags)
+python3 github-issue-autopilot/scripts/autopilot_admin.py install --repo-path /absolute/repository/root --agent codex
+
+# List installed repositories and run read-only diagnostics
+python3 github-issue-autopilot/scripts/autopilot_admin.py list
+python3 github-issue-autopilot/scripts/autopilot_admin.py doctor --repo-path /absolute/repository/root
+
+# Prune stale failed/discarded worktrees older than 24 hours (preserving .patch archives)
+python3 github-issue-autopilot/scripts/autopilot_admin.py prune --repo-path /absolute/repository/root --older-than-hours 24
+```
+
+Before removing an Orca project or deleting a local checkout, settle pending work and uninstall cleanly:
+
+```sh
+python3 github-issue-autopilot/scripts/autopilot_admin.py stop --repository owner/repo
+python3 github-issue-autopilot/scripts/autopilot_admin.py discard --repo-path /absolute/repository/root --issue-url URL
+python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
+```
+
+`uninstall` refuses unresolved work, exports Automation history, and archives config, SQLite ledgers, logs, and runtime copies under `~/.local/state/github-issue-autopilot/archives/` without deleting your repository. See [`github-issue-autopilot/references/configuration.md`](github-issue-autopilot/references/configuration.md) for all policy options.
+
+#### 3. Invoke Individual Skills
 
 ```sh
 $github-issue-handoff https://github.com/owner/repo Investigate occasional login API timeouts
-```
-
-Expected result: the skill produces a Chinese Issue from the Bug template, passes the pre-creation gate and deduplication check, submits it, and returns the title with a clickable Issue URL. If the report is security-sensitive, it follows the Security Policy's private channel instead of creating a public Issue.
-
-Repair an existing Issue:
-
-```sh
 $github-issue-repair https://github.com/owner/repo/issues/123
+$github-issue-repair https://github.com/owner/repo
 ```
-
-Expected result: the skill first performs read-only analysis and presents the package, base SHA, risk, budget, and verification plan. It may edit locally only after scope approval, and may push and create a draft PR only after the user reviews the diff and evidence and authorizes publication. With only a repository URL, it proposes a capped candidate batch instead of repairing every Issue.
-
-In any GitHub checkout, ask the Agent to “build an Issue loop.” Autopilot creates the missing `agent-ready` label, repository-isolated configuration, a native Orca Automation, and an Orca coordinator. The Automation can be paused, resumed, and inspected in the GUI. It prechecks every three minutes and invokes an Agent only when the coordinator needs recovery, so healthy checks consume no model turn. Every eligible Issue is recorded, and up to three run concurrently as visible child worktrees in the Orca sidebar. When an Issue body declares same-repository prerequisites (`Blocked by: #1`, `Depends on: #1`, or `前置依赖: #1`), the scheduler skips it until every dependency is locally `merged`/`accepted` or `CLOSED` on GitHub, and detects dependency cycles by marking them `blocked`. Running workers refresh `last_heartbeat` from recent output; if a worker exceeds `worker_timeout_seconds` (default 45m) or produces no new output for `heartbeat_timeout_seconds` (default 15m), the coordinator stops and releases the Dispatch and archives any local diff to a `.patch` file. Once a worker finishes implementation, self-testing, and independent review, default `publication: "auto-merge"` runs any configured `pre_merge_commands`, pushes the branch, opens a PR (`pr-open`), monitors GitHub CI checks and mergeability, and automatically merges the PR (`squash` by default), closes the Issue, cleans up the worktree, deterministically syncs the local base branch with zero AI token usage (`policy.sync_local_branch`, default `true`: fast-forwards when strictly behind, and automatically rebases clean diverged checkouts after a conflict-free `git merge-tree` preflight; safely skips dirty or conflicting checkouts and surfaces a one-click auto-merge action in the board's Needs You pane) (`merged`), and unblocks dependent Issues so you only review the merged outcome. When an open PR becomes `CONFLICTING`/`DIRTY`, the coordinator first attempts a clean merge of the latest base branch in the existing worktree and otherwise automatically queues a bounded conflict-resolution worker (up to `policy.max_conflict_resolutions`, default `2`; set `0` to disable) that resolves conflicts, verifies tests, and updates the same PR branch in place; CI failures or conflicts remaining after the limit stop visibly at `needs-human` with a `.patch` archive. An unfinished `failed` attempt whose Issue remains open and eligible is retried on the next cycle, with two total automatic attempts by default; `pr-open`, `merged`, review-ready, explicit human-action, and policy-blocked results do not relaunch automatically. Each Issue attempt must use Orca Task, Dispatch, worktree ID, and absolute-path identities that no historical attempt or other Issue has used; reused identity or incomplete success evidence stops for human action without a manual or shared-worktree fallback. Use `--agent`, `--publication` (`auto-merge`/`pr-only`/`never`), `--merge-method`, `--pre-merge-command`, `--max-concurrent`, `--max-attempts`, `--worker-timeout`, and `--heartbeat-timeout` during installation; one `agent:ID` Issue label may override the default agent, while conflicting, disallowed, or unavailable choices stop visibly for human action. Stale `failed`/`discarded`/`rejected` worktrees can be safely cleaned with `prune --older-than-hours 24 [--dry-run]` after preserving `.patch` archives, and explicit `accept` / `retry` / `discard` remain available when using `publication: "never"`. See [`configuration.md`](github-issue-autopilot/references/configuration.md).
 
 ### Update Mechanism
 
-Updates never run automatically in the background. After `github-issue-workflow-update` has been installed once, the Agent invokes it only when the user explicitly asks to check or apply an update:
+Updates never run automatically in the background. After installing `github-issue-workflow-update`, invoke it explicitly:
 
 ```sh
 $github-issue-workflow-update check for issue-workflow updates
 $github-issue-workflow-update update issue-workflow
 ```
 
-- **Check** is read-only. It reports the installed version, latest stable version, and update availability without modifying a Skill or Autopilot installation.
-- **Update** fetches the latest published stable Release from `Niall-Young/github-issue-workflow`. It reinstalls official files even when the version is unchanged, removing local drift and overwriting manual edits in the four managed Skills. Start a new conversation afterward so the Agent reloads the Skill instructions.
-- The updater verifies the Release source, version, archive SHA-256, manifest, file allowlist, and every file hash, then performs a read-only preflight of all installed Autopilot runtimes. After preflight it transactionally swaps the four Skills, refreshes the runtimes, and reads back the Orca Automations and runtime files.
-- Autopilot configuration, SQLite ledgers, logs, attempt history, and worktrees are preserved. A Skill, runtime, or Automation failure restores the previous state automatically. Only the rare `partial-update` result, where rollback itself also fails, requires manual recovery; the Agent must identify the affected component.
-- The scope is limited to the four official Skills in the current Agent runtime and the installed Autopilot runtimes they manage. It never runs `git pull`, modifies a source checkout, updates an unrelated Skill, or scans or changes another Agent runtime.
-
-On the publishing side, a `vMAJOR.MINOR.PATCH` tag triggers GitHub Actions to run the tests, build a reproducible bundle with a version manifest, per-file hashes, and an archive checksum, and publish a stable Release. The updater consumes only published stable Releases and rejects drafts, prereleases, downgrades, checksum failures, and malformed archives. A pushed tag that has not produced a stable Release is not installable. `v0.1.0` is the first declared release version.
-
-### Configuration
-
-- Each of the four Skills has `agents/openai.yaml` metadata and allows automatic discovery. Skill discovery is not authorization to edit code or write remotely.
-- `github-issue-repair/scripts/run_state.py` uses only the Python standard library and stores its ledger under the repository's common Git directory.
-- `github-issue-autopilot/scripts/autopilot_admin.py` idempotently installs, lists, checks, stops, accepts, discards, retries, prunes stale failed worktrees (`prune`), refreshes runtimes, or uninstalls a repository loop. `issue_watcher.py` owns full eligible-open-Issue scans, cross-Issue dependency scheduling, three-slot claims, Orca dispatch, heartbeat and hard-timeout recovery, automatic PR creation, CI verification and PR auto-merge, attempt history, failure `.patch` archiving, and Git evidence readback.
-- `github-issue-workflow-update/scripts/update_workflow.py` verifies and transactionally installs stable Releases. `scripts/build_release.py` creates reproducible assets containing a release manifest, per-file hashes, and an archive checksum.
-- Administrator-level `doctor` checks the watcher, the Orca Automation's enabled state and safety fields, and any duplicate legacy LaunchAgent without mutating them. Every poll includes older open Issues that still match the author and label policy; immutable Issue node IDs prevent duplicate dispatch for active, review-ready, and human-stopped work while allowing failed work to continue on the next cycle within `max_attempts`.
-
-Before removing an Orca project or deleting its checkout, settle review-ready and running work, then uninstall the Automation:
-
-```sh
-python3 github-issue-autopilot/scripts/autopilot_admin.py list
-python3 github-issue-autopilot/scripts/autopilot_admin.py stop --repository owner/repo
-python3 github-issue-autopilot/scripts/autopilot_admin.py discard --repo-path /absolute/repository/root --issue-url URL
-python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository-id REPOSITORY_ID
-```
-
-If the path disappears, is no longer the original Git root, or is removed from Orca, the precheck and coordinator pause the Automation without deleting the ledger or launching a recovery Agent. `list`, `stop`, and `uninstall` can locate an installation by repository name or immutable ID after the checkout is gone. `uninstall` refuses unresolved work, exports Automation history, and moves configuration, SQLite, logs, and runtime copies into `~/.local/state/github-issue-autopilot/archives/`; it never deletes the local repository.
+- **Check** is read-only and reports installed vs. latest stable Release versions.
+- **Update** fetches the latest published stable Release from `Niall-Young/github-issue-workflow`, verifies origin, SHA-256, manifest, and per-file hashes, transactionally replaces the four official Skills, and refreshes installed Autopilot runtimes with automatic rollback on failure (preserving configs, SQLite ledgers, logs, attempt history, and worktrees).
+- To upgrade the Orca plugin and terminal CLI, download the latest `github-issue-workflow-full-vX.Y.Z.tar.gz` (or `git pull`) and re-run `./scripts/orca-autopilot --install`.
 
 ### Project Structure
 
-```
+```text
 .
-├── LICENSE                        # MIT license
-├── README.md                      # Project documentation and installation guide
-├── ROADMAP.md                     # Phased plan from Issue creation to repair
-├── github-issue-handoff/          # Issue creation and handoff Skill
-├── github-issue-autopilot/        # Automatic detection, claims, and visible Orca dispatch
-│   ├── SKILL.md
-│   ├── references/configuration.md
-│   ├── references/orca-automation.md
-│   └── scripts/
-│       ├── autopilot_admin.py     # One-request installation and lifecycle commands
-│       └── issue_watcher.py       # Polling, attempts, and duplicate prevention
-├── github-issue-repair/           # Issue triage and repair Skill
-│   ├── SKILL.md
-│   ├── agents/openai.yaml
-│   ├── references/repair-contract.md
-│   └── scripts/run_state.py       # State, approval, and receipt ledger
-├── github-issue-workflow-update/  # Stable Release check and transactional update
-│   ├── SKILL.md
-│   ├── VERSION
-│   └── scripts/update_workflow.py
-├── orca-plugin/                   # Pure terminal Issue Board TUI + minimal Orca status-bar launcher
-│   ├── orca-plugin.json
-│   ├── README.md
-│   └── src/                       # Terminal TUI engine (src/tui/), status-bar worker, data bridge, tests
+├── orca-plugin/                   # Orca Autopilot pure-terminal TUI + status-bar plugin
+│   ├── orca-plugin.json           # Orca plugin manifest (id: orca-autopilot)
+│   ├── README.md                  # Plugin & TUI interaction guide
+│   └── src/                       # Terminal TUI engine (src/tui/), worker, data bridge, tests
 ├── scripts/
-│   ├── build_release.py           # Build the manifest and checksummed release bundle
-│   └── orca-board                 # CLI to install and launch the terminal Issue Board TUI in any project
-├── .github/workflows/release.yml  # Test and publish stable version tags
-└── tests/                         # Repair-ledger and automatic-dispatch unit tests
+│   ├── orca-autopilot             # One-command CLI installer and TUI launcher
+│   └── build_release.py           # Deterministic release bundle builder with checksums
+├── github-issue-handoff/          # Structured Issue creation & handoff Skill
+├── github-issue-repair/           # Issue triage & controlled repair Skill (with run_state.py)
+├── github-issue-autopilot/        # Auto-discovery, dependency scheduling & PR auto-merge engine
+├── github-issue-workflow-update/  # Stable Release checker & transactional updater Skill
+├── tests/                         # Unit tests for CLI, ledgers, scheduler, and updater
+├── .github/workflows/release.yml  # Tag-triggered testing and stable Release publishing
+├── ROADMAP.md                     # Phased evolution roadmap
+└── LICENSE                        # MIT license
 ```
 
 ### Development and Verification
 
-Run the automated tests and Skill validators:
-
 ```sh
+# 1. Run Python unit tests (CLI, ledger, scheduler, updater)
 python3 -m unittest discover -s tests -v
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-handoff
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-repair
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-autopilot
-python3 /path/to/skill-creator/scripts/quick_validate.py github-issue-workflow-update
-python3 scripts/build_release.py --tag "v$(cat github-issue-workflow-update/VERSION)" --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
+
+# 2. Validate the Orca plugin and run TUI/data tests
+bun test ./orca-plugin/src
 orca plugin validate ./orca-plugin --json
 orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json
+
+# 3. Verify local release bundle generation
+python3 scripts/build_release.py --tag "v$(cat github-issue-workflow-update/VERSION)" --commit "$(git rev-parse HEAD)" --output /tmp/issue-workflow-dist
 ```
 
-Install the global terminal CLI and optional Orca status-bar launcher in one step (press Enter once to approve plugin capabilities on first run, or pass `--no-plugin` for CLI-only install):
+End-to-end GitHub mutations are verified via `gh repo view`, `gh issue create`, and `gh issue view`.
 
-```sh
-./scripts/orca-board --install
-```
+### Maturity and Security Boundary
 
-After installation, run a single command in **any project terminal** to render the pure terminal Issue Board TUI (with mouse click, scroll, and keyboard shortcuts):
-
-```sh
-orca-board
-```
-
-The bottom input stays one row tall. Long lines scroll horizontally. Pressing `Shift+Enter` displays the new line and keeps the full draft for submission.
-
-You can also click **Issue 看板** in Orca's status bar or press `Cmd+Shift+I` to open the TUI in an Orca terminal tab. See [`orca-plugin/README.md`](orca-plugin/README.md).
-
-Real GitHub mutations still require CLI readback:
-
-- `gh repo view` validates repository info and Issues availability
-- `gh issue create` submits the Issue (body passed via stdin or a temporary file)
-- `gh issue view` reads back and verifies the result
-
-### Maturity
-
-Single-machine installation through native Orca Automation, SQLite idempotent claims, visible Orca child worktrees, configurable Agents, up to three concurrent tasks, and the stable-Release updater with runtime rollback are implemented; the update entry point requires a published stable GitHub Release. Successful branches wait for human acceptance. Failed attempts preserve visible evidence and receive a bounded next-cycle retry while their Issue remains open and eligible. Automatic draft PRs and multi-runner scheduling remain disabled. A normal user process provides reduced isolation, not a strong boundary protecting all local secrets; use a low-privilege account or stronger sandbox for hostile repositories. See [ROADMAP.md](ROADMAP.md#english) for gates and expansion metrics.
+Single-machine Orca status-bar integration, the zero-dependency terminal TUI, SQLite idempotent claims, isolated child-worktree concurrency, automated PR creation/conflict resolution/auto-merge, local branch sync, and stable-Release transactional updates are implemented; multi-machine scheduling is not enabled. A normal user process provides reduced-risk isolation rather than a hard security sandbox protecting all local secrets; use a low-privilege account or stronger sandbox for untrusted repositories. See [ROADMAP.md](ROADMAP.md#english) for details.
 
 ### License
 
 This project is licensed under the [MIT License](LICENSE).
 
-[中文](#中文) · [Back to top](#github-issue-workflow)
+[中文](#中文) · [Back to top](#orca-autopilot)

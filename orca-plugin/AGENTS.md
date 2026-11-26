@@ -1,8 +1,8 @@
-# Orca Plugin & Terminal TUI Instructions (`orca-plugin/`)
+# Orca Autopilot Plugin & Terminal TUI Instructions (`orca-plugin/`)
 
 ## Scope
 
-`orca-plugin/` contains the zero-dependency pure terminal Issue Board TUI (`src/tui/`) plus a minimal Orca `trusted-worker` plugin (`src/worker.ts`) for status-bar pending badges, desktop notifications, and launching the TUI in an Orca terminal tab.
+`orca-plugin/` contains the zero-dependency pure terminal Orca Autopilot TUI (`src/tui/`) plus a minimal Orca `trusted-worker` plugin (`src/worker.ts`) for status-bar pending badges, desktop notifications, and launching the TUI in an Orca terminal tab.
 
 ## Local Rules
 

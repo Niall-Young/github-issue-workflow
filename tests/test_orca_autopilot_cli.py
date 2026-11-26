@@ -9,12 +9,12 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_PATH = REPO_ROOT / "scripts" / "orca-board"
+SCRIPT_PATH = REPO_ROOT / "scripts" / "orca-autopilot"
 
 
-def load_orca_board_module():
-    loader = importlib.machinery.SourceFileLoader("orca_board_cli", str(SCRIPT_PATH))
-    spec = importlib.util.spec_from_loader("orca_board_cli", loader)
+def load_orca_autopilot_module():
+    loader = importlib.machinery.SourceFileLoader("orca_autopilot_cli", str(SCRIPT_PATH))
+    spec = importlib.util.spec_from_loader("orca_autopilot_cli", loader)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -30,16 +30,16 @@ def make_proc(returncode: int = 0, stdout: str = "", stderr: str = ""):
     )
 
 
-class OrcaBoardCliTests(unittest.TestCase):
+class OrcaAutopilotCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.mod = load_orca_board_module()
+        cls.mod = load_orca_autopilot_module()
 
     def test_install_cli_creates_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp) / "bin"
             installed = self.mod.install_cli(bin_dir=bin_dir, script_path=SCRIPT_PATH)
-            self.assertEqual([p.name for p in installed], ["orca-board", "issue-board"])
+            self.assertEqual([p.name for p in installed], ["orca-autopilot", "orca-board"])
             for link in installed:
                 self.assertTrue(link.is_symlink())
                 self.assertEqual(link.resolve(), SCRIPT_PATH.resolve())
@@ -78,7 +78,7 @@ class OrcaBoardCliTests(unittest.TestCase):
 
     def test_install_loads_bundled_plugin_over_older_dev_version(self):
         bundled = json.loads((self.mod.PLUGIN_DIR / "orca-plugin.json").read_text())["version"]
-        plugin = {"pluginKey": "local.issue-board", "isDev": True,
+        plugin = {"pluginKey": "local.orca-autopilot", "isDev": True,
                   "version": "0.0.1", "status": "running"}
 
         def runner(cmd, cwd=None):
@@ -88,7 +88,7 @@ class OrcaBoardCliTests(unittest.TestCase):
             plugin["version"] = bundled
             return make_proc()
 
-        self.assertEqual(self.mod.ensure_plugin_ready(runner=runner), "local.issue-board")
+        self.assertEqual(self.mod.ensure_plugin_ready(runner=runner), "local.orca-autopilot")
         self.assertEqual(plugin["version"], bundled)
 
     def test_ensure_plugin_ready_approves_interactively_when_pending(self):
@@ -105,7 +105,7 @@ class OrcaBoardCliTests(unittest.TestCase):
                             "result": {
                                 "plugins": [
                                     {
-                                        "pluginKey": "local.issue-board",
+                                        "pluginKey": "local.orca-autopilot",
                                         "status": "pending",
                                         "needsReconsent": True,
                                     }
@@ -114,7 +114,7 @@ class OrcaBoardCliTests(unittest.TestCase):
                         }
                     ),
                 )
-            if cmd == ["orca", "plugin", "enable", "local.issue-board"]:
+            if cmd == ["orca", "plugin", "enable", "local.orca-autopilot"]:
                 return make_proc(
                     1,
                     stderr="Fingerprint: ap1-deadbeef1234\nNext step: approve",
@@ -123,7 +123,7 @@ class OrcaBoardCliTests(unittest.TestCase):
                 "orca",
                 "plugin",
                 "enable",
-                "local.issue-board",
+                "local.orca-autopilot",
                 "--approve",
                 "ap1-deadbeef1234",
             ]:
@@ -135,9 +135,9 @@ class OrcaBoardCliTests(unittest.TestCase):
             is_tty=True,
             input_fn=lambda _: "",
         )
-        self.assertEqual(key, "local.issue-board")
+        self.assertEqual(key, "local.orca-autopilot")
         self.assertIn(
-            ["orca", "plugin", "enable", "local.issue-board", "--approve", "ap1-deadbeef1234"],
+            ["orca", "plugin", "enable", "local.orca-autopilot", "--approve", "ap1-deadbeef1234"],
             calls,
         )
 
@@ -152,7 +152,7 @@ class OrcaBoardCliTests(unittest.TestCase):
                             "result": {
                                 "plugins": [
                                     {
-                                        "pluginKey": "local.issue-board",
+                                        "pluginKey": "local.orca-autopilot",
                                         "status": "pending",
                                         "needsReconsent": True,
                                     }
@@ -161,14 +161,14 @@ class OrcaBoardCliTests(unittest.TestCase):
                         }
                     ),
                 )
-            if cmd == ["orca", "plugin", "enable", "local.issue-board"]:
+            if cmd == ["orca", "plugin", "enable", "local.orca-autopilot"]:
                 return make_proc(1, stderr="Fingerprint: ap1-deadbeef1234\n")
             raise AssertionError(f"Unexpected command: {cmd}")
 
         with self.assertRaises(RuntimeError) as ctx:
             self.mod.ensure_plugin_ready(runner=fake_runner, is_tty=False)
         self.assertIn(
-            "orca plugin enable local.issue-board --approve ap1-deadbeef1234",
+            "orca plugin enable local.orca-autopilot --approve ap1-deadbeef1234",
             str(ctx.exception),
         )
 

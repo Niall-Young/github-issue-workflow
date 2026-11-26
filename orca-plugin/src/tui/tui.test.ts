@@ -37,7 +37,7 @@ import {
   type TuiState
 } from './render'
 import { IssueBoardTui } from './app'
-import { ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
+import { ANSI, ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
 
 function makeSampleSnapshot(): BoardSnapshot {
   return {
@@ -979,4 +979,145 @@ test('loadBoardSnapshot surfaces handoff unexpected exit, handoff stall, and sys
     { nowMs }
   )
   assert.equal(ghErrSnap.needsYou.some((i) => i.kind === 'system-alert' && i.badge === 'GitHub 鉴权失效'), true)
+})
+
+test('renderTui positions native terminal cursor for empty, CJK/mixed, wrapped, and trailing-newline bottom composer without pseudo-cursor', () => {
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+
+  // Empty composer: cursor at (textAreaX=3, composerTop+1=27)
+  const emptyState = makeBaseState('')
+  const emptyBuf = renderTui(emptyState, 100, 30)
+  assert.deepEqual(emptyBuf.cursor, { x: 3, y: 27 })
+  assert.ok(!emptyBuf.renderLines().map(stripAnsi).join('\n').includes('▏'))
+  const emptyDiff = emptyBuf.diffOutput(null, null)
+  assert.ok(emptyDiff.output.startsWith(ANSI.cursorHide))
+  assert.ok(emptyDiff.output.endsWith(`\x1b[28;4H${ANSI.cursorShow}`))
+
+  // Mixed CJK + ASCII: "修复 Bug 123" has display width 12 -> cursor x = 3 + 12 = 15
+  const mixedState = makeBaseState('修复 Bug 123')
+  const mixedBuf = renderTui(mixedState, 100, 30)
+  assert.deepEqual(mixedBuf.cursor, { x: 15, y: 27 })
+  assert.ok(!mixedBuf.renderLines().map(stripAnsi).join('\n').includes('▏'))
+
+  // Trailing newline: height expands to 4 (2 text lines), composerTop = 25, cursor at line 2 col 0
+  const newlineState = makeBaseState('第一行\n')
+  assert.equal(computeComposerHeight(newlineState.composer, 100), 4)
+  const newlineBuf = renderTui(newlineState, 100, 30)
+  assert.deepEqual(newlineBuf.cursor, { x: 3, y: 27 })
+
+  // Exact-width fill stays within [0, width - 1]
+  const exactState = makeBaseState('a'.repeat(20))
+  assert.equal(computeComposerHeight(exactState.composer, 24), 3)
+  const exactBuf = renderTui(exactState, 24, 30)
+  assert.deepEqual(exactBuf.cursor, { x: 23, y: 27 })
+
+  // Multi-line wrapped CJK + ASCII: width=24 -> textAreaW=20, line0="测试终端原生光标定位" (20), line1="显示abc" (7)
+  const wrappedState = makeBaseState('测试终端原生光标定位显示abc')
+  assert.equal(computeComposerHeight(wrappedState.composer, 24), 4)
+  const wrappedBuf = renderTui(wrappedState, 24, 30)
+  assert.deepEqual(wrappedBuf.cursor, { x: 10, y: 27 })
+})
+
+test('renderTui positions native cursor in reply modal and hides cursor in non-editable states', () => {
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+  const state = makeBaseState('')
+  const questionItem = state.snapshot!.needsYou[0]
+  assert.equal(questionItem.kind, 'agent-question')
+
+  if (questionItem.kind === 'agent-question') {
+    // Empty reply modal
+    state.modal = {
+      type: 'reply',
+      item: questionItem,
+      text: '',
+      attachments: [],
+      sending: false
+    }
+    const emptyReplyBuf = renderTui(state, 100, 30)
+    assert.ok(emptyReplyBuf.cursor !== null)
+    const emptyPos = emptyReplyBuf.cursor!
+    assert.ok(!emptyReplyBuf.renderLines().map(stripAnsi).join('\n').includes('▏'))
+    const emptyReplyDiff = emptyReplyBuf.diffOutput(null, null)
+    assert.ok(
+      emptyReplyDiff.output.endsWith(`\x1b[${emptyPos.y + 1};${emptyPos.x + 1}H${ANSI.cursorShow}`)
+    )
+
+    // Mixed CJK reply text shifts cursor by display width (10)
+    state.modal.text = '收到，继续'
+    const cjkReplyBuf = renderTui(state, 100, 30)
+    assert.deepEqual(cjkReplyBuf.cursor, { x: emptyPos.x + 10, y: emptyPos.y })
+    assert.ok(!cjkReplyBuf.renderLines().map(stripAnsi).join('\n').includes('▏'))
+
+    // Sending reply hides cursor
+    state.modal.sending = true
+    const sendingReplyBuf = renderTui(state, 100, 30)
+    assert.equal(sendingReplyBuf.cursor, null)
+    const sendingDiff = sendingReplyBuf.diffOutput(null, emptyPos)
+    assert.ok(sendingDiff.output.includes(ANSI.cursorHide))
+    assert.ok(!sendingDiff.output.includes(ANSI.cursorShow))
+  }
+
+  // Submitting bottom composer hides cursor
+  const submittingState = makeBaseState('提交中测试')
+  submittingState.composer.submitting = true
+  const submittingBuf = renderTui(submittingState, 100, 30)
+  assert.equal(submittingBuf.cursor, null)
+  const submittingDiff = submittingBuf.diffOutput(null, null)
+  assert.ok(submittingDiff.output.includes(ANSI.cursorHide))
+  assert.ok(!submittingDiff.output.includes(ANSI.cursorShow))
+
+  // Settings modal hides cursor
+  const settingsState = makeBaseState('')
+  settingsState.modal = {
+    type: 'settings',
+    defaultAgent: 'codex',
+    allowedAgents: ['codex', 'claude'],
+    cursor: 0,
+    saving: false
+  }
+  const settingsBuf = renderTui(settingsState, 100, 30)
+  assert.equal(settingsBuf.cursor, null)
+
+  // Detail modal hides cursor
+  const detailState = makeBaseState('')
+  detailState.modal = {
+    type: 'detail',
+    title: '#12 支持终端鼠标点击',
+    subtitle: '状态：处理中',
+    body: '详情内容'
+  }
+  const detailBuf = renderTui(detailState, 100, 30)
+  assert.equal(detailBuf.cursor, null)
+})
+
+test('ScreenBuffer diffOutput keeps cursor accurate across partial updates, unchanged frames, and cursor-only changes', () => {
+  const buf1 = new ScreenBuffer(40, 12)
+  buf1.writeText(0, 0, 'Header 1')
+  buf1.setCursor(5, 10)
+  const f1 = buf1.diffOutput(null, null)
+  assert.ok(f1.output.startsWith(ANSI.cursorHide))
+  assert.ok(f1.output.endsWith(`\x1b[11;6H${ANSI.cursorShow}`))
+
+  // Identical frame and identical cursor -> no output
+  const f2 = buf1.diffOutput(f1.lines, f1.cursor)
+  assert.equal(f2.output, '')
+
+  // Background partial row update while cursor stays at (5, 10)
+  const buf3 = new ScreenBuffer(40, 12)
+  buf3.writeText(0, 0, 'Header 2')
+  buf3.setCursor(5, 10)
+  const f3 = buf3.diffOutput(f2.lines, f2.cursor)
+  assert.ok(f3.output.startsWith(ANSI.cursorHide))
+  assert.ok(f3.output.includes('\x1b[1;1H'))
+  assert.ok(f3.output.endsWith(`\x1b[11;6H${ANSI.cursorShow}`))
+
+  // Same lines, cursor hidden -> only ANSI.cursorHide
+  buf3.clearCursor()
+  const f4 = buf3.diffOutput(f3.lines, f3.cursor)
+  assert.equal(f4.output, ANSI.cursorHide)
+
+  // Same lines, cursor restored -> move + show
+  buf3.setCursor(8, 10)
+  const f5 = buf3.diffOutput(f4.lines, f4.cursor)
+  assert.equal(f5.output, `\x1b[11;9H${ANSI.cursorShow}`)
 })

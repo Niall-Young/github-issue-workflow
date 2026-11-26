@@ -40,7 +40,7 @@ import {
   resolveSelectedMainRowAction,
   type TuiState
 } from './render'
-import { ANSI, type ScreenBuffer } from './screen'
+import { ANSI, type CursorPosition, type ScreenBuffer } from './screen'
 
 const POLL_INTERVAL_MS = 12_000
 
@@ -59,6 +59,7 @@ export class IssueBoardTui {
   private state: TuiState
   private lastBuffer: ScreenBuffer | null = null
   private lastRenderedLines: string[] | null = null
+  private lastCursor: CursorPosition | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private errorTimer: ReturnType<typeof setTimeout> | null = null
   private cleanedUp = false
@@ -129,6 +130,7 @@ export class IssueBoardTui {
 
   private onResize = () => {
     this.lastRenderedLines = null
+    this.lastCursor = null
     this.render(true)
   }
 
@@ -195,10 +197,12 @@ export class IssueBoardTui {
     this.lastBuffer = buf
     if (forceClear) {
       this.lastRenderedLines = null
-      this.writeOutput(ANSI.clearScreen)
+      this.lastCursor = null
+      this.writeOutput(ANSI.cursorHide + ANSI.clearScreen)
     }
-    const { output, lines } = buf.diffOutput(this.lastRenderedLines)
+    const { output, lines, cursor } = buf.diffOutput(this.lastRenderedLines, this.lastCursor)
     this.lastRenderedLines = lines
+    this.lastCursor = cursor
     if (output) {
       this.writeOutput(output)
     }

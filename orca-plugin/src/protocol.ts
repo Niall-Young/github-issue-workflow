@@ -1,5 +1,7 @@
 export type IssueKind = 'feature' | 'bug' | 'polish'
 
+export type SubmitMode = 'handoff' | 'direct'
+
 export type BoardFileDescriptor = {
   version: 1
   repoPath?: string
@@ -49,7 +51,7 @@ export type NeedsYouItem =
 
 export type InProgressItem = {
   id: string
-  issueNumber: number
+  issueNumber: number | null
   title: string
   url: string
   statusLabel: string
@@ -81,6 +83,8 @@ export type BoardSnapshot = {
 
 export type CreateIssueInput = {
   repoPath: string
+  workspaceId?: string
+  mode?: SubmitMode
   kind: IssueKind
   title: string
   details?: string
@@ -90,10 +94,13 @@ export type CreateIssueInput = {
 
 export type CreateIssueResult = {
   ok: true
+  mode: SubmitMode
   issueNumber: number | null
   url: string
   title: string
   savedAttachments: SavedAttachment[]
+  terminalId?: string
+  agent?: string
 }
 
 export type ReplyAgentInput = {

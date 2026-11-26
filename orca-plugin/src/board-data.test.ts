@@ -1,12 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assert, test } from 'orca/testing'
 import {
+  buildHandoffPrompt,
   buildIssueBody,
   extractTerminalQuestion,
+  findBundledHandoffSkill,
   mergeBoardItems,
   parseGithubRepoFromRemote,
+  resolvePreferredAgent,
   saveAttachmentsLocally
 } from './board-data'
 
@@ -153,4 +156,85 @@ test('mergeBoardItems separates needsYou, inProgress, and completed cleanly', ()
   assert.equal(merged.inProgress.length, 2)
   assert.equal(merged.completed.length, 1)
   assert.equal(merged.completed[0].prUrl, 'https://github.com/owner/repo/pull/10')
+})
+
+test('buildHandoffPrompt embeds skill paths, attachments, follow-up, and autopilot label rule', () => {
+  const prompt = buildHandoffPrompt({
+    repoPath: '/Users/demo/project',
+    repository: 'owner/repo',
+    kind: 'bug',
+    title: '导出按钮点击无反应',
+    details: '点击右上角导出后没有任何下载动作',
+    followUpOf: 18,
+    savedAttachments: [
+      {
+        name: 'shot.png',
+        mimeType: 'image/png',
+        size: 1024,
+        path: '/tmp/attachments/01-shot.png'
+      }
+    ],
+    autopilotInstalled: true,
+    skillPaths: {
+      skillMdPath: '/repo/github-issue-handoff/SKILL.md',
+      templatesPath: '/repo/github-issue-handoff/references/issue-templates.md'
+    }
+  })
+
+  assert.equal(prompt.includes('github-issue-handoff'), true)
+  assert.equal(prompt.includes('/repo/github-issue-handoff/SKILL.md'), true)
+  assert.equal(prompt.includes('/repo/github-issue-handoff/references/issue-templates.md'), true)
+  assert.equal(prompt.includes('https://github.com/owner/repo'), true)
+  assert.equal(prompt.includes('Bug（问题修复）'), true)
+  assert.equal(prompt.includes('针对 #18 的后续调整'), true)
+  assert.equal(prompt.includes('/tmp/attachments/01-shot.png'), true)
+  assert.equal(prompt.includes('agent-ready'), true)
+})
+
+test('resolvePreferredAgent prefers autopilot default, then Orca default, then codex', async () => {
+  const fromAutopilot = await resolvePreferredAgent('claude', async () => {
+    throw new Error('should not call runner when autopilotDefaultAgent is set')
+  })
+  assert.equal(fromAutopilot, 'claude')
+
+  const fromOrca = await resolvePreferredAgent(null, async () => ({
+    stdout: JSON.stringify({
+      ok: true,
+      result: {
+        agents: [
+          { id: 'codex', default: false },
+          { id: 'antigravity', default: true }
+        ]
+      }
+    }),
+    stderr: '',
+    exitCode: 0
+  }))
+  assert.equal(fromOrca, 'antigravity')
+
+  const fallback = await resolvePreferredAgent(null, async () => ({
+    stdout: '',
+    stderr: 'not available',
+    exitCode: 1
+  }))
+  assert.equal(fallback, 'codex')
+})
+
+test('findBundledHandoffSkill locates sibling SKILL.md and issue-templates.md', () => {
+  const root = mkdtempSync(join(tmpdir(), 'handoff-skill-test-'))
+  try {
+    const pluginDir = join(root, 'orca-plugin')
+    const skillDir = join(root, 'github-issue-handoff')
+    const refDir = join(skillDir, 'references')
+    mkdirSync(pluginDir, { recursive: true })
+    mkdirSync(refDir, { recursive: true })
+    writeFileSync(join(skillDir, 'SKILL.md'), '# skill', 'utf8')
+    writeFileSync(join(refDir, 'issue-templates.md'), '# templates', 'utf8')
+
+    const found = findBundledHandoffSkill(pluginDir)
+    assert.equal(found?.skillMdPath, join(skillDir, 'SKILL.md'))
+    assert.equal(found?.templatesPath, join(refDir, 'issue-templates.md'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

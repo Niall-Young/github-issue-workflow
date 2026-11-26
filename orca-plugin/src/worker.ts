@@ -1,26 +1,42 @@
 import { basename, resolve } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 import {
+  buildHandoffPrompt,
   createAgentReadyIssue,
   defaultRunner,
   ensureBoardAnchorFile,
   extractTerminalQuestion,
   fetchGithubIssues,
+  fetchGithubPullRequests,
   findAutopilotConfigForRepo,
   findBundledAutopilotAdmin,
+  findBundledHandoffSkill,
   mergeBoardItems,
   readLedgerIssues,
   resolveGitRepository,
   resolvePluginRootDir,
+  resolvePreferredAgent,
   saveAttachmentsLocally
 } from './board-data'
-import type { BoardSnapshot, NeedsYouItem } from './protocol'
+import type { BoardSnapshot, InProgressItem, NeedsYouItem } from './protocol'
 
 const POLL_INTERVAL_MS = 12_000
+const HANDOFF_BOOT_GRACE_MS = 25_000
+
+type PendingHandoff = {
+  terminalId: string
+  workspaceId: string
+  repoPath: string
+  title: string
+  agent: string
+  startedAt: string
+  startedMs: number
+}
 
 export default function activate(orca: OrcaWorkerApi) {
   const pluginRoot = resolvePluginRootDir()
   const notifiedIds = new Set<string>()
+  const pendingHandoffs = new Map<string, PendingHandoff>()
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
   async function resolveWorkspaceInfo(requestedRepoPath?: string, requestedWorkspaceId?: string) {
@@ -56,7 +72,7 @@ export default function activate(orca: OrcaWorkerApi) {
     }
   }
 
-  async function collectAgentQuestions(
+  async function collectAgentState(
     projectId: string | null,
     repoPath: string | null,
     workspaces: Array<{
@@ -66,7 +82,7 @@ export default function activate(orca: OrcaWorkerApi) {
       projectId?: string | null
       status?: { state: string }
     }>
-  ): Promise<NeedsYouItem[]> {
+  ): Promise<{ questions: NeedsYouItem[]; terminalStates: Map<string, string> }> {
     const related = workspaces.filter((w) => {
       if (projectId && w.projectId === projectId) return true
       if (repoPath && resolve(w.path) === repoPath) return true
@@ -74,10 +90,14 @@ export default function activate(orca: OrcaWorkerApi) {
     })
 
     const questions: NeedsYouItem[] = []
+    const terminalStates = new Map<string, string>()
     for (const ws of related) {
       try {
         const res = await orca.host.call('agents.list', { workspaceId: ws.id })
         for (const agent of res.agents || []) {
+          if (agent.terminalId) {
+            terminalStates.set(agent.terminalId, agent.state)
+          }
           if (
             agent.terminalId &&
             (agent.state === 'blocked' || agent.state === 'waiting')
@@ -110,7 +130,39 @@ export default function activate(orca: OrcaWorkerApi) {
         continue
       }
     }
-    return questions
+    return { questions, terminalStates }
+  }
+
+  function reconcilePendingHandoffs(
+    repoPath: string,
+    terminalStates: Map<string, string>
+  ): InProgressItem[] {
+    const now = Date.now()
+    const items: InProgressItem[] = []
+    for (const [terminalId, entry] of pendingHandoffs.entries()) {
+      if (entry.repoPath !== repoPath) continue
+      const state = terminalStates.get(terminalId)
+      if (state === 'done') {
+        pendingHandoffs.delete(terminalId)
+        continue
+      }
+      if (!state && now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
+        pendingHandoffs.delete(terminalId)
+        continue
+      }
+      items.push({
+        id: `handoff-${terminalId}`,
+        issueNumber: null,
+        title: entry.title,
+        url: '',
+        statusLabel:
+          state === 'waiting' || state === 'blocked'
+            ? `Skill 等待确认 (${entry.agent})`
+            : `Skill 整理提单中 (${entry.agent})`,
+        updatedAt: entry.startedAt
+      })
+    }
+    return items
   }
 
   async function buildSnapshot(input?: {
@@ -144,13 +196,18 @@ export default function activate(orca: OrcaWorkerApi) {
     const repository = input?.repository || gitInfo.repository
     const autopilot = findAutopilotConfigForRepo(repoPath, repository)
 
-    const [ledgerRows, githubIssues, agentQuestions] = await Promise.all([
+    const [ledgerRows, githubIssues, agentState] = await Promise.all([
       autopilot ? readLedgerIssues(autopilot.dbPath) : Promise.resolve([]),
       fetchGithubIssues(repoPath),
-      collectAgentQuestions(projectId, repoPath, workspaces)
+      collectAgentState(projectId, repoPath, workspaces)
     ])
 
-    const merged = mergeBoardItems({ ledgerRows, githubIssues, agentQuestions })
+    const merged = mergeBoardItems({
+      ledgerRows,
+      githubIssues,
+      agentQuestions: agentState.questions
+    })
+    const activeHandoffs = reconcilePendingHandoffs(repoPath, agentState.terminalStates)
 
     return {
       projectName: basename(repoPath),
@@ -161,7 +218,7 @@ export default function activate(orca: OrcaWorkerApi) {
       syncedAt,
       error: null,
       needsYou: merged.needsYou,
-      inProgress: merged.inProgress,
+      inProgress: [...activeHandoffs, ...merged.inProgress],
       completed: merged.completed
     }
   }
@@ -226,9 +283,71 @@ export default function activate(orca: OrcaWorkerApi) {
   })
 
   orca.panels.handle('board.createIssue', async (input) => {
-    const result = await createAgentReadyIssue(input)
+    const mode = input.mode ?? 'handoff'
+    if (mode === 'direct') {
+      const result = await createAgentReadyIssue(input)
+      void refreshStatusBarAndNotify()
+      return result
+    }
+
+    const title = input.title.trim()
+    if (!title) {
+      throw new Error('请输入任务标题或问题描述')
+    }
+
+    const { repoPath: resolvedPath, workspaceId } = await resolveWorkspaceInfo(
+      input.repoPath,
+      input.workspaceId
+    )
+    if (!resolvedPath || !workspaceId) {
+      throw new Error('未找到当前项目的 Orca 工作区，请先选择项目或切换为直提模式')
+    }
+
+    const gitInfo = await resolveGitRepository(resolvedPath)
+    const autopilot = findAutopilotConfigForRepo(gitInfo.rootPath, gitInfo.repository)
+    const savedAttachments = saveAttachmentsLocally(gitInfo.rootPath, input.attachments)
+    const skillPaths = findBundledHandoffSkill(pluginRoot)
+    const agent = await resolvePreferredAgent(autopilot?.defaultAgent ?? null)
+    const prompt = buildHandoffPrompt({
+      repoPath: gitInfo.rootPath,
+      repository: autopilot?.repository || gitInfo.repository,
+      kind: input.kind,
+      title,
+      details: input.details,
+      followUpOf: input.followUpOf,
+      savedAttachments,
+      autopilotInstalled: Boolean(autopilot),
+      skillPaths
+    })
+
+    const launched = await orca.host.call('agent.launch', {
+      workspaceId,
+      agent,
+      prompt
+    })
+
+    const nowMs = Date.now()
+    pendingHandoffs.set(launched.terminalId, {
+      terminalId: launched.terminalId,
+      workspaceId,
+      repoPath: gitInfo.rootPath,
+      title,
+      agent,
+      startedAt: new Date(nowMs).toISOString(),
+      startedMs: nowMs
+    })
+
     void refreshStatusBarAndNotify()
-    return result
+    return {
+      ok: true as const,
+      mode: 'handoff' as const,
+      issueNumber: null,
+      url: '',
+      title,
+      savedAttachments,
+      terminalId: launched.terminalId,
+      agent
+    }
   })
 
   orca.panels.handle('board.replyAgent', async (input) => {

@@ -1,4 +1,10 @@
-import type { AttachmentPayload, BoardSnapshot, IssueKind, NeedsYouItem } from '../src/protocol'
+import type {
+  AttachmentPayload,
+  BoardSnapshot,
+  IssueKind,
+  NeedsYouItem,
+  SubmitMode
+} from '../src/protocol'
 import { BOARD_STYLES } from './styles'
 import { loadBoardDescriptor } from './sync'
 
@@ -25,6 +31,7 @@ type UIState = {
   enablingAutopilot: boolean
   busyItemIds: Set<string>
   kind: IssueKind
+  submitMode: SubmitMode
   titleDraft: string
   detailsDraft: string
   showDetails: boolean
@@ -43,6 +50,7 @@ const state: UIState = {
   enablingAutopilot: false,
   busyItemIds: new Set(),
   kind: 'feature',
+  submitMode: 'handoff',
   titleDraft: '',
   detailsDraft: '',
   showDetails: false,
@@ -216,6 +224,8 @@ async function handleCreateIssue() {
     const details = state.detailsDraft.trim()
     const payload: {
       repoPath: string
+      workspaceId?: string
+      mode: SubmitMode
       kind: IssueKind
       title: string
       details?: string
@@ -223,9 +233,11 @@ async function handleCreateIssue() {
       attachments?: AttachmentPayload[]
     } = {
       repoPath,
+      mode: state.submitMode,
       kind: state.kind,
       title
     }
+    if (descriptor.workspaceId) payload.workspaceId = descriptor.workspaceId
     if (details) payload.details = details
     if (state.followUpOf !== null) payload.followUpOf = state.followUpOf
     if (attachments.length > 0) payload.attachments = attachments
@@ -237,7 +249,17 @@ async function handleCreateIssue() {
     state.followUpOf = null
     state.attachments = []
     const attMsg = res.savedAttachments.length > 0 ? `（含 ${res.savedAttachments.length} 个附件）` : ''
-    showToast('success', `已提交${res.issueNumber ? ` #${res.issueNumber}` : ''}${attMsg}，后台助手会自动接手`)
+    if (res.mode === 'handoff') {
+      showToast(
+        'success',
+        `已启动 ${res.agent || 'Agent'} 按 github-issue-handoff 整理并提单${attMsg}；如需补充信息会出现在右侧「需要你处理」`
+      )
+    } else {
+      showToast(
+        'success',
+        `已直接提交${res.issueNumber ? ` #${res.issueNumber}` : ''}${attMsg}，后台助手会自动接手`
+      )
+    }
     await fetchSnapshot(true)
   } catch (err) {
     showToast('error', err instanceof Error ? err.message : String(err))
@@ -539,6 +561,22 @@ function renderComposer(): HTMLElement {
   }
 
   const rightActions = el('div', 'tui-group')
+  const modeBtn = el(
+    'button',
+    `tui-kind${state.submitMode === 'handoff' ? ' active' : ''}`,
+    state.submitMode === 'handoff' ? '[模式: Skill 提单]' : '[模式: 直提]'
+  )
+  modeBtn.type = 'button'
+  modeBtn.disabled = state.submitting
+  modeBtn.title =
+    state.submitMode === 'handoff'
+      ? '当前通过 github-issue-handoff Skill 读代码、查重并按模板提单（点击切换直提）'
+      : '当前直接调用 gh issue create 快速提单（点击切换 Skill 提单）'
+  modeBtn.addEventListener('click', () => {
+    state.submitMode = state.submitMode === 'handoff' ? 'direct' : 'handoff'
+    render()
+  })
+
   const attachBtn = el('button', 'tui-btn', '+ 截图/文件')
   attachBtn.type = 'button'
   attachBtn.disabled = state.submitting
@@ -554,13 +592,19 @@ function renderComposer(): HTMLElement {
   const submitBtn = el(
     'button',
     'tui-btn tui-btn-primary',
-    state.submitting ? '提交中...' : '⌘↵ 提交'
+    state.submitting
+      ? state.submitMode === 'handoff'
+        ? '启动 Skill 中...'
+        : '提交中...'
+      : state.submitMode === 'handoff'
+        ? '⌘↵ Skill 提单'
+        : '⌘↵ 直接提交'
   )
   submitBtn.type = 'button'
   submitBtn.disabled = state.submitting
   submitBtn.addEventListener('click', () => void handleCreateIssue())
 
-  rightActions.append(attachBtn, detailsBtn, submitBtn)
+  rightActions.append(modeBtn, attachBtn, detailsBtn, submitBtn)
   bar.append(kinds, rightActions)
   box.append(bar)
   return box
@@ -597,7 +641,7 @@ function renderLeftPane(snap: BoardSnapshot | null): HTMLElement {
       const line = el('div', 'tui-row-line')
       line.append(
         el('span', 'tui-glyph-run', '◌'),
-        el('span', 'tui-row-num', `#${item.issueNumber}`),
+        el('span', 'tui-row-num', item.issueNumber !== null ? `#${item.issueNumber}` : '[SKILL]'),
         el('span', 'tui-row-title', item.title)
       )
       main.append(line)

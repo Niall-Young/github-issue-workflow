@@ -12,6 +12,8 @@ import type {
   InProgressItem,
   IssueKind,
   NeedsYouItem,
+  PullRequestCheckState,
+  PullRequestItem,
   SavedAttachment
 } from './protocol'
 
@@ -54,6 +56,12 @@ export type AutopilotConfigInfo = {
   repository: string
   repoPath: string
   runtimeAdminPath: string
+  defaultAgent: string | null
+}
+
+export type HandoffSkillPaths = {
+  skillMdPath: string
+  templatesPath: string | null
 }
 
 export type LedgerIssueRow = {
@@ -112,6 +120,7 @@ export function findAutopilotConfigForRepo(
     try {
       const raw = JSON.parse(readFileSync(configPath, 'utf8')) as {
         state_db?: string
+        orca?: { default_agent?: string }
         repositories?: Array<{ repository?: string; repo_path?: string }>
       }
       const entry = raw.repositories?.[0]
@@ -130,7 +139,8 @@ export function findAutopilotConfigForRepo(
           dbPath,
           repository: entry.repository || repository || '',
           repoPath: entryRepoPath || normalizedRepoPath || '',
-          runtimeAdminPath: join(dir, 'runtime', 'autopilot_admin.py')
+          runtimeAdminPath: join(dir, 'runtime', 'autopilot_admin.py'),
+          defaultAgent: raw.orca?.default_agent?.trim() || null
         }
       }
     } catch {
@@ -150,6 +160,134 @@ export function findBundledAutopilotAdmin(pluginDir: string): string | null {
     if (existsSync(candidate)) return candidate
   }
   return null
+}
+
+export function findBundledHandoffSkill(pluginDir: string): HandoffSkillPaths | null {
+  const candidates = [
+    resolve(pluginDir, '..', 'github-issue-handoff', 'SKILL.md'),
+    join(homedir(), '.claude', 'skills', 'github-issue-handoff', 'SKILL.md'),
+    join(homedir(), '.codex', 'skills', 'github-issue-handoff', 'SKILL.md'),
+    join(homedir(), '.agents', 'skills', 'github-issue-handoff', 'SKILL.md'),
+    join(homedir(), '.gemini', 'antigravity-cli', 'skills', 'github-issue-handoff', 'SKILL.md')
+  ]
+  for (const skillMdPath of candidates) {
+    if (existsSync(skillMdPath)) {
+      const templatesCandidate = join(dirname(skillMdPath), 'references', 'issue-templates.md')
+      return {
+        skillMdPath,
+        templatesPath: existsSync(templatesCandidate) ? templatesCandidate : null
+      }
+    }
+  }
+  return null
+}
+
+export async function resolvePreferredAgent(
+  autopilotDefaultAgent: string | null,
+  runner: CommandRunner = defaultRunner
+): Promise<string> {
+  if (autopilotDefaultAgent && autopilotDefaultAgent.trim()) {
+    return autopilotDefaultAgent.trim()
+  }
+  const res = await runner('orca', ['agent', 'installed', '--json'], { timeoutMs: 8_000 })
+  if (res.exitCode === 0 && res.stdout.trim()) {
+    try {
+      const parsed = JSON.parse(res.stdout) as {
+        result?: { agents?: Array<{ id?: string; default?: boolean }> }
+        agents?: Array<{ id?: string; default?: boolean }>
+      }
+      const list = parsed.result?.agents || parsed.agents || []
+      const def = list.find((a) => a.default && a.id)
+      if (def?.id) return def.id
+      const first = list.find((a) => a.id)
+      if (first?.id) return first.id
+    } catch {
+      // fall through
+    }
+  }
+  return 'codex'
+}
+
+export function buildHandoffPrompt(params: {
+  repoPath: string
+  repository: string | null
+  kind: IssueKind
+  title: string
+  details?: string
+  followUpOf?: number | null
+  savedAttachments?: SavedAttachment[]
+  autopilotInstalled?: boolean
+  skillPaths?: HandoffSkillPaths | null
+}): string {
+  const repoUrl = params.repository ? `https://github.com/${params.repository}` : params.repoPath
+  const kindHint =
+    params.kind === 'bug'
+      ? 'Bug（问题修复）'
+      : params.kind === 'polish'
+        ? 'Feature 或 Refactor（体验优化，请结合仓库代码选择最合适的模板分类）'
+        : 'Feature（新功能）'
+
+  const lines: string[] = [
+    `请严格按照 \`github-issue-handoff\` Skill 为目标仓库创建一条高质量、Agent 可直接执行的中文 GitHub Issue。`,
+    `用户已在 Orca Issue 看板中明确点击提交，本请求已授权直接创建符合门禁的单条 Issue（无需额外预览确认；仅当关键信息缺失无法通过门禁、检测到高置信度重复 Issue、或需要拆分为多条独立任务时，再在当前终端向用户提问确认）。`
+  ]
+
+  if (params.skillPaths) {
+    lines.push(
+      '',
+      `## Skill 规范文件（请先完整阅读并严格遵守）`,
+      `- Skill 主文档：\`${params.skillPaths.skillMdPath}\``
+    )
+    if (params.skillPaths.templatesPath) {
+      lines.push(`- 模板文件：\`${params.skillPaths.templatesPath}\``)
+    }
+  } else {
+    lines.push('', `请加载并使用 \`$github-issue-handoff\` Skill 及其模板规范。`)
+  }
+
+  lines.push(
+    '',
+    `## 目标仓库`,
+    `- GitHub 仓库：${repoUrl}`,
+    `- 本地路径：\`${params.repoPath}\``,
+    '',
+    `## 用户提交的原始需求`,
+    `- 倾向类型：${kindHint}`,
+    `- 简述/标题：${params.title.trim()}`
+  )
+
+  if (params.details && params.details.trim()) {
+    lines.push(`- 补充说明：`, params.details.trim())
+  }
+  if (params.followUpOf && Number.isInteger(params.followUpOf) && params.followUpOf > 0) {
+    lines.push(`- 关联历史 Issue：针对 #${params.followUpOf} 的后续调整或补充验收意见`)
+  }
+
+  const attachments = params.savedAttachments || []
+  if (attachments.length > 0) {
+    lines.push(
+      '',
+      `## 本地附件（请先查看以补充上下文，并将路径写入 Issue 的「参考信息」中供后续修复 Agent 读取）`
+    )
+    for (const att of attachments) {
+      const tag = att.mimeType.startsWith('image/') ? '截图' : '文件'
+      lines.push(`- [${tag}] \`${att.path}\` (${att.name}, ${formatBytes(att.size)})`)
+    }
+  }
+
+  lines.push(
+    '',
+    `## 执行要求`,
+    `1. 检查 \`gh auth status\` 与仓库元信息，阅读相关代码、配置与测试，基于已验证事实补全「仓库上下文」「任务范围」「不在范围内」「验收标准」「验证方式」。`,
+    `2. 检索 open 与 closed Issue 避免重复；如发现高置信度重复或安全漏洞，按 Skill 规则停止并说明。`,
+    `3. 使用中文标题并带标准前缀（\`[Feature]\` / \`[Bug]\` / \`[Refactor]\` / \`[Research]\`），严格套用对应模板并通过可执行性门禁。`,
+    params.autopilotInstalled
+      ? `4. 当前仓库已启用 Autopilot：请务必附带 \`agent-ready\` 标签（如标签缺失可先创建），并通过 stdin 或临时文件调用 \`gh issue create\` 提交。`
+      : `4. 按 Skill 规则检查本地 \`.git/github-issue-autopilot.json\` 决定是否附带 \`agent-ready\` 标签，并通过 stdin 或临时文件调用 \`gh issue create\` 提交。`,
+    `5. 提交后必须用 \`gh issue view\` 回读验证仓库、标题、正文与标签完整，最后输出最终标题与可点击 Issue URL。`
+  )
+
+  return lines.join('\n')
 }
 
 export async function readLedgerIssues(
@@ -243,6 +381,121 @@ export async function fetchGithubIssues(
   try {
     const parsed = JSON.parse(res.stdout)
     return Array.isArray(parsed) ? (parsed as GithubIssueRow[]) : []
+  } catch {
+    return []
+  }
+}
+
+export type GithubPullRequestRow = {
+  number: number
+  title: string
+  state: 'OPEN' | 'MERGED' | 'CLOSED'
+  isDraft?: boolean
+  url: string
+  headRefName?: string
+  baseRefName?: string
+  author?: { login?: string } | null
+  mergeable?: string | null
+  reviewDecision?: string | null
+  statusCheckRollup?: Array<{
+    status?: string
+    conclusion?: string
+    state?: string
+  }> | null
+  updatedAt: string
+  mergedAt?: string | null
+}
+
+export function summarizePrChecks(
+  rollup: GithubPullRequestRow['statusCheckRollup']
+): PullRequestCheckState {
+  if (!Array.isArray(rollup) || rollup.length === 0) return 'none'
+  const failureStates = new Set([
+    'FAILURE',
+    'TIMED_OUT',
+    'ACTION_REQUIRED',
+    'STARTUP_FAILURE',
+    'STALE',
+    'ERROR',
+    'CANCELLED'
+  ])
+  const passingStates = new Set(['SUCCESS', 'SKIPPED', 'NEUTRAL'])
+  let hasPending = false
+  let hasAny = false
+
+  for (const check of rollup) {
+    if (!check || typeof check !== 'object') continue
+    hasAny = true
+    const conclusion = (check.conclusion || '').toUpperCase()
+    const status = (check.status || '').toUpperCase()
+    const state = (check.state || '').toUpperCase()
+    const value = conclusion || state || status
+    if (failureStates.has(value)) return 'failing'
+    if (
+      status === 'QUEUED' ||
+      status === 'IN_PROGRESS' ||
+      status === 'PENDING' ||
+      status === 'WAITING' ||
+      state === 'PENDING' ||
+      state === 'EXPECTED' ||
+      !passingStates.has(value)
+    ) {
+      hasPending = true
+    }
+  }
+  if (!hasAny) return 'none'
+  return hasPending ? 'pending' : 'passing'
+}
+
+export function normalizePullRequests(rows: GithubPullRequestRow[]): PullRequestItem[] {
+  const items: PullRequestItem[] = rows.map((row) => ({
+    number: row.number,
+    title: row.title,
+    state: row.state,
+    isDraft: Boolean(row.isDraft),
+    url: row.url,
+    headRefName: row.headRefName || '',
+    baseRefName: row.baseRefName || '',
+    author: row.author?.login || null,
+    mergeable: row.mergeable || null,
+    reviewDecision: row.reviewDecision || null,
+    ciStatus: summarizePrChecks(row.statusCheckRollup),
+    updatedAt: row.updatedAt,
+    mergedAt: row.mergedAt || null
+  }))
+
+  return items.sort((a, b) => {
+    const aOpen = a.state === 'OPEN' ? 0 : 1
+    const bOpen = b.state === 'OPEN' ? 0 : 1
+    if (aOpen !== bOpen) return aOpen - bOpen
+    const aTime = Date.parse(a.mergedAt || a.updatedAt) || 0
+    const bTime = Date.parse(b.mergedAt || b.updatedAt) || 0
+    return bTime - aTime
+  })
+}
+
+export async function fetchGithubPullRequests(
+  repoPath: string,
+  runner: CommandRunner = defaultRunner
+): Promise<PullRequestItem[]> {
+  const res = await runner(
+    'gh',
+    [
+      'pr',
+      'list',
+      '--state',
+      'all',
+      '--limit',
+      '40',
+      '--json',
+      'number,title,state,isDraft,url,headRefName,baseRefName,author,mergeable,reviewDecision,statusCheckRollup,updatedAt,mergedAt'
+    ],
+    { cwd: repoPath, timeoutMs: 15_000 }
+  )
+  if (res.exitCode !== 0 || !res.stdout.trim()) return []
+  try {
+    const parsed = JSON.parse(res.stdout)
+    return Array.isArray(parsed) ? normalizePullRequests(parsed as GithubPullRequestRow[]) : []
   } catch {
     return []
   }
@@ -377,6 +630,7 @@ export async function createAgentReadyIssue(
   const numMatch = url.match(/\/issues\/(\d+)$/)
   return {
     ok: true,
+    mode: 'direct',
     issueNumber: numMatch ? Number(numMatch[1]) : null,
     url,
     title,
@@ -472,6 +726,7 @@ export function mergeBoardItems(params: {
         title: row.title,
         reason: humanizeAttentionReason(status, summary),
         url: row.url,
+        prUrl: row.pr_url,
         rawStatus: status,
         updatedAt: row.issue_updated_at,
         canRetry: true,
@@ -485,6 +740,7 @@ export function mergeBoardItems(params: {
       issueNumber: row.issue_number,
       title: row.title,
       url: row.url,
+      prUrl: row.pr_url,
       statusLabel: status === 'pr-open' ? '收尾合并中' : '处理中',
       updatedAt: row.issue_updated_at
     })

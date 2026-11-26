@@ -16,6 +16,7 @@
     { "kind": "workspace:read" },
     { "kind": "workspace:write" },
     { "kind": "agent:read" },
+    { "kind": "agent:launch" },
     { "kind": "terminal:read" },
     { "kind": "terminal:send" },
     { "kind": "notifications:show" },

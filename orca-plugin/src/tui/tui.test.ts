@@ -353,11 +353,11 @@ test('renderTui keeps inline [Image #1] on a single composer line without duplic
   assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-issue-kind'), true)
   assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-submit-mode'), true)
 
-  // Footer shows active kind & default off Skill toggle, and inline error notice replaces right hint without a banner
+  // Footer shows active kind & default handoff mode, and inline error notice replaces right hint without a banner
   const footerLine = plainLines[plainLines.length - 1]
   assert.ok(footerLine.includes('● 新功能'))
-  assert.ok(footerLine.includes('○ Skill 规范提单'))
-  assert.ok(!footerLine.includes('✓ Skill 规范提单'))
+  assert.ok(footerLine.includes('✓ handoff 规范提单'))
+  assert.ok(!footerLine.includes('○ direct 快速直提'))
 
   state.errorNotice = '剪贴板中未检测到截图'
   const errBuf = renderTui(state, 110, 30)
@@ -383,95 +383,116 @@ test('renderTui keeps inline [Image #1] on a single composer line without duplic
   }
 })
 
-test('Codex-style footer defaults Skill handoff to off and toggles enabled indicator cleanly with hit-boxes and slash menu sync', () => {
-  assert.equal(DEFAULT_SUBMIT_MODE, 'direct')
+test('Codex-style footer defaults to handoff and switches distinct labels/styles cleanly with hit-boxes and slash menu sync', () => {
+  assert.equal(DEFAULT_SUBMIT_MODE, 'handoff')
   assert.equal(nextIssueKind('feature'), 'bug')
   assert.equal(nextIssueKind('bug'), 'polish')
   assert.equal(nextIssueKind('polish'), 'feature')
-  assert.equal(nextSubmitMode('direct'), 'handoff')
   assert.equal(nextSubmitMode('handoff'), 'direct')
+  assert.equal(nextSubmitMode('direct'), 'handoff')
 
-  // IssueBoardTui initializes with Skill handoff disabled ('direct') by default
-  const app = new IssueBoardTui('/tmp/demo-app')
+  // IssueBoardTui initializes with 'handoff' by default
+  const app = new IssueBoardTui('/tmp/demo-app', { writeOutput: () => {} })
   const initialComposer = (app as unknown as { state: TuiState }).state.composer
-  assert.equal(initialComposer.mode, 'direct')
+  assert.equal(initialComposer.mode, 'handoff')
 
   const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
 
-  // 1. Default state ('direct'): dimmed unselected toggle, no active checkmark indicator
+  // 1. Default state ('handoff'): highlighted handoff label
   const state = makeBaseState('')
   const buf = renderTui(state, 110, 30)
-  const rawFooterOff = buf.renderLines()[29]!
-  const footerOff = stripAnsi(rawFooterOff)
-  assert.ok(footerOff.includes('● 新功能'))
-  assert.ok(footerOff.includes('○ Skill 规范提单'))
-  assert.ok(!footerOff.includes('✓ Skill 规范提单'))
-  assert.ok(rawFooterOff.includes(`${PALETTE.dim} · ○ Skill 规范提单`))
-  assert.ok(footerOff.includes('⇧Tab 切换'))
-  assert.ok(!footerOff.includes('Enter 提交/执行'))
+  const rawFooterHandoff = buf.renderLines()[29]!
+  const footerHandoff = stripAnsi(rawFooterHandoff)
+  assert.ok(footerHandoff.includes('● 新功能'))
+  assert.ok(footerHandoff.includes('✓ handoff 规范提单'))
+  assert.ok(!footerHandoff.includes('○ direct 快速直提'))
+  assert.ok(rawFooterHandoff.includes(`${PALETTE.accentBold}✓ handoff 规范提单`))
+  assert.ok(footerHandoff.includes('⇧Tab 切换'))
+  assert.ok(!footerHandoff.includes('Enter 提交/执行'))
 
   const kindHits = buf.hitBoxes.filter((h) => h.action === 'cycle-issue-kind')
-  const modeHitsOff = buf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
+  const modeHitsHandoff = buf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
   assert.equal(kindHits.length, 1)
   assert.equal(kindHits[0]?.y, 29)
-  assert.equal(modeHitsOff.length, 1)
-  assert.equal(modeHitsOff[0]?.y, 29)
+  assert.equal(modeHitsHandoff.length, 1)
+  assert.equal(modeHitsHandoff[0]?.y, 29)
+  assert.equal(modeHitsHandoff[0]?.w, stringDisplayWidth('✓ handoff 规范提单'))
 
-  // Slash menu reflects default 'direct' active checkmark
-  const slashOffState = makeBaseState('/')
-  slashOffState.composer.mode = 'direct'
-  const slashOffLines = renderTui(slashOffState, 110, 30).renderLines().map(stripAnsi)
-  const directRowOff = slashOffLines.find((l) => l.includes('/direct'))!
-  const handoffRowOff = slashOffLines.find((l) => l.includes('/handoff'))!
-  assert.ok(directRowOff.trimEnd().endsWith('✓'))
-  assert.ok(!handoffRowOff.trimEnd().endsWith('✓'))
+  // Slash menu reflects default 'handoff' active checkmark
+  const slashHandoffState = makeBaseState('/')
+  const slashHandoffLines = renderTui(slashHandoffState, 110, 30).renderLines().map(stripAnsi)
+  const directRowHandoff = slashHandoffLines.find((l) => l.includes('/direct'))!
+  const handoffRowHandoff = slashHandoffLines.find((l) => l.includes('/handoff'))!
+  assert.ok(handoffRowHandoff.trimEnd().endsWith('✓'))
+  assert.ok(!directRowHandoff.trimEnd().endsWith('✓'))
 
-  // 2. Toggle on ('handoff'): highlighted enabled indicator with identical hit-box width (no layout shift)
+  // 2. Toggle to 'direct': clearly distinct dimmed direct label and updated hit-box width
   state.composer.kind = nextIssueKind(state.composer.kind)
   state.composer.mode = nextSubmitMode(state.composer.mode)
   state.composer.followUpOf = 42
-  assert.equal(state.composer.mode, 'handoff')
-  const onBuf = renderTui(state, 110, 30)
-  const rawFooterOn = onBuf.renderLines()[29]!
-  const footerOn = stripAnsi(rawFooterOn)
-  assert.ok(footerOn.includes('● 修 Bug'))
-  assert.ok(footerOn.includes('✓ Skill 规范提单'))
-  assert.ok(!footerOn.includes('○ Skill 规范提单'))
-  assert.ok(rawFooterOn.includes(`${PALETTE.accentBold}✓`))
-  assert.ok(footerOn.includes('追提 #42'))
-
-  const modeHitsOn = onBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
-  assert.equal(modeHitsOn.length, 1)
-  assert.equal(modeHitsOn[0]?.y, 29)
-  assert.equal(modeHitsOn[0]?.w, modeHitsOff[0]?.w)
-
-  // Slash menu reflects enabled 'handoff' active checkmark
-  const slashOnState = makeBaseState('/')
-  slashOnState.composer.mode = 'handoff'
-  const slashOnLines = renderTui(slashOnState, 110, 30).renderLines().map(stripAnsi)
-  const directRowOn = slashOnLines.find((l) => l.includes('/direct'))!
-  const handoffRowOn = slashOnLines.find((l) => l.includes('/handoff'))!
-  assert.ok(!directRowOn.trimEnd().endsWith('✓'))
-  assert.ok(handoffRowOn.trimEnd().endsWith('✓'))
-
-  // 3. Toggle back off ('direct'): restores dimmed unselected state
-  state.composer.mode = nextSubmitMode(state.composer.mode)
   assert.equal(state.composer.mode, 'direct')
-  const backOffBuf = renderTui(state, 110, 30)
-  const backOffFooter = stripAnsi(backOffBuf.renderLines()[29]!)
-  assert.ok(backOffFooter.includes('○ Skill 规范提单'))
-  assert.ok(!backOffFooter.includes('✓ Skill 规范提单'))
-  assert.equal(backOffBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode').length, 1)
+  const directBuf = renderTui(state, 110, 30)
+  const rawFooterDirect = directBuf.renderLines()[29]!
+  const footerDirect = stripAnsi(rawFooterDirect)
+  assert.ok(footerDirect.includes('● 修 Bug'))
+  assert.ok(footerDirect.includes('○ direct 快速直提'))
+  assert.ok(!footerDirect.includes('✓ handoff 规范提单'))
+  assert.ok(rawFooterDirect.includes(`${PALETTE.dim} · ○ direct 快速直提`))
+  assert.ok(footerDirect.includes('追提 #42'))
 
-  // 4. Narrow terminal width stays within bounds and preserves error/hint budget
-  const narrowState = makeBaseState('')
-  narrowState.composer.mode = 'handoff'
-  narrowState.errorNotice = '网络异常'
-  const narrowBuf = renderTui(narrowState, 46, 20)
-  const narrowFooter = stripAnsi(narrowBuf.renderLines()[19]!)
-  assert.ok(stringDisplayWidth(narrowFooter) <= 46)
-  assert.ok(narrowFooter.includes('✓ Skill 规范提单'))
-  assert.ok(narrowFooter.includes('⚠ 网络异常'))
+  const modeHitsDirect = directBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
+  assert.equal(modeHitsDirect.length, 1)
+  assert.equal(modeHitsDirect[0]?.y, 29)
+  assert.equal(modeHitsDirect[0]?.x, modeHitsHandoff[0]?.x)
+  assert.equal(modeHitsDirect[0]?.w, stringDisplayWidth('○ direct 快速直提'))
+
+  // Slash menu reflects 'direct' active checkmark
+  const slashDirectState = makeBaseState('/')
+  slashDirectState.composer.mode = 'direct'
+  const slashDirectLines = renderTui(slashDirectState, 110, 30).renderLines().map(stripAnsi)
+  const directRowDirect = slashDirectLines.find((l) => l.includes('/direct'))!
+  const handoffRowDirect = slashDirectLines.find((l) => l.includes('/handoff'))!
+  assert.ok(directRowDirect.trimEnd().endsWith('✓'))
+  assert.ok(!handoffRowDirect.trimEnd().endsWith('✓'))
+
+  // 3. Toggle back to 'handoff' via IssueBoardTui actions (/direct -> /handoff -> click cycle-submit-mode)
+  const internalApp = app as unknown as {
+    state: TuiState
+    dispatchAction: (action: string, payload?: unknown) => void
+  }
+  internalApp.dispatchAction('exec-slash', 'direct')
+  assert.equal(internalApp.state.composer.mode, 'direct')
+  internalApp.dispatchAction('exec-slash', 'handoff')
+  assert.equal(internalApp.state.composer.mode, 'handoff')
+  internalApp.dispatchAction('cycle-submit-mode')
+  assert.equal(internalApp.state.composer.mode, 'direct')
+  internalApp.dispatchAction('cycle-submit-mode')
+  assert.equal(internalApp.state.composer.mode, 'handoff')
+
+  // 4. Toggle back to 'handoff' in render state restores highlighted handoff label
+  state.composer.mode = nextSubmitMode(state.composer.mode)
+  assert.equal(state.composer.mode, 'handoff')
+  const backHandoffBuf = renderTui(state, 110, 30)
+  const backHandoffFooter = stripAnsi(backHandoffBuf.renderLines()[29]!)
+  assert.ok(backHandoffFooter.includes('✓ handoff 规范提单'))
+  assert.ok(!backHandoffFooter.includes('○ direct 快速直提'))
+  assert.equal(backHandoffBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode').length, 1)
+
+  // 5. Narrow terminal width stays within bounds and preserves error/hint budget for both modes
+  const narrowHandoff = makeBaseState('')
+  narrowHandoff.composer.mode = 'handoff'
+  narrowHandoff.errorNotice = '网络异常'
+  const narrowHandoffFooter = stripAnsi(renderTui(narrowHandoff, 46, 20).renderLines()[19]!)
+  assert.ok(stringDisplayWidth(narrowHandoffFooter) <= 46)
+  assert.ok(narrowHandoffFooter.includes('✓ handoff 规范提单'))
+  assert.ok(narrowHandoffFooter.includes('⚠ 网络异常'))
+
+  const narrowDirect = makeBaseState('')
+  narrowDirect.composer.mode = 'direct'
+  const narrowDirectFooter = stripAnsi(renderTui(narrowDirect, 46, 20).renderLines()[19]!)
+  assert.ok(stringDisplayWidth(narrowDirectFooter) <= 46)
+  assert.ok(narrowDirectFooter.includes('○ direct 快速直提'))
+  assert.ok(narrowDirectFooter.includes('⇧Tab 切换'))
 })
 
 test('extractTerminalQuestion strips CLI chrome and handoff issue detection matches created URLs', () => {

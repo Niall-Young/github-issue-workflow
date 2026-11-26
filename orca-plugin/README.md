@@ -10,15 +10,21 @@
 - **Issues 与 PR 双视图**：左侧支持在 **Issues**（「进行中」与「已完成 · 可直接验收」）与 **PRs**（「打开中 PR」与「已合并 / 已关闭 PR」，展示分支、Draft、CI 状态、冲突标记与快捷跳转）之间切换，关联 PR 的 Issue 也可直接点开对应 PR。
 - **只在需要时打扰**：右侧「需要你处理」与底部状态栏红点提醒，仅在助手向你提问或任务需要人工拍板时亮起；回复助手时同样支持粘贴截图或附带文件。
 
-## 在 Orca 中加载（开发 / 本地使用）
+## 一键安装与打开（推荐）
+
+在仓库根目录执行一次安装：
 
 ```bash
-orca plugin dev load /path/to/github-issue-workflow/orca-plugin
+./scripts/orca-board --install
 ```
 
-首次加载会提示授权插件所需权限；按提示执行带 `--approve <fingerprint>` 的命令完成授权后：
+首次运行会提示授权插件，直接按回车确认即可。之后在**任意项目目录**只需一行命令即可打开当前项目的 Issue 看板：
 
-- 点击 Orca 底部状态栏的 **Issue 看板**，或按 `Cmd+Shift+I`（命令面板搜索「打开当前项目的 Issue 看板」），即可在当前项目主区域打开专属看板标签页。
+```bash
+orca-board
+```
+
+（也支持别名 `issue-board`，或在 Orca 底部状态栏点击 **Issue 看板** / 按 `Cmd+Shift+I`。）
 
 ## 验证命令
 

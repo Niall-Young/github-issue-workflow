@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""One-command launcher and installer for the Orca Issue Board plugin."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PLUGIN_DIR = REPO_ROOT / "orca-plugin"
+DEFAULT_PLUGIN_KEY = "local.issue-board"
+ANCHOR_NAME = ".orca-board.issue-board"
+CLI_NAMES = ("orca-board", "issue-board")
+
+
+def run_cmd(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def resolve_project_root(target: Path, runner=run_cmd) -> Path:
+    res = runner(["git", "rev-parse", "--show-toplevel"], cwd=str(target))
+    if res.returncode == 0 and res.stdout.strip():
+        return Path(res.stdout.strip()).resolve()
+    return target.resolve()
+
+
+def resolve_github_repo(root: Path, runner=run_cmd) -> str | None:
+    res = runner(["git", "remote", "get-url", "origin"], cwd=str(root))
+    if res.returncode != 0:
+        return None
+    url = res.stdout.strip()
+    match = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?$", url)
+    return match.group(1) if match else None
+
+
+def find_plugin(runner=run_cmd) -> tuple[dict | None, str | None]:
+    res = runner(["orca", "plugin", "list", "--json"])
+    if res.returncode != 0:
+        return None, (res.stderr.strip() or res.stdout.strip() or "orca plugin list failed")
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError as exc:
+        return None, str(exc)
+
+    plugins = data.get("result", {}).get("plugins", [])
+    fallback = None
+    for plugin in plugins:
+        key = plugin.get("pluginKey", "")
+        if key == DEFAULT_PLUGIN_KEY:
+            return plugin, None
+        if key.endswith(".issue-board") and fallback is None:
+            fallback = plugin
+    return fallback, None
+
+
+def extract_fingerprint(text: str) -> str | None:
+    match = re.search(r"Fingerprint:\s*(\S+)", text)
+    return match.group(1) if match else None
+
+
+def prompt_for_approval(plugin_key: str, fingerprint: str, input_fn=input) -> bool:
+    print(f"首次使用（或插件权限更新后）需要授权 Orca「Issue 看板」插件（{plugin_key}）。")
+    try:
+        answer = input_fn("按回车确认授权，输入 n 取消 [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in ("", "y", "yes")
+
+
+def ensure_plugin_ready(
+    plugin_dir: Path = PLUGIN_DIR,
+    runner=run_cmd,
+    is_tty: bool | None = None,
+    input_fn=input,
+) -> str:
+    if is_tty is None:
+        is_tty = sys.stdin.isatty()
+
+    plugin, err = find_plugin(runner=runner)
+    if err:
+        runner(["orca", "open"])
+        plugin, err = find_plugin(runner=runner)
+        if err:
+            raise RuntimeError(f"无法连接 Orca，请确认 Orca 已打开：{err}")
+
+    if plugin is None:
+        if not plugin_dir.exists():
+            raise RuntimeError(f"未找到插件目录：{plugin_dir}")
+        load_res = runner(["orca", "plugin", "dev", "load", str(plugin_dir)])
+        if load_res.returncode != 0:
+            combined = f"{load_res.stdout}\n{load_res.stderr}"
+            fp = extract_fingerprint(combined)
+            if fp and is_tty and prompt_for_approval(DEFAULT_PLUGIN_KEY, fp, input_fn=input_fn):
+                load_res = runner(
+                    ["orca", "plugin", "dev", "load", str(plugin_dir), "--approve", fp]
+                )
+            elif fp:
+                raise RuntimeError(
+                    "插件尚未授权，请在终端运行：\n"
+                    f"  orca plugin dev load {plugin_dir} --approve {fp}"
+                )
+        if load_res.returncode != 0:
+            raise RuntimeError(
+                f"加载插件失败：{load_res.stderr.strip() or load_res.stdout.strip()}"
+            )
+        plugin, err = find_plugin(runner=runner)
+        if err or plugin is None:
+            raise RuntimeError(f"加载插件后仍未找到 {DEFAULT_PLUGIN_KEY}")
+
+    plugin_key = plugin.get("pluginKey") or DEFAULT_PLUGIN_KEY
+    status = plugin.get("status")
+    needs_reconsent = bool(plugin.get("needsReconsent"))
+    if status not in ("running", "idle") or needs_reconsent:
+        en_res = runner(["orca", "plugin", "enable", plugin_key])
+        if en_res.returncode != 0:
+            combined = f"{en_res.stdout}\n{en_res.stderr}"
+            fp = extract_fingerprint(combined)
+            if fp:
+                if is_tty:
+                    if not prompt_for_approval(plugin_key, fp, input_fn=input_fn):
+                        raise RuntimeError("已取消插件授权。")
+                    en_res = runner(
+                        ["orca", "plugin", "enable", plugin_key, "--approve", fp]
+                    )
+                else:
+                    raise RuntimeError(
+                        "插件尚未授权，请在终端运行：\n"
+                        f"  orca plugin enable {plugin_key} --approve {fp}"
+                    )
+        if en_res.returncode != 0:
+            raise RuntimeError(
+                f"启用插件失败：{en_res.stderr.strip() or en_res.stdout.strip()}"
+            )
+
+    return plugin_key
+
+
+def ensure_anchor_file(root: Path, runner=run_cmd) -> Path:
+    anchor = root / ANCHOR_NAME
+    if not anchor.exists():
+        payload = {
+            "version": 1,
+            "repoPath": str(root),
+            "projectName": root.name,
+        }
+        repo = resolve_github_repo(root, runner=runner)
+        if repo:
+            payload["repository"] = repo
+        anchor.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    git_info = runner(["git", "rev-parse", "--git-path", "info/exclude"], cwd=str(root))
+    if git_info.returncode == 0 and git_info.stdout.strip():
+        exclude_path = Path(git_info.stdout.strip())
+        if not exclude_path.is_absolute():
+            exclude_path = (root / exclude_path).resolve()
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_text = (
+            exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        )
+        existing_lines = existing_text.splitlines()
+        if ANCHOR_NAME not in existing_lines:
+            with exclude_path.open("a", encoding="utf-8") as fh:
+                if existing_text and not existing_text.endswith("\n"):
+                    fh.write("\n")
+                fh.write(f"{ANCHOR_NAME}\n")
+
+    return anchor
+
+
+def install_cli(
+    bin_dir: Path | None = None,
+    script_path: Path | None = None,
+    names: tuple[str, ...] = CLI_NAMES,
+) -> list[Path]:
+    target_bin = (bin_dir or (Path.home() / ".local" / "bin")).expanduser()
+    source = (script_path or Path(__file__)).resolve()
+    target_bin.mkdir(parents=True, exist_ok=True)
+
+    installed: list[Path] = []
+    for name in names:
+        link_path = target_bin / name
+        if link_path.is_symlink() or link_path.exists():
+            link_path.unlink()
+        link_path.symlink_to(source)
+        installed.append(link_path)
+    return installed
+
+
+def open_board(
+    target: Path,
+    plugin_dir: Path = PLUGIN_DIR,
+    runner=run_cmd,
+    is_tty: bool | None = None,
+    input_fn=input,
+) -> str:
+    if not target.exists():
+        raise RuntimeError(f"目录不存在：{target}")
+
+    root = resolve_project_root(target, runner=runner)
+    plugin_key = ensure_plugin_ready(
+        plugin_dir=plugin_dir,
+        runner=runner,
+        is_tty=is_tty,
+        input_fn=input_fn,
+    )
+    anchor = ensure_anchor_file(root, runner=runner)
+
+    open_res = runner(
+        ["orca", "plugin", "open", plugin_key, "--editor", str(anchor), "--json"]
+    )
+    if open_res.returncode != 0:
+        raise RuntimeError(
+            f"打开看板失败：{open_res.stderr.strip() or open_res.stdout.strip()}"
+        )
+    try:
+        parsed = json.loads(open_res.stdout)
+        if not parsed.get("ok", True):
+            msg = parsed.get("error", {}).get("message") or open_res.stdout
+            raise RuntimeError(f"打开看板失败：{msg}")
+    except json.JSONDecodeError:
+        pass
+
+    return root.name
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="orca-board",
+        description="在 Orca 中一键打开当前（或指定）项目的 Issue 看板。",
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="项目目录路径（默认使用当前工作目录）",
+    )
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="安装 orca-board / issue-board 命令到 ~/.local/bin 并检查插件状态",
+    )
+    parser.add_argument(
+        "--bin-dir",
+        default=None,
+        help="配合 --install 使用，指定命令安装目录（默认 ~/.local/bin）",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.install:
+            bin_dir = Path(args.bin_dir).expanduser() if args.bin_dir else None
+            installed = install_cli(bin_dir=bin_dir)
+            installed_dir = installed[0].parent
+            print(
+                "已安装命令："
+                + ", ".join(str(p) for p in installed)
+            )
+            path_entries = [
+                Path(p).expanduser().resolve()
+                for p in os.environ.get("PATH", "").split(os.pathsep)
+                if p
+            ]
+            if installed_dir.resolve() not in path_entries:
+                print(
+                    f"提示：请将 {installed_dir} 加入 PATH，例如：\n"
+                    f'  export PATH="{installed_dir}:$PATH"'
+                )
+            ensure_plugin_ready()
+            print("插件已就绪。以后在任意项目目录直接运行 `orca-board` 即可打开 Issue 看板。")
+            return 0
+
+        target = Path(args.path).expanduser() if args.path else Path.cwd()
+        project_name = open_board(target)
+        print(f"已打开 {project_name} 的 Issue 看板（Orca）")
+        return 0
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

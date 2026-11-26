@@ -155,7 +155,9 @@ python3 github-issue-autopilot/scripts/autopilot_admin.py uninstall --repository
 │   ├── README.md
 │   ├── src/                       # Node worker、SQLite/GitHub 数据桥接与单元测试
 │   └── editor/                    # 主区域两栏仪表盘界面
-├── scripts/build_release.py       # 构建带清单与校验和的正式发布包
+├── scripts/
+│   ├── build_release.py           # 构建带清单与校验和的正式发布包
+│   └── orca-board                 # 安装并在任意项目一键打开 Orca Issue 看板的 CLI
 ├── .github/workflows/release.yml  # 通过版本 tag 测试并发布稳定包
 └── tests/                         # 修复账本与自动调度单元测试
 ```
@@ -176,13 +178,19 @@ orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json
 ```
 
-本地加载 Orca 看板插件（首次需按提示执行 `--approve` 授权）：
+一键安装 Orca 看板插件与全局命令（首次使用按回车确认授权即可）：
 
 ```sh
-orca plugin dev load /absolute/path/to/github-issue-workflow/orca-plugin
+./scripts/orca-board --install
 ```
 
-加载后点击 Orca 底部状态栏「Issue 看板」或按 `Cmd+Shift+I` 即可在当前项目主区域打开专属看板。详见 [`orca-plugin/README.md`](orca-plugin/README.md)。
+安装完成后，在**任意项目目录**执行一行命令即可打开该项目的专属看板：
+
+```sh
+orca-board
+```
+
+也可点击 Orca 底部状态栏「Issue 看板」或按 `Cmd+Shift+I` 打开。详见 [`orca-plugin/README.md`](orca-plugin/README.md)。
 
 真实 GitHub 操作还需通过 CLI 端到端回读：
 
@@ -347,7 +355,9 @@ If the path disappears, is no longer the original Git root, or is removed from O
 │   ├── README.md
 │   ├── src/                       # Node worker, SQLite/GitHub data bridge, and unit tests
 │   └── editor/                    # Main-area two-column dashboard UI
-├── scripts/build_release.py       # Build the manifest and checksummed release bundle
+├── scripts/
+│   ├── build_release.py           # Build the manifest and checksummed release bundle
+│   └── orca-board                 # CLI to install and open the Orca Issue Board in any project
 ├── .github/workflows/release.yml  # Test and publish stable version tags
 └── tests/                         # Repair-ledger and automatic-dispatch unit tests
 ```
@@ -368,13 +378,19 @@ orca plugin test ./orca-plugin --json
 orca plugin check ./orca-plugin --json
 ```
 
-Load the Orca Issue Board plugin locally (first load requires approving the requested capabilities with `--approve`):
+Install the Orca Issue Board plugin and global CLI in one step (press Enter once to approve plugin capabilities on first run):
 
 ```sh
-orca plugin dev load /absolute/path/to/github-issue-workflow/orca-plugin
+./scripts/orca-board --install
 ```
 
-After loading, click **Issue 看板** in Orca's status bar or press `Cmd+Shift+I` to open the current project's dashboard tab in the main area. See [`orca-plugin/README.md`](orca-plugin/README.md).
+After installation, run a single command in **any project directory** to open that project's dashboard tab:
+
+```sh
+orca-board
+```
+
+You can also click **Issue 看板** in Orca's status bar or press `Cmd+Shift+I`. See [`orca-plugin/README.md`](orca-plugin/README.md).
 
 Real GitHub mutations still require CLI readback:
 

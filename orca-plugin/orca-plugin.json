@@ -1,6 +1,6 @@
 {
   "manifestVersion": 2,
-  "id": "orca-autopilot",
+  "id": "issue-autopilot",
   "name": "Orca Autopilot",
   "version": "0.2.1",
   "description": "Orca 的 GitHub Issue 自动驾驶插件：状态栏展示待处理徽标，点击或快捷键一键在终端打开纯 TUI 控制台。",

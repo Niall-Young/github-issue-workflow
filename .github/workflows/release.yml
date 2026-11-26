@@ -31,11 +31,16 @@ jobs:
           (cd dist && shasum -a 256 -c "$bundle.tar.gz.sha256")
           tar -xzf "dist/$bundle.tar.gz" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/$bundle"
-          ./scripts/orca-autopilot --install --no-plugin --bin-dir "$RUNNER_TEMP/bin"
+          ./scripts/orca-autopilot --install --no-plugin --install-dir "$RUNNER_TEMP/installed" --bin-dir "$RUNNER_TEMP/bin" --skills-dir "$RUNNER_TEMP/skills"
+          rm -rf "$RUNNER_TEMP/$bundle"
           "$RUNNER_TEMP/bin/orca-autopilot" --help
           "$RUNNER_TEMP/bin/orca-board" --help
-          bun -e 'await import("./orca-plugin/src/worker.ts"); await import("./orca-plugin/src/tui/app.ts")'
-          bun test ./orca-plugin/src
+          test -f "$RUNNER_TEMP/skills/github-issue-handoff/SKILL.md"
+          test -f "$RUNNER_TEMP/skills/github-issue-repair/SKILL.md"
+          test -f "$RUNNER_TEMP/skills/github-issue-autopilot/SKILL.md"
+          test -f "$RUNNER_TEMP/skills/github-issue-workflow-update/SKILL.md"
+          bun -e 'await import(process.env.RUNNER_TEMP + "/installed/orca-plugin/src/worker.ts"); await import(process.env.RUNNER_TEMP + "/installed/orca-plugin/src/tui/app.ts")'
+          bun test "$RUNNER_TEMP/installed/orca-plugin/src"
       - name: Publish stable release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -46,8 +51,8 @@ jobs:
           cat > "$notes" <<EOF
           **[下载完整安装包 / Download the full bundle]($base/$full)**
 
-          含 \`orca-autopilot\` 终端控制台、Orca 状态栏插件和四个 Agent Skill。解压到长期保留的目录，在其中运行 \`./scripts/orca-autopilot --install\`。安装需要 Python 3，运行控制台建议使用 Bun。状态栏入口需要 Orca 1.4.259+。四个 Skill 的安装步骤见包内 README。
+          含 \`orca-autopilot\` 终端控制台、Orca 状态栏插件和四个内置 Agent Skill。解压后运行 \`./scripts/orca-autopilot --install\` 即可一次性独立安装全部组件（安装完成后可删除解压目录）。安装需要 Python 3，运行控制台建议使用 Bun；状态栏入口需要 Orca 1.4.259+。
 
-          Extract to a permanent directory and run \`./scripts/orca-autopilot --install\` to install the CLI and set up the Orca Autopilot plugin. See the bundled README to install the four Skills. The smaller archive without \`-full-\` is for existing Skill updaters.
+          Extract and run \`./scripts/orca-autopilot --install\` to install the CLI, Orca Autopilot plugin, and all four bundled Skills standalone (you can delete the extracted folder afterward). The smaller archive without \`-full-\` is for existing Skill updaters.
           EOF
           gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --notes-file "$notes" --title "$GITHUB_REF_NAME"

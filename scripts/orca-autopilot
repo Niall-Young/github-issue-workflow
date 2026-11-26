@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command terminal TUI launcher and installer for Orca Autopilot."""
+"""One-command terminal TUI launcher and standalone installer for Orca Autopilot."""
 
 from __future__ import annotations
 
@@ -15,8 +15,29 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO_ROOT / "orca-plugin"
 TUI_ENTRY = PLUGIN_DIR / "src" / "tui" / "app.ts"
-DEFAULT_PLUGIN_KEY = "local.orca-autopilot"
+DEFAULT_INSTALL_DIR = Path.home() / ".local" / "share" / "orca-autopilot"
+DEFAULT_PLUGIN_KEY = "local.issue-autopilot"
 CLI_NAMES = ("orca-autopilot", "orca-board")
+MANAGED_SKILLS = (
+    "github-issue-handoff",
+    "github-issue-repair",
+    "github-issue-autopilot",
+    "github-issue-workflow-update",
+)
+AGENT_SKILL_ROOTS: tuple[tuple[Path, Path], ...] = (
+    (Path(".claude"), Path(".claude") / "skills"),
+    (Path(".codex"), Path(".codex") / "skills"),
+    (Path(".agents"), Path(".agents") / "skills"),
+    (Path(".gemini") / "antigravity-cli", Path(".gemini") / "antigravity-cli" / "skills"),
+)
+COPY_IGNORE = shutil.ignore_patterns(
+    ".orca",
+    "node_modules",
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".DS_Store",
+)
 
 
 def run_cmd(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -61,6 +82,86 @@ def build_tui_command(
     return [*runtime, str(tui_entry), str(root)]
 
 
+def _copy_dir_clean(src: Path, dst: Path) -> None:
+    if dst.is_symlink() or dst.is_file():
+        dst.unlink()
+    elif dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst, ignore=COPY_IGNORE)
+
+
+def install_standalone_files(
+    source_root: Path = REPO_ROOT,
+    install_dir: Path | None = None,
+) -> Path:
+    """Copy runtime files into an independent directory so the source checkout can be deleted."""
+    target_dir = (install_dir or DEFAULT_INSTALL_DIR).expanduser().resolve()
+    src_root = source_root.resolve()
+    if target_dir == src_root:
+        return target_dir
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    plugin_src = src_root / "orca-plugin"
+    if not (plugin_src / "orca-plugin.json").is_file():
+        raise RuntimeError(f"未找到插件清单：{plugin_src / 'orca-plugin.json'}")
+    _copy_dir_clean(plugin_src, target_dir / "orca-plugin")
+
+    script_src = src_root / "scripts" / "orca-autopilot"
+    if not script_src.is_file():
+        raise RuntimeError(f"未找到启动脚本：{script_src}")
+    scripts_dst = target_dir / "scripts"
+    scripts_dst.mkdir(parents=True, exist_ok=True)
+    script_dst = scripts_dst / "orca-autopilot"
+    shutil.copy2(script_src, script_dst)
+    script_dst.chmod(0o755)
+
+    for skill in MANAGED_SKILLS:
+        skill_src = src_root / skill
+        if (skill_src / "SKILL.md").is_file():
+            _copy_dir_clean(skill_src, target_dir / skill)
+
+    return target_dir
+
+
+def detect_skill_dirs(home: Path | None = None) -> list[Path]:
+    """Detect existing Agent runtime skill directories; fall back to ~/.agents/skills."""
+    base = (home or Path.home()).expanduser()
+    detected: list[Path] = []
+    for marker_rel, skills_rel in AGENT_SKILL_ROOTS:
+        if (base / marker_rel).exists():
+            detected.append(base / skills_rel)
+    if not detected:
+        detected.append(base / ".agents" / "skills")
+    return detected
+
+
+def install_skills(
+    source_root: Path = REPO_ROOT,
+    skill_dirs: list[Path] | None = None,
+    home: Path | None = None,
+) -> dict[Path, list[str]]:
+    """Automatically install all bundled Skills into detected (or specified) Agent skill directories."""
+    src_root = source_root.resolve()
+    missing = [s for s in MANAGED_SKILLS if not (src_root / s / "SKILL.md").is_file()]
+    if missing:
+        raise RuntimeError(f"安装包缺少内置 Skill：{', '.join(missing)}")
+
+    targets = [p.expanduser() for p in skill_dirs] if skill_dirs else detect_skill_dirs(home=home)
+    installed: dict[Path, list[str]] = {}
+    for target_root in targets:
+        target_root.mkdir(parents=True, exist_ok=True)
+        copied: list[str] = []
+        for skill in MANAGED_SKILLS:
+            src = (src_root / skill).resolve()
+            dst = (target_root / skill).resolve()
+            if src != dst:
+                _copy_dir_clean(src, target_root / skill)
+            copied.append(skill)
+        installed[target_root] = copied
+    return installed
+
+
 def find_plugin(runner=run_cmd) -> tuple[dict | None, str | None]:
     res = runner(["orca", "plugin", "list", "--json"])
     if res.returncode != 0:
@@ -76,13 +177,16 @@ def find_plugin(runner=run_cmd) -> tuple[dict | None, str | None]:
         key = plugin.get("pluginKey", "")
         if key == DEFAULT_PLUGIN_KEY:
             return plugin, None
-        if key.endswith(".orca-autopilot") and fallback is None:
+        if key.endswith(".issue-autopilot") and fallback is None:
             fallback = plugin
     return fallback, None
 
 
 def extract_fingerprint(text: str) -> str | None:
     match = re.search(r"Fingerprint:\s*(\S+)", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"--approve\s+(\S+)", text)
     return match.group(1) if match else None
 
 
@@ -96,11 +200,40 @@ def prompt_for_approval(plugin_key: str, fingerprint: str, input_fn=input) -> bo
     return answer in ("", "y", "yes")
 
 
+def _run_with_approval(
+    base_cmd: list[str],
+    plugin_key: str,
+    action_label: str,
+    *,
+    runner=run_cmd,
+    is_tty: bool,
+    input_fn=input,
+) -> subprocess.CompletedProcess[str]:
+    res = runner(base_cmd)
+    if res.returncode == 0:
+        return res
+    combined = f"{res.stdout}\n{res.stderr}"
+    fp = extract_fingerprint(combined)
+    if fp:
+        if is_tty:
+            if not prompt_for_approval(plugin_key, fp, input_fn=input_fn):
+                raise RuntimeError("已取消插件授权。")
+            res = runner([*base_cmd, "--approve", fp])
+        else:
+            cmd_str = " ".join([*base_cmd, "--approve", fp])
+            raise RuntimeError(f"插件尚未授权，请在终端运行：\n  {cmd_str}")
+    if res.returncode != 0:
+        raise RuntimeError(f"{action_label}失败：{res.stderr.strip() or res.stdout.strip()}")
+    return res
+
+
 def ensure_plugin_ready(
     plugin_dir: Path = PLUGIN_DIR,
     runner=run_cmd,
     is_tty: bool | None = None,
     input_fn=input,
+    *,
+    dev_mode: bool = False,
 ) -> str:
     if is_tty is None:
         is_tty = sys.stdin.isatty()
@@ -113,52 +246,49 @@ def ensure_plugin_ready(
             raise RuntimeError(f"无法连接 Orca，请确认 Orca 已打开：{err}")
 
     bundled_version = json.loads((plugin_dir / "orca-plugin.json").read_text())["version"]
-    if plugin is None or (plugin.get("isDev") and plugin.get("version") != bundled_version):
-        load_res = runner(["orca", "plugin", "dev", "load", str(plugin_dir)])
-        if load_res.returncode != 0:
-            combined = f"{load_res.stdout}\n{load_res.stderr}"
-            fp = extract_fingerprint(combined)
-            if fp and is_tty and prompt_for_approval(DEFAULT_PLUGIN_KEY, fp, input_fn=input_fn):
-                load_res = runner(
-                    ["orca", "plugin", "dev", "load", str(plugin_dir), "--approve", fp]
-                )
-            elif fp:
-                raise RuntimeError(
-                    "插件尚未授权，请在终端运行：\n"
-                    f"  orca plugin dev load {plugin_dir} --approve {fp}"
-                )
-        if load_res.returncode != 0:
-            raise RuntimeError(
-                f"加载插件失败：{load_res.stderr.strip() or load_res.stdout.strip()}"
+
+    if dev_mode:
+        if plugin is None or (plugin.get("isDev") and plugin.get("version") != bundled_version):
+            _run_with_approval(
+                ["orca", "plugin", "dev", "load", str(plugin_dir)],
+                DEFAULT_PLUGIN_KEY,
+                "加载开发插件",
+                runner=runner,
+                is_tty=is_tty,
+                input_fn=input_fn,
             )
+            plugin, err = find_plugin(runner=runner)
+            if err or plugin is None:
+                raise RuntimeError(f"加载插件后仍未找到 {DEFAULT_PLUGIN_KEY}")
+    else:
+        if plugin is not None and plugin.get("isDev"):
+            runner(["orca", "plugin", "dev", "unload", plugin.get("pluginKey") or DEFAULT_PLUGIN_KEY])
+            plugin = None
+
+        _run_with_approval(
+            ["orca", "plugin", "install", str(plugin_dir)],
+            DEFAULT_PLUGIN_KEY,
+            "安装插件",
+            runner=runner,
+            is_tty=is_tty,
+            input_fn=input_fn,
+        )
         plugin, err = find_plugin(runner=runner)
         if err or plugin is None:
-            raise RuntimeError(f"加载插件后仍未找到 {DEFAULT_PLUGIN_KEY}")
+            raise RuntimeError(f"安装插件后仍未找到 {DEFAULT_PLUGIN_KEY}")
 
     plugin_key = plugin.get("pluginKey") or DEFAULT_PLUGIN_KEY
     status = plugin.get("status")
     needs_reconsent = bool(plugin.get("needsReconsent"))
     if status not in ("running", "idle") or needs_reconsent:
-        en_res = runner(["orca", "plugin", "enable", plugin_key])
-        if en_res.returncode != 0:
-            combined = f"{en_res.stdout}\n{en_res.stderr}"
-            fp = extract_fingerprint(combined)
-            if fp:
-                if is_tty:
-                    if not prompt_for_approval(plugin_key, fp, input_fn=input_fn):
-                        raise RuntimeError("已取消插件授权。")
-                    en_res = runner(
-                        ["orca", "plugin", "enable", plugin_key, "--approve", fp]
-                    )
-                else:
-                    raise RuntimeError(
-                        "插件尚未授权，请在终端运行：\n"
-                        f"  orca plugin enable {plugin_key} --approve {fp}"
-                    )
-        if en_res.returncode != 0:
-            raise RuntimeError(
-                f"启用插件失败：{en_res.stderr.strip() or en_res.stdout.strip()}"
-            )
+        _run_with_approval(
+            ["orca", "plugin", "enable", plugin_key],
+            plugin_key,
+            "启用插件",
+            runner=runner,
+            is_tty=is_tty,
+            input_fn=input_fn,
+        )
 
     return plugin_key
 
@@ -202,17 +332,38 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--install",
         action="store_true",
-        help="安装 orca-autopilot（含兼容别名 orca-board）到 ~/.local/bin，并可选同步 Orca 状态栏插件",
+        help="独立安装 orca-autopilot（含兼容别名 orca-board）、全部内置 Skill 及 Orca 正式插件，安装后可安全删除源码目录",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="配合 --install 使用，改用开发模式链接当前源码目录并加载 dev 插件",
     )
     parser.add_argument(
         "--no-plugin",
         action="store_true",
-        help="配合 --install 使用，仅安装终端命令，跳过 Orca 状态栏插件检查",
+        help="配合 --install 使用，跳过 Orca 状态栏插件安装",
+    )
+    parser.add_argument(
+        "--no-skills",
+        action="store_true",
+        help="配合 --install 使用，跳过内置 Agent Skill 自动安装",
+    )
+    parser.add_argument(
+        "--install-dir",
+        default=None,
+        help="配合 --install 使用，指定独立安装目录（默认 ~/.local/share/orca-autopilot）",
     )
     parser.add_argument(
         "--bin-dir",
         default=None,
         help="配合 --install 使用，指定命令安装目录（默认 ~/.local/bin）",
+    )
+    parser.add_argument(
+        "--skills-dir",
+        action="append",
+        default=None,
+        help="配合 --install 使用，指定 Skill 安装目录（可重复传入；默认自动检测已安装的 Agent 运行时）",
     )
     return parser.parse_args(argv)
 
@@ -221,8 +372,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         if args.install:
+            if args.dev:
+                runtime_root = REPO_ROOT
+            else:
+                install_dir = Path(args.install_dir).expanduser() if args.install_dir else None
+                runtime_root = install_standalone_files(source_root=REPO_ROOT, install_dir=install_dir)
+                print(f"已独立安装运行文件到：{runtime_root}")
+
             bin_dir = Path(args.bin_dir).expanduser() if args.bin_dir else None
-            installed = install_cli(bin_dir=bin_dir)
+            cli_script = runtime_root / "scripts" / "orca-autopilot"
+            installed = install_cli(bin_dir=bin_dir, script_path=cli_script)
             installed_dir = installed[0].parent
             print("已安装终端命令：" + ", ".join(str(p) for p in installed))
             path_entries = [
@@ -235,13 +394,33 @@ def main(argv: list[str] | None = None) -> int:
                     f"提示：请将 {installed_dir} 加入 PATH，例如：\n"
                     f'  export PATH="{installed_dir}:$PATH"'
                 )
+
+            if not args.no_skills:
+                skill_dirs = [Path(p) for p in args.skills_dir] if args.skills_dir else None
+                skill_results = install_skills(source_root=runtime_root, skill_dirs=skill_dirs)
+                print(
+                    "已自动安装内置 Skill（"
+                    + ", ".join(MANAGED_SKILLS)
+                    + "）到："
+                    + ", ".join(str(d) for d in skill_results)
+                )
+
             if not args.no_plugin:
                 try:
-                    ensure_plugin_ready()
-                    print("Orca Autopilot 状态栏插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开控制台）。")
+                    ensure_plugin_ready(
+                        plugin_dir=runtime_root / "orca-plugin",
+                        dev_mode=args.dev,
+                    )
+                    mode_label = "开发模式" if args.dev else "正式"
+                    print(
+                        f"Orca Autopilot {mode_label}插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开控制台）。"
+                    )
                 except (RuntimeError, FileNotFoundError) as exc:
                     print(f"提示：Orca 状态栏插件跳过（{exc}），不影响终端直接运行 `orca-autopilot`。")
-            print("以后在任意项目目录直接运行 `orca-autopilot` 即可启动终端控制台。")
+
+            if not args.dev:
+                print("全部组件已独立安装完成，之后删除本源码/解压目录也不影响使用。")
+            print("在任意项目目录直接运行 `orca-autopilot` 即可启动终端控制台。")
             return 0
 
         target = Path(args.path).expanduser() if args.path else Path.cwd()

@@ -57,11 +57,11 @@ An Orca plugin and pure-terminal console for unattended GitHub Issue autopilot: 
 - 已登录认证的 GitHub CLI（`gh`）
 - Python 3，以及 Bun（推荐）或 Node.js >= 22
 
-#### 安装插件与终端命令
+#### 一键安装（插件 + 终端命令 + 全部内置 Skill）
 
 **方式一：从 Release 下载完整包（推荐）**
 
-从 [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest) 下载 `github-issue-workflow-full-vX.Y.Z.tar.gz`，解压到长期保留的目录后执行：
+从 [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest) 下载 `github-issue-workflow-full-vX.Y.Z.tar.gz`，解压后执行：
 
 ```sh
 ./scripts/orca-autopilot --install
@@ -75,9 +75,17 @@ cd github-issue-workflow
 ./scripts/orca-autopilot --install
 ```
 
-安装器会将 `orca-autopilot`（以及兼容别名 `orca-board`）链接到 `~/.local/bin`，并自动加载和引导授权 Orca 状态栏插件：
-- 请确保 `~/.local/bin` 在你的 `PATH` 中；
-- 如只需终端命令、不装 Orca 状态栏插件，可加 `--no-plugin`。
+一条命令会自动完成三件事，**安装完成后即可安全删除源码或解压目录**：
+1. **独立复制运行文件**到 `~/.local/share/orca-autopilot/`，并将 `orca-autopilot`（含兼容别名 `orca-board`）链接到 `~/.local/bin`（请确保 `~/.local/bin` 在 `PATH` 中）；
+2. **自动安装全部 4 个内置 Skill**（`github-issue-handoff`、`github-issue-repair`、`github-issue-autopilot`、`github-issue-workflow-update`）到本机已检测到的 Agent Skill 目录（`~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`、`~/.gemini/antigravity-cli/skills`），无需用户手动复制或额外提示 Agent；
+3. **正式安装 Orca 状态栏插件**（`orca plugin install` 到 Orca 托管目录，而非临时 dev 模式）。
+
+常用可选参数：
+- `--dev`：开发调试模式，直接链接当前源码目录并以 `orca plugin dev load` 加载；
+- `--no-plugin` / `--no-skills`：按需跳过 Orca 插件或内置 Skill 安装；
+- `--install-dir` / `--bin-dir` / `--skills-dir`：自定义安装目标路径。
+
+> 从旧版本升级时，如运行时残留旧版 `github-issue-creator/` 目录，请手动删除避免与 `github-issue-handoff/` 冲突；安装完成后建议重启 Agent 会话以加载最新 Skill。
 
 #### 打开与运行
 
@@ -88,25 +96,6 @@ cd github-issue-workflow
 ```sh
 orca-autopilot
 ```
-
-#### （可选）安装四个底层 Skill
-
-如果需要在 Agent 会话中直接调用 `$github-issue-handoff` / `$github-issue-repair` / `$github-issue-autopilot` / `$github-issue-workflow-update`，可将下面提示词发给你的 Agent：
-
-```text
-帮我安装这个仓库中的四个技能：https://github.com/Niall-Young/github-issue-workflow
-```
-
-或手动复制到你的 Agent Skill 目录（以 Claude Code 为例，安装后重启会话）：
-
-```sh
-cp -R github-issue-handoff ~/.claude/skills/github-issue-handoff
-cp -R github-issue-repair ~/.claude/skills/github-issue-repair
-cp -R github-issue-autopilot ~/.claude/skills/github-issue-autopilot
-cp -R github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
-```
-
-> 从旧版本升级时，请先删除运行时中的 `github-issue-creator/` 副本，再安装 `github-issue-handoff/`。
 
 ### 使用方法
 
@@ -179,7 +168,7 @@ $github-issue-workflow-update 更新 issue-workflow
 ```text
 .
 ├── orca-plugin/                   # Orca Autopilot 纯终端 TUI 控制台与状态栏插件
-│   ├── orca-plugin.json           # Orca 插件清单（id: orca-autopilot）
+│   ├── orca-plugin.json           # Orca 插件清单（id: issue-autopilot）
 │   ├── README.md                  # 插件与 TUI 交互详细说明
 │   └── src/                       # 终端 TUI 引擎（src/tui/）、状态栏 worker、数据桥接与测试
 ├── scripts/
@@ -272,11 +261,11 @@ Plain-language request (TUI / Skill)
 - An authenticated GitHub CLI (`gh`)
 - Python 3, plus Bun (recommended) or Node.js >= 22
 
-#### Install the Plugin & CLI
+#### One-Command Install (Plugin + CLI + All Bundled Skills)
 
 **Option 1: Download the full Release bundle (recommended)**
 
-Download `github-issue-workflow-full-vX.Y.Z.tar.gz` from [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest), extract it to a permanent directory, and run:
+Download `github-issue-workflow-full-vX.Y.Z.tar.gz` from [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest), extract it, and run:
 
 ```sh
 ./scripts/orca-autopilot --install
@@ -290,9 +279,17 @@ cd github-issue-workflow
 ./scripts/orca-autopilot --install
 ```
 
-The installer symlinks `orca-autopilot` (plus the legacy `orca-board` alias) into `~/.local/bin` and loads/enables the Orca status-bar plugin:
-- Add `~/.local/bin` to your `PATH`;
-- Pass `--no-plugin` to install only the terminal CLI.
+One command completes three steps, and **you can safely delete the cloned or extracted directory afterward**:
+1. **Standalone runtime install**: copies runtime files to `~/.local/share/orca-autopilot/` and symlinks `orca-autopilot` (plus legacy alias `orca-board`) into `~/.local/bin` (ensure `~/.local/bin` is in `PATH`).
+2. **Automatic Skill installation**: installs all four bundled Skills (`github-issue-handoff`, `github-issue-repair`, `github-issue-autopilot`, `github-issue-workflow-update`) into every detected local Agent skill directory (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`, `~/.gemini/antigravity-cli/skills`)—no manual copying required.
+3. **Formal Orca plugin install**: installs the plugin into Orca's managed storage via `orca plugin install` (not temporary dev mode).
+
+Optional flags:
+- `--dev`: link directly to the source checkout and load via `orca plugin dev load` for local development;
+- `--no-plugin` / `--no-skills`: skip Orca plugin or bundled Skill installation;
+- `--install-dir` / `--bin-dir` / `--skills-dir`: customize target directories.
+
+> When upgrading from older versions, remove any legacy `github-issue-creator/` directory to avoid conflicts with `github-issue-handoff/`, and restart Agent sessions to pick up updated Skills.
 
 #### Run
 
@@ -303,25 +300,6 @@ Open the console using either entry point:
 ```sh
 orca-autopilot
 ```
-
-#### (Optional) Install the Four Underlying Skills
-
-To invoke `$github-issue-handoff`, `$github-issue-repair`, `$github-issue-autopilot`, or `$github-issue-workflow-update` directly in an Agent session, paste this prompt into your Agent:
-
-```text
-Please install all four skills from this repository: https://github.com/Niall-Young/github-issue-workflow
-```
-
-Or copy them manually (example for Claude Code; restart the session afterward):
-
-```sh
-cp -R github-issue-handoff ~/.claude/skills/github-issue-handoff
-cp -R github-issue-repair ~/.claude/skills/github-issue-repair
-cp -R github-issue-autopilot ~/.claude/skills/github-issue-autopilot
-cp -R github-issue-workflow-update ~/.claude/skills/github-issue-workflow-update
-```
-
-> When upgrading from older versions, remove any installed `github-issue-creator/` copy before installing `github-issue-handoff/`.
 
 ### Usage
 
@@ -394,7 +372,7 @@ $github-issue-workflow-update update issue-workflow
 ```text
 .
 ├── orca-plugin/                   # Orca Autopilot pure-terminal TUI + status-bar plugin
-│   ├── orca-plugin.json           # Orca plugin manifest (id: orca-autopilot)
+│   ├── orca-plugin.json           # Orca plugin manifest (id: issue-autopilot)
 │   ├── README.md                  # Plugin & TUI interaction guide
 │   └── src/                       # Terminal TUI engine (src/tui/), worker, data bridge, tests
 ├── scripts/

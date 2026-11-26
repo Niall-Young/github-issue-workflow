@@ -21,7 +21,7 @@
 
 ## 一键安装与使用
 
-在仓库根目录（或 Release 完整包解压目录）执行一次安装：
+在仓库根目录（或 Release 完整包解压目录）执行一次安装（会自动独立安装运行文件到 `~/.local/share/orca-autopilot`、安装 4 个内置 Skill 到本机 Agent 运行时，并正式安装 Orca 插件；完成后可删除源码目录，本地开发可加 `--dev`）：
 
 ```bash
 ./scripts/orca-autopilot --install

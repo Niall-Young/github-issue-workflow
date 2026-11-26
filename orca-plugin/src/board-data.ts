@@ -220,8 +220,11 @@ export function findAutopilotConfigForRepo(
 export function findBundledAutopilotAdmin(pluginDir: string): string | null {
   const candidates = [
     resolve(pluginDir, '..', 'github-issue-autopilot', 'scripts', 'autopilot_admin.py'),
+    join(homedir(), '.local', 'share', 'orca-autopilot', 'github-issue-autopilot', 'scripts', 'autopilot_admin.py'),
     join(homedir(), '.claude', 'skills', 'github-issue-autopilot', 'scripts', 'autopilot_admin.py'),
-    join(homedir(), '.agents', 'skills', 'github-issue-autopilot', 'scripts', 'autopilot_admin.py')
+    join(homedir(), '.codex', 'skills', 'github-issue-autopilot', 'scripts', 'autopilot_admin.py'),
+    join(homedir(), '.agents', 'skills', 'github-issue-autopilot', 'scripts', 'autopilot_admin.py'),
+    join(homedir(), '.gemini', 'antigravity-cli', 'skills', 'github-issue-autopilot', 'scripts', 'autopilot_admin.py')
   ]
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
@@ -249,6 +252,7 @@ export function isAutopilotRuntimeOutdated(
 export function findBundledHandoffSkill(pluginDir: string): HandoffSkillPaths | null {
   const candidates = [
     resolve(pluginDir, '..', 'github-issue-handoff', 'SKILL.md'),
+    join(homedir(), '.local', 'share', 'orca-autopilot', 'github-issue-handoff', 'SKILL.md'),
     join(homedir(), '.claude', 'skills', 'github-issue-handoff', 'SKILL.md'),
     join(homedir(), '.codex', 'skills', 'github-issue-handoff', 'SKILL.md'),
     join(homedir(), '.agents', 'skills', 'github-issue-handoff', 'SKILL.md'),

@@ -15,28 +15,25 @@ export const ANSI = {
 } as const
 
 export const PALETTE = {
-  // Claude Code-inspired restrained terminal palette (24-bit truecolor)
-  text: '\x1b[38;2;232;230;227m',
-  bright: '\x1b[1;38;2;250;249;245m',
-  muted: '\x1b[38;2;142;142;147m',
-  dim: '\x1b[38;2;98;98;106m',
-  border: '\x1b[38;2;72;74;82m',
-  borderActive: '\x1b[38;2;217;119;87m',
-  accent: '\x1b[38;2;217;119;87m', // warm terracotta
-  accentBold: '\x1b[1;38;2;217;119;87m',
-  accentBg: '\x1b[48;2;217;119;87;38;2;20;20;22;1m',
-  green: '\x1b[38;2;115;201;145m',
-  amber: '\x1b[38;2;234;179;88m',
-  red: '\x1b[38;2;235;111;111m',
-  blue: '\x1b[38;2;126;182;247m',
-  purple: '\x1b[38;2;186;154;245m',
-  selBg: '\x1b[48;2;45;46;54;38;2;250;249;245m',
-  chipBg: '\x1b[48;2;42;43;49;38;2;216;214;210m',
-  chipActiveBg: '\x1b[48;2;64;50;44;38;2;244;162;132;1m',
-  attachmentBadge: '\x1b[48;2;34;52;44;38;2;140;224;168;1m',
-  modalBg: '\x1b[48;2;26;27;31;38;2;232;230;227m',
-  inputBg: '\x1b[48;2;36;38;45;38;2;250;249;245m',
-  inputFocusBg: '\x1b[48;2;48;42;40;38;2;255;255;255m'
+  // Adaptive terminal palette: relies on native terminal fg/bold/dim for text & surfaces
+  // paired with balanced mid-tone accents that stay crisp on both light and dark themes.
+  text: '',
+  bright: '\x1b[1m',
+  muted: '\x1b[38;2;130;132;140m',
+  dim: '\x1b[2m',
+  border: '\x1b[2m',
+  borderActive: '\x1b[38;2;204;107;73m',
+  accent: '\x1b[38;2;204;107;73m', // warm terracotta
+  accentBold: '\x1b[1;38;2;204;107;73m',
+  accentBg: '\x1b[48;2;204;107;73;38;2;255;255;255;1m',
+  green: '\x1b[38;2;52;160;104m',
+  amber: '\x1b[38;2;198;134;38m',
+  red: '\x1b[38;2;206;76;76m',
+  blue: '\x1b[38;2;72;132;214m',
+  purple: '\x1b[38;2;146;104;214m',
+  tabActive: '\x1b[1;4;38;2;204;107;73m',
+  tabInactive: '\x1b[38;2;130;132;140m',
+  attachmentToken: '\x1b[1;38;2;46;150;108m'
 } as const
 
 export type HitBox = {
@@ -232,6 +229,19 @@ export class ScreenBuffer {
     return w
   }
 
+  drawLinkButton(
+    x: number,
+    y: number,
+    label: string,
+    style: string,
+    action: string,
+    payload?: unknown
+  ): number {
+    const w = this.writeText(x, y, label, style)
+    this.addHitBox(x, y, w, 1, action, payload)
+    return w
+  }
+
   drawHLine(x: number, y: number, w: number, style: string = PALETTE.border, ch = '─') {
     if (y < 0 || y >= this.height || w <= 0) return
     const x0 = Math.max(0, x)
@@ -258,6 +268,7 @@ export class ScreenBuffer {
     options?: {
       borderStyle?: string
       fillStyle?: string
+      clearInterior?: boolean
       title?: string
       titleStyle?: string
       rounded?: boolean
@@ -265,14 +276,15 @@ export class ScreenBuffer {
   ) {
     if (w < 2 || h < 2) return
     const borderStyle = options?.borderStyle ?? PALETTE.border
-    const fillStyle = options?.fillStyle ?? ''
     const tl = options?.rounded === false ? '┌' : '╭'
     const tr = options?.rounded === false ? '┐' : '╮'
     const bl = options?.rounded === false ? '└' : '╰'
     const br = options?.rounded === false ? '┘' : '╯'
 
-    if (fillStyle) {
-      this.fillRect(x + 1, y + 1, w - 2, h - 2, fillStyle)
+    if (options?.fillStyle !== undefined) {
+      this.fillRect(x + 1, y + 1, w - 2, h - 2, options.fillStyle)
+    } else if (options?.clearInterior) {
+      this.fillRect(x + 1, y + 1, w - 2, h - 2, '')
     }
 
     this.writeText(x, y, tl, borderStyle, 1)

@@ -78,6 +78,7 @@ export type TuiState = {
   busyIds: Set<string>
   composer: ComposerState
   modal: ModalState
+  errorNotice: string | null
 }
 
 export const ISSUE_KINDS: readonly IssueKind[] = ['feature', 'bug', 'polish']
@@ -169,13 +170,12 @@ function prBadge(pr: PullRequestItem): { label: string; style: string } {
 }
 
 export function computeComposerHeight(composer: ComposerState, width: number): number {
-  const innerW = Math.max(12, width - 6)
+  const innerW = Math.max(12, width - 4)
   const wrapped = composer.text
-    ? wrapTextToWidth(`${composer.text}▏`, innerW, 2)
+    ? wrapTextToWidth(`${composer.text}▏`, innerW, 3)
     : ['']
-  const textLines = Math.max(1, Math.min(2, wrapped.length))
-  const attachmentLine = composer.attachments.length > 0 ? 1 : 0
-  return 2 + textLines + attachmentLine
+  const textLines = Math.max(1, Math.min(3, wrapped.length))
+  return 2 + textLines
 }
 
 const SLASH_MAX_VISIBLE = 6
@@ -198,7 +198,11 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   const projectLabel = snap ? snap.projectName : 'Issue 看板'
   const repoLabel = snap?.repository ? ` ${snap.repository}` : ''
   const agentName = snap?.defaultAgent || snap?.preferredAgent || 'Agent'
-  const syncText = snap ? `同步 ${formatRelativeTime(snap.syncedAt) || '刚刚'}` : '加载中…'
+  const syncText = state.loading
+    ? '同步中…'
+    : snap
+      ? formatRelativeTime(snap.syncedAt) || '刚刚'
+      : '加载中…'
   const rightStatus = `${agentName} · ${syncText}`
   const rightStatusW = stringDisplayWidth(rightStatus)
 
@@ -206,14 +210,24 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   col += buf.writeText(col, 0, '◆ ', PALETTE.accentBold)
   col += buf.writeText(col, 0, projectLabel, PALETTE.bright)
   if (repoLabel) {
-    col += buf.writeText(col, 0, repoLabel, PALETTE.muted, Math.max(0, width - col - rightStatusW - 26))
+    col += buf.writeText(col, 0, repoLabel, PALETTE.dim, Math.max(0, width - col - rightStatusW - 18))
   }
   col += 2
   if (snap) {
     if (snap.autopilotInstalled) {
-      col += buf.writeText(col, 0, '● 自动运行中', PALETTE.green)
+      col += buf.writeText(col, 0, '● 自动处理', PALETTE.green)
     } else {
-      col += buf.writeText(col, 0, '○ 未开启自动处理 (/autopilot)', PALETTE.amber, Math.max(0, width - col - rightStatusW - 3))
+      const autoW = buf.writeText(
+        col,
+        0,
+        '○ 未开启自动处理',
+        PALETTE.amber,
+        Math.max(0, width - col - rightStatusW - 3)
+      )
+      if (autoW > 0) {
+        buf.addHitBox(col, 0, autoW, 1, 'enable-autopilot')
+        col += autoW
+      }
     }
   } else if (state.loading) {
     col += buf.writeText(col, 0, '◌ 同步中…', PALETTE.amber)
@@ -223,7 +237,12 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   if (rightXStart < width - 1) {
     const agentW = buf.writeText(rightXStart, 0, agentName, PALETTE.muted)
     buf.addHitBox(rightXStart, 0, agentW, 1, 'open-settings')
-    buf.writeText(rightXStart + agentW, 0, ` · ${syncText}`, PALETTE.dim)
+    buf.writeText(
+      rightXStart + agentW,
+      0,
+      ` · ${syncText}`,
+      state.loading ? PALETTE.amber : PALETTE.dim
+    )
   }
 
   buf.drawHLine(0, 1, width, PALETTE.border)
@@ -252,31 +271,35 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   const prCount = snap?.pullRequests.length ?? 0
   let tabX = 1
   tabX +=
-    buf.drawButton(
+    buf.drawLinkButton(
       tabX,
       contentTop,
-      `Issues (${issueCount})`,
-      state.activeTab === 'issues' ? PALETTE.chipActiveBg : PALETTE.chipBg,
+      `Issues ${issueCount}`,
+      state.activeTab === 'issues' && (splitMode || state.activePane === 'main')
+        ? PALETTE.tabActive
+        : PALETTE.tabInactive,
       'switch-tab',
       'issues'
-    ) + 1
+    ) + 3
   tabX +=
-    buf.drawButton(
+    buf.drawLinkButton(
       tabX,
       contentTop,
-      `PRs (${prCount})`,
-      state.activeTab === 'prs' ? PALETTE.chipActiveBg : PALETTE.chipBg,
+      `PRs ${prCount}`,
+      state.activeTab === 'prs' && (splitMode || state.activePane === 'main')
+        ? PALETTE.tabActive
+        : PALETTE.tabInactive,
       'switch-tab',
       'prs'
-    ) + 1
+    ) + 3
 
   if (!splitMode) {
     const attCount = snap?.needsYou.length ?? 0
-    buf.drawButton(
+    buf.drawLinkButton(
       tabX,
       contentTop,
-      `待处理 (${attCount})`,
-      state.activePane === 'attention' ? PALETTE.chipActiveBg : PALETTE.chipBg,
+      `待处理 ${attCount}`,
+      state.activePane === 'attention' ? PALETTE.tabActive : PALETTE.tabInactive,
       'focus-pane',
       'attention'
     )
@@ -295,11 +318,11 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   // ── Right Pane: Needs You (desktop split) ─────────────────────────────────
   if (splitMode) {
     const attCount = snap?.needsYou.length ?? 0
-    const attTitle = attCount > 0 ? `● 需要你处理 (${attCount})` : '需要你处理'
-    const attStyle = attCount > 0 ? PALETTE.accentBold : PALETTE.muted
-    buf.writeText(rightX + 1, contentTop, attTitle, attStyle, rightW - 2)
+    const attTitle = attCount > 0 ? `● 待处理 ${attCount}` : '待处理'
+    const attStyle = attCount > 0 ? PALETTE.accentBold : PALETTE.dim
+    buf.writeText(rightX + 2, contentTop, attTitle, attStyle, rightW - 3)
     buf.addHitBox(rightX, contentTop, rightW, contentHeight, 'focus-pane', 'attention')
-    renderAttentionPane(buf, state, rightX + 1, listTop, rightW - 2, listHeight)
+    renderAttentionPane(buf, state, rightX + 2, listTop, rightW - 3, listHeight)
   }
 
   // ── Inline Slash Command List (Claude Code style, directly above composer) ─
@@ -364,45 +387,15 @@ function writeLineWithAttachmentTokens(
       if (remainingW <= 0) break
     }
 
-    const tokenWritten = buf.writeText(cx, y, matchedToken, PALETTE.attachmentBadge, remainingW)
+    const tokenWritten = buf.writeText(cx, y, matchedToken, PALETTE.attachmentToken, remainingW)
     cx += tokenWritten
     remainingW -= tokenWritten
     pos = nextIdx + matchedToken.length
   }
 }
 
-function renderAttachmentChips(
-  buf: ScreenBuffer,
-  x: number,
-  y: number,
-  maxWidth: number,
-  attachments: readonly InlineAttachment[],
-  removeAction: 'remove-composer-attachment' | 'remove-reply-attachment',
-  showHint: boolean
-) {
-  let ax = x
-  const rightBound = x + maxWidth
-  for (const att of attachments) {
-    const label = `${att.token.slice(1, -1)} ×`
-    const needed = stringDisplayWidth(label) + 2
-    if (ax + needed > rightBound) {
-      const remain = rightBound - ax
-      if (remain >= 2) {
-        buf.writeText(ax, y, '…', PALETTE.dim, remain)
-      }
-      return
-    }
-    ax += buf.drawButton(ax, y, label, PALETTE.attachmentBadge, removeAction, att.id) + 1
-  }
-  if (showHint && ax < rightBound - 6) {
-    buf.writeText(ax, y, 'Backspace 或点击 × 删除', PALETTE.dim, rightBound - ax)
-  }
-}
-
 function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number, y: number) {
   const c = state.composer
-  const rightHint = '⇧Tab 切换类型'
-  const rightHintW = stringDisplayWidth(rightHint)
   let cx = 1
 
   const kindText = `● ${KIND_LABELS[c.kind]}`
@@ -427,9 +420,20 @@ function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number
     cx += buf.writeText(cx, y, `追提 #${c.followUpOf}`, PALETTE.amber, Math.max(0, width - cx - 1))
   }
 
-  const rightX = width - rightHintW - 1
-  if (rightX > cx + 2) {
-    buf.writeText(rightX, y, rightHint, PALETTE.dim, rightHintW)
+  const rightBudget = Math.max(0, width - cx - 3)
+  if (rightBudget <= 0) return
+
+  if (state.errorNotice) {
+    const errText = truncateToWidth(`⚠ ${state.errorNotice}`, rightBudget)
+    const errW = stringDisplayWidth(errText)
+    buf.writeText(width - errW - 1, y, errText, PALETTE.red, errW)
+    return
+  }
+
+  const rightHint = '⇧Tab 切换'
+  const rightHintW = stringDisplayWidth(rightHint)
+  if (rightHintW <= rightBudget) {
+    buf.writeText(width - rightHintW - 1, y, rightHint, PALETTE.dim, rightHintW)
   }
 }
 
@@ -443,62 +447,35 @@ function renderBottomComposer(
 ) {
   const c = state.composer
   const isActive = state.modal.type === 'none'
-  const title = c.followUpOf ? `追提 #${c.followUpOf}` : '提需求'
+  const lineStyle = isActive ? PALETTE.borderActive : PALETTE.border
 
-  buf.drawBox(x, y, w, h, {
-    borderStyle: isActive ? PALETTE.borderActive : PALETTE.border,
-    title,
-    titleStyle: isActive ? PALETTE.accentBold : PALETTE.muted
-  })
+  buf.drawHLine(x, y, w, lineStyle)
+  buf.drawHLine(x, y + h - 1, w, lineStyle)
   buf.addHitBox(x, y, w, h, 'focus-composer')
 
-  // Right-side hint on top border of composer
-  const rightHint = ' / 命令 · ^V 贴图 '
-  const rightHintW = stringDisplayWidth(rightHint)
-  if (w > stringDisplayWidth(title) + rightHintW + 8) {
-    buf.writeText(x + w - rightHintW - 2, y, rightHint, PALETTE.dim, rightHintW)
-  }
-
-  const innerX = x + 2
-  const innerW = Math.max(8, w - 4)
-  const textAreaX = innerX + 2
-  const textAreaW = Math.max(6, innerW - 2)
+  const promptX = x + 1
+  const textAreaX = x + 3
+  const textAreaW = Math.max(6, w - 4)
 
   if (c.submitting) {
-    buf.writeText(innerX, y + 1, '◌', PALETTE.amber, 2)
-    buf.writeText(textAreaX, y + 1, '正在提交需求…', PALETTE.amber, textAreaW)
+    buf.writeText(promptX, y + 1, '◌', PALETTE.amber, 2)
+    buf.writeText(textAreaX, y + 1, '正在提交…', PALETTE.amber, textAreaW)
     return
   }
 
-  buf.writeText(innerX, y + 1, '❯', isActive ? PALETTE.accentBold : PALETTE.muted, 2)
+  buf.writeText(promptX, y + 1, '❯', isActive ? PALETTE.accentBold : PALETTE.dim, 2)
 
-  const maxTextLines = Math.max(1, h - 2 - (c.attachments.length > 0 ? 1 : 0))
+  const maxTextLines = Math.max(1, h - 2)
   if (!c.text) {
-    const placeholder = isActive
-      ? '▏输入需求直接提交，或输入 / 使用斜杠命令…'
-      : '输入需求直接提交，或输入 / 使用斜杠命令…'
+    const placeholder = isActive ? '▏输入需求，或 / 命令…' : '输入需求，或 / 命令…'
     buf.writeText(textAreaX, y + 1, placeholder, PALETTE.dim, textAreaW)
   } else {
     const displayText = isActive ? `${c.text}▏` : c.text
     const lines = wrapTextToWidth(displayText, textAreaW, maxTextLines)
     lines.forEach((line, idx) => {
-      const style = c.text.startsWith('/') ? PALETTE.accent : PALETTE.bright
+      const style = c.text.startsWith('/') ? PALETTE.accent : PALETTE.text
       writeLineWithAttachmentTokens(buf, textAreaX, y + 1 + idx, line, style, textAreaW, c.attachments)
     })
-  }
-
-  if (c.attachments.length > 0) {
-    const attRowY = y + h - 2
-    const prefixW = buf.writeText(textAreaX, attRowY, '📎 ', PALETTE.green, 3)
-    renderAttachmentChips(
-      buf,
-      textAreaX + prefixW,
-      attRowY,
-      Math.max(0, textAreaW - prefixW),
-      c.attachments,
-      'remove-composer-attachment',
-      true
-    )
   }
 }
 
@@ -530,7 +507,7 @@ function renderSlashMenu(
     buf.writeText(
       3,
       slashTop + 1,
-      '无匹配命令 · 按 Esc 清空或继续输入',
+      '无匹配命令',
       PALETTE.muted,
       Math.max(4, width - 4)
     )
@@ -545,7 +522,7 @@ function renderSlashMenu(
 
   const leftPad = 1
   const indicatorW = 2 // "❯ " or "  "
-  const cmdColW = Math.min(22, Math.max(14, Math.floor(width * 0.22)))
+  const cmdColW = Math.min(20, Math.max(12, Math.floor(width * 0.2)))
   const descX = leftPad + indicatorW + cmdColW
 
   for (let i = 0; i < rowCount; i += 1) {
@@ -559,10 +536,10 @@ function renderSlashMenu(
     const prefix = isSel ? '❯ ' : '  '
     const cmdStyle = isSel ? PALETTE.accentBold : PALETTE.text
     const descStyle = isSel ? PALETTE.accent : PALETTE.muted
-    const activeTag = isActive ? '[当前]' : ''
+    const activeTag = isActive ? '✓' : ''
     const activeW = stringDisplayWidth(activeTag)
 
-    buf.writeText(leftPad, rowY, prefix, isSel ? PALETTE.accentBold : PALETTE.muted, indicatorW)
+    buf.writeText(leftPad, rowY, prefix, isSel ? PALETTE.accentBold : PALETTE.dim, indicatorW)
     buf.writeText(leftPad + indicatorW, rowY, cmd.name, cmdStyle, cmdColW - 1)
 
     const rightMargin = 2
@@ -602,11 +579,11 @@ function renderMainList(
   const rows = buildMainRows(snap, state.activeTab)
   if (rows.length === 0) {
     const emptyMsg = state.loading
-      ? '正在同步 GitHub 与本地任务状态…'
+      ? '同步中…'
       : state.activeTab === 'issues'
-        ? '暂无任务 · 直接在下方输入框输入需求并按 Enter 提交'
-        : '暂无 Pull Request'
-    buf.writeText(x, y + 1, emptyMsg, PALETTE.muted, w)
+        ? '暂无任务'
+        : '暂无 PR'
+    buf.writeText(x, y + 1, emptyMsg, PALETTE.dim, w)
     return
   }
 
@@ -623,31 +600,26 @@ function renderMainList(
       continue
     }
 
-    if (isSelected) {
-      buf.fillRect(x, rowY, w, 1, PALETTE.selBg)
-    }
-
-    const baseStyle = isSelected ? PALETTE.selBg : PALETTE.text
-    const prefix = isSelected ? '▸ ' : '  '
+    const titleStyle = isSelected ? PALETTE.bright : PALETTE.text
+    const prefix = isSelected ? '❯ ' : '  '
 
     if (row.kind === 'inProgress') {
       const it = row.item
       const numStr = it.issueNumber ? `#${it.issueNumber}` : '···'
       const timeStr = formatRelativeTime(it.updatedAt)
-      const statusStr = `[${it.statusLabel}]`
-      const rightMeta = `${statusStr} ${timeStr}`.trim()
+      const rightMeta = timeStr ? `${it.statusLabel} · ${timeStr}` : it.statusLabel
       const rightW = stringDisplayWidth(rightMeta)
 
       let cx = x
-      cx += buf.writeText(cx, rowY, prefix, isSelected ? PALETTE.selBg : PALETTE.accent)
-      cx += buf.writeText(cx, rowY, `${numStr} `, isSelected ? PALETTE.selBg : PALETTE.amber)
+      cx += buf.writeText(cx, rowY, prefix, isSelected ? PALETTE.accentBold : PALETTE.dim)
+      cx += buf.writeText(cx, rowY, `${numStr} `, isSelected ? PALETTE.accentBold : PALETTE.amber)
       const titleBudget = Math.max(6, w - (cx - x) - rightW - 2)
-      buf.writeText(cx, rowY, it.title, baseStyle, titleBudget)
+      buf.writeText(cx, rowY, it.title, titleStyle, titleBudget)
       buf.writeText(
         x + w - rightW,
         rowY,
         rightMeta,
-        isSelected ? PALETTE.selBg : PALETTE.muted,
+        isSelected ? PALETTE.accent : PALETTE.muted,
         rightW
       )
       buf.addHitBox(x, rowY, w, 1, 'select-main-row', idx)
@@ -659,15 +631,15 @@ function renderMainList(
       const rightW = stringDisplayWidth(rightMeta)
 
       let cx = x
-      cx += buf.writeText(cx, rowY, prefix, isSelected ? PALETTE.selBg : PALETTE.green)
-      cx += buf.writeText(cx, rowY, `${numStr} `, isSelected ? PALETTE.selBg : PALETTE.green)
+      cx += buf.writeText(cx, rowY, prefix, isSelected ? PALETTE.accentBold : PALETTE.dim)
+      cx += buf.writeText(cx, rowY, `${numStr} `, isSelected ? PALETTE.accentBold : PALETTE.green)
       const titleBudget = Math.max(6, w - (cx - x) - rightW - 2)
-      buf.writeText(cx, rowY, it.title, baseStyle, titleBudget)
+      buf.writeText(cx, rowY, it.title, titleStyle, titleBudget)
       buf.writeText(
         x + w - rightW,
         rowY,
         rightMeta,
-        isSelected ? PALETTE.selBg : PALETTE.dim,
+        isSelected ? PALETTE.green : PALETTE.dim,
         rightW
       )
       buf.addHitBox(x, rowY, w, 1, 'select-main-row', idx)
@@ -679,15 +651,15 @@ function renderMainList(
       const rightW = stringDisplayWidth(rightMeta)
 
       let cx = x
-      cx += buf.writeText(cx, rowY, prefix, isSelected ? PALETTE.selBg : PALETTE.blue)
-      cx += buf.writeText(cx, rowY, `#${pr.number} `, isSelected ? PALETTE.selBg : PALETTE.blue)
+      cx += buf.writeText(cx, rowY, prefix, isSelected ? PALETTE.accentBold : PALETTE.dim)
+      cx += buf.writeText(cx, rowY, `#${pr.number} `, isSelected ? PALETTE.accentBold : PALETTE.blue)
       const titleBudget = Math.max(6, w - (cx - x) - rightW - 2)
-      buf.writeText(cx, rowY, pr.title, baseStyle, titleBudget)
+      buf.writeText(cx, rowY, pr.title, titleStyle, titleBudget)
       buf.writeText(
         x + w - rightW,
         rowY,
         rightMeta,
-        isSelected ? PALETTE.selBg : badge.style,
+        badge.style,
         rightW
       )
       buf.addHitBox(x, rowY, w, 1, 'select-main-row', idx)
@@ -705,8 +677,7 @@ function renderAttentionPane(
 ) {
   const items = state.snapshot?.needsYou ?? []
   if (items.length === 0) {
-    buf.writeText(x, y + 1, '✓ 当前无需人工介入', PALETTE.green, w)
-    buf.writeText(x, y + 2, '助手提问或需要拍板时会出现在这里', PALETTE.dim, w)
+    buf.writeText(x, y + 1, '✓ 暂无待处理', PALETTE.dim, w)
     return
   }
 
@@ -740,17 +711,17 @@ function renderAttentionPane(
     if (busy) {
       buf.writeText(bx, btnY, '处理中…', PALETTE.amber, w - 4)
     } else if (item.kind === 'agent-question') {
-      bx += buf.drawButton(bx, btnY, '同意继续', PALETTE.accentBg, 'approve-agent', item) + 1
-      buf.drawButton(bx, btnY, '回复', PALETTE.chipBg, 'open-reply', item)
+      bx += buf.drawButton(bx, btnY, '同意继续', PALETTE.accentBg, 'approve-agent', item) + 2
+      buf.drawLinkButton(bx, btnY, '[回复]', PALETTE.muted, 'open-reply', item)
     } else {
       if (item.canRetry) {
-        bx += buf.drawButton(bx, btnY, '重试', PALETTE.accentBg, 'issue-retry', item) + 1
+        bx += buf.drawButton(bx, btnY, '重试', PALETTE.accentBg, 'issue-retry', item) + 2
       }
       if (item.canDiscard) {
-        bx += buf.drawButton(bx, btnY, '放弃', PALETTE.chipBg, 'issue-discard', item) + 1
+        bx += buf.drawLinkButton(bx, btnY, '[放弃]', PALETTE.muted, 'issue-discard', item) + 2
       }
       if (item.url) {
-        buf.drawButton(bx, btnY, '打开', PALETTE.chipBg, 'open-url', item.url)
+        buf.drawLinkButton(bx, btnY, '[打开]', PALETTE.muted, 'open-url', item.url)
       }
     }
 
@@ -763,7 +734,7 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   if (modal.type === 'none') return
 
   const mw = Math.min(Math.max(48, Math.floor(width * 0.72)), width - 4)
-  const mh = modal.type === 'settings' ? Math.min(16, height - 4) : Math.min(14, height - 4)
+  const mh = modal.type === 'settings' ? Math.min(15, height - 4) : Math.min(13, height - 4)
   const mx = Math.floor((width - mw) / 2)
   const my = Math.floor((height - mh) / 2)
 
@@ -771,14 +742,14 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   buf.addHitBox(0, 0, width, height, 'close-modal')
 
   const titleMap = {
-    settings: '配置工作树执行 Agent',
+    settings: '配置执行 Agent',
     reply: modal.type === 'reply' ? `回复 ${modal.item.agentName}` : '回复助手',
     detail: '任务详情'
   }
 
   buf.drawBox(mx, my, mw, mh, {
     borderStyle: PALETTE.borderActive,
-    fillStyle: PALETTE.modalBg,
+    clearInterior: true,
     title: titleMap[modal.type],
     titleStyle: PALETTE.accentBold
   })
@@ -800,8 +771,8 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
     buf.writeText(
       ix,
       my + 2,
-      '点击或 ↑↓ 选择，Enter 设为默认，Space 切换允许标签覆盖：',
-      PALETTE.muted,
+      '↑↓ 选择 · Enter 设为默认 · Space 切换允许',
+      PALETTE.dim,
       iw
     )
     const listH = Math.max(2, mh - 7)
@@ -811,10 +782,12 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
       const isCur = i === modal.cursor
       const isDef = id === modal.defaultAgent
       const isAllowed = modal.allowedAgents.includes(id)
-      if (isCur) buf.fillRect(ix, rowY, iw, 1, PALETTE.selBg)
-      const st = isCur ? PALETTE.selBg : PALETTE.text
-      const line = `${isCur ? '▸ ' : '  '}${isDef ? '★ 默认' : '  可选'}  [${isAllowed ? 'x' : ' '}]  ${id}`
-      buf.writeText(ix, rowY, line, st, iw)
+      const st = isCur ? PALETTE.bright : PALETTE.text
+      const prefix = isCur ? '❯ ' : '  '
+      let cx = ix
+      cx += buf.writeText(cx, rowY, prefix, isCur ? PALETTE.accentBold : PALETTE.dim)
+      const line = `${isDef ? '★ 默认' : '  可选'}  [${isAllowed ? 'x' : ' '}]  ${id}`
+      buf.writeText(cx, rowY, line, st, iw - (cx - ix))
       buf.addHitBox(ix, rowY, iw, 1, 'settings-click-agent', i)
     }
     const footerY = my + mh - 2
@@ -823,48 +796,47 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
       buf.drawButton(
         fx,
         footerY,
-        modal.saving ? '保存中…' : '保存配置',
+        modal.saving ? '保存中…' : '保存',
         PALETTE.accentBg,
         'settings-save'
-      ) + 1
-    buf.drawButton(fx, footerY, '取消 (Esc)', PALETTE.chipBg, 'close-modal')
+      ) + 2
+    buf.drawLinkButton(fx, footerY, '[取消]', PALETTE.muted, 'close-modal')
     return
   }
 
   if (modal.type === 'reply') {
     const qLines = wrapTextToWidth(modal.item.question, iw, 3)
     qLines.forEach((l, i) => buf.writeText(ix, my + 2 + i, l, PALETTE.muted, iw))
-    const inputY = my + 6
-    buf.fillRect(ix, inputY, iw, 2, PALETTE.inputFocusBg)
-    const rLines = wrapTextToWidth(`${modal.text}▏`, iw - 2, 2)
+    const inputTop = my + 5
+    buf.drawHLine(ix, inputTop, iw, PALETTE.borderActive)
+    buf.writeText(ix, inputTop + 1, '❯', PALETTE.accentBold, 2)
+    const rLines = modal.text
+      ? wrapTextToWidth(`${modal.text}▏`, iw - 2, 2)
+      : ['▏输入回复…']
     rLines.forEach((l, i) =>
-      writeLineWithAttachmentTokens(buf, ix + 1, inputY + i, l, PALETTE.inputFocusBg, iw - 2, modal.attachments)
-    )
-    const attY = inputY + 3
-    let ax = ix
-    ax += buf.drawButton(ax, attY, '+ 粘贴截图 (^V)', PALETTE.chipBg, 'reply-paste-image') + 1
-    if (modal.attachments.length > 0) {
-      renderAttachmentChips(
+      writeLineWithAttachmentTokens(
         buf,
-        ax,
-        attY,
-        Math.max(0, ix + iw - ax),
-        modal.attachments,
-        'remove-reply-attachment',
-        false
+        ix + 2,
+        inputTop + 1 + i,
+        l,
+        modal.text ? PALETTE.text : PALETTE.dim,
+        iw - 2,
+        modal.attachments
       )
-    }
+    )
+    buf.drawHLine(ix, inputTop + 3, iw, PALETTE.borderActive)
     const footerY = my + mh - 2
     let fx = ix
     fx +=
       buf.drawButton(
         fx,
         footerY,
-        modal.sending ? '发送中…' : '发送 (Enter)',
+        modal.sending ? '发送中…' : '发送',
         PALETTE.accentBg,
         'reply-submit'
-      ) + 1
-    buf.drawButton(fx, footerY, '取消 (Esc)', PALETTE.chipBg, 'close-modal')
+      ) + 2
+    fx += buf.drawLinkButton(fx, footerY, '[贴图 ^V]', PALETTE.muted, 'reply-paste-image') + 2
+    buf.drawLinkButton(fx, footerY, '[取消]', PALETTE.muted, 'close-modal')
     return
   }
 
@@ -877,14 +849,14 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
     const footerY = my + mh - 2
     let fx = ix
     if (modal.url) {
-      fx += buf.drawButton(fx, footerY, '浏览器打开', PALETTE.accentBg, 'open-url', modal.url) + 1
+      fx += buf.drawButton(fx, footerY, '浏览器打开', PALETTE.accentBg, 'open-url', modal.url) + 2
     }
     if (modal.prUrl) {
-      fx += buf.drawButton(fx, footerY, '打开 PR', PALETTE.chipBg, 'open-url', modal.prUrl) + 1
+      fx += buf.drawLinkButton(fx, footerY, '[打开 PR]', PALETTE.muted, 'open-url', modal.prUrl) + 2
     }
     if (modal.canFollowUp && modal.issueNumber) {
-      fx += buf.drawButton(fx, footerY, '基于此追提', PALETTE.chipBg, 'open-followup', modal.issueNumber) + 1
+      fx += buf.drawLinkButton(fx, footerY, '[追提]', PALETTE.muted, 'open-followup', modal.issueNumber) + 2
     }
-    buf.drawButton(fx, footerY, '关闭 (Esc)', PALETTE.chipBg, 'close-modal')
+    buf.drawLinkButton(fx, footerY, '[关闭]', PALETTE.muted, 'close-modal')
   }
 }

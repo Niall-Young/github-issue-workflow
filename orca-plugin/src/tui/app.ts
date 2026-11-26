@@ -51,6 +51,7 @@ export class IssueBoardTui {
   private lastBuffer: ScreenBuffer | null = null
   private lastRenderedLines: string[] | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
+  private errorTimer: ReturnType<typeof setTimeout> | null = null
   private cleanedUp = false
 
   constructor(targetPath: string) {
@@ -74,7 +75,8 @@ export class IssueBoardTui {
         submitting: false,
         slashIndex: 0
       },
-      modal: { type: 'none' }
+      modal: { type: 'none' },
+      errorNotice: null
     }
   }
 
@@ -128,6 +130,7 @@ export class IssueBoardTui {
     if (this.cleanedUp) return
     this.cleanedUp = true
     if (this.pollTimer) clearInterval(this.pollTimer)
+    if (this.errorTimer) clearTimeout(this.errorTimer)
     process.stdin.off('data', this.onStdinData)
     process.stdout.off('resize', this.onResize)
     try {
@@ -140,6 +143,25 @@ export class IssueBoardTui {
       ANSI.bracketedPasteOff + ANSI.mouseOff + ANSI.cursorShow + ANSI.altScreenOff + ANSI.reset
     )
     process.exit(code)
+  }
+
+  private showError(text: string) {
+    this.state.errorNotice = text
+    this.render()
+    if (this.errorTimer) clearTimeout(this.errorTimer)
+    this.errorTimer = setTimeout(() => {
+      this.state.errorNotice = null
+      this.render()
+    }, 3500)
+  }
+
+  private clearError() {
+    if (!this.state.errorNotice) return
+    this.state.errorNotice = null
+    if (this.errorTimer) {
+      clearTimeout(this.errorTimer)
+      this.errorTimer = null
+    }
   }
 
   private cycleIssueKind() {
@@ -505,6 +527,7 @@ export class IssueBoardTui {
   }
 
   private handleEvent(ev: InputEvent) {
+    this.clearError()
     if (ev.type === 'mouse') {
       this.handleMouse(ev)
       return
@@ -534,8 +557,8 @@ export class IssueBoardTui {
           this.render()
           return
         }
-      } catch {
-        this.render()
+      } catch (err) {
+        this.showError(err instanceof Error ? err.message : String(err))
         return
       }
       c.text += ev.text
@@ -596,6 +619,8 @@ export class IssueBoardTui {
           const picked = matches[Math.max(0, Math.min(c.slashIndex, matches.length - 1))]
           if (picked) {
             this.executeSlashCommand(picked.id, '')
+          } else {
+            this.showError(`未知命令：${c.text.trim()}`)
           }
           return
         }
@@ -636,6 +661,8 @@ export class IssueBoardTui {
           const parsed = parseSlashCommand(trimmed)
           if (parsed?.kind === 'command') {
             this.executeSlashCommand(parsed.command.id, parsed.arg)
+          } else if (parsed?.kind === 'unknown') {
+            this.showError(`未知命令：${parsed.name}`)
           }
           return
         }
@@ -776,8 +803,8 @@ export class IssueBoardTui {
             this.render()
             return
           }
-        } catch {
-          this.render()
+        } catch (err) {
+          this.showError(err instanceof Error ? err.message : String(err))
           return
         }
         modal.text += ev.text.replace(/\r?\n/g, ' ')
@@ -793,6 +820,7 @@ export class IssueBoardTui {
     const repoPath = this.state.snapshot?.repoPath || this.targetPath
     const att = await captureClipboardImage(repoPath)
     if (!att) {
+      this.showError('剪贴板中未检测到截图')
       return
     }
     if (this.state.modal.type === 'reply') {
@@ -817,6 +845,7 @@ export class IssueBoardTui {
     const cleanedText = stripInlineAttachmentTokens(rawText, c.attachments)
     const { title, details } = splitComposerText(cleanedText)
     if (!title) {
+      this.showError('请先输入需求描述')
       return
     }
     const snap = this.state.snapshot
@@ -846,9 +875,9 @@ export class IssueBoardTui {
       c.submitting = false
       this.render()
       void this.refresh(true)
-    } catch {
+    } catch (err) {
       c.submitting = false
-      this.render()
+      this.showError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -863,9 +892,9 @@ export class IssueBoardTui {
       this.state.modal = { type: 'none' }
       this.render()
       void this.refresh(true)
-    } catch {
+    } catch (err) {
       modal.sending = false
-      this.render()
+      this.showError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -876,8 +905,8 @@ export class IssueBoardTui {
     try {
       await replyToAgentTerminal(item.terminalId, '同意，请继续执行')
       void this.refresh(true)
-    } catch {
-      // handled by clearing busy state below
+    } catch (err) {
+      this.showError(err instanceof Error ? err.message : String(err))
     } finally {
       this.state.busyIds.delete(item.id)
       this.render()
@@ -895,8 +924,8 @@ export class IssueBoardTui {
     try {
       await runIssueAdminAction(repoPath, item.url, action)
       void this.refresh(true)
-    } catch {
-      // handled by clearing busy state below
+    } catch (err) {
+      this.showError(err instanceof Error ? err.message : String(err))
     } finally {
       this.state.busyIds.delete(item.id)
       this.render()
@@ -907,6 +936,8 @@ export class IssueBoardTui {
     const snap = this.state.snapshot
     const repoPath = snap?.repoPath || this.targetPath
     const agent = snap?.defaultAgent || snap?.preferredAgent || 'codex'
+    this.state.loading = true
+    this.render()
     try {
       await saveAgentConfig({
         repoPath,
@@ -914,8 +945,9 @@ export class IssueBoardTui {
         allowedAgents: [agent]
       })
       void this.refresh(true)
-    } catch {
-      this.render()
+    } catch (err) {
+      this.state.loading = false
+      this.showError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -934,9 +966,9 @@ export class IssueBoardTui {
       this.state.modal = { type: 'none' }
       this.render()
       void this.refresh(true)
-    } catch {
+    } catch (err) {
       modal.saving = false
-      this.render()
+      this.showError(err instanceof Error ? err.message : String(err))
     }
   }
 }

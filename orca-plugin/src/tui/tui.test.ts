@@ -16,6 +16,7 @@ import {
 import { InputParser } from './input'
 import {
   buildMainRows,
+  computeComposerHeight,
   nextIssueKind,
   nextSubmitMode,
   renderTui,
@@ -103,7 +104,8 @@ function makeBaseState(text = ''): TuiState {
       submitting: false,
       slashIndex: 0
     },
-    modal: { type: 'none' }
+    modal: { type: 'none' },
+    errorNotice: null
   }
 }
 
@@ -306,7 +308,7 @@ test('inline attachment tokens support insertion, atomic Backspace, click remova
   })
 })
 
-test('renderTui renders inline [Image #1] tokens and clickable remove chips in composer and reply modal', () => {
+test('renderTui keeps inline [Image #1] on a single composer line without duplicate attachment rows or toast banners', () => {
   const saved: SavedAttachment = {
     name: 'orca-paste-123.png',
     mimeType: 'image/png',
@@ -317,11 +319,31 @@ test('renderTui renders inline [Image #1] tokens and clickable remove chips in c
   const state = makeBaseState(inserted.text)
   state.composer.attachments = inserted.attachments
 
-  const buf = renderTui(state, 110, 30)
-  const removeHits = buf.hitBoxes.filter((h) => h.action === 'remove-composer-attachment')
-  assert.equal(removeHits.length, 1)
-  assert.equal(removeHits[0]?.payload, 1)
+  assert.equal(computeComposerHeight(state.composer, 110), 3)
 
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
+  const buf = renderTui(state, 110, 30)
+  const plainLines = buf.renderLines().map(stripAnsi)
+  const fullText = plainLines.join('\n')
+
+  assert.ok(fullText.includes('[Image #1]'))
+  assert.ok(!fullText.includes('📎'))
+  assert.ok(!fullText.includes('Backspace 或点击 × 删除'))
+  assert.equal(buf.hitBoxes.filter((h) => h.action === 'remove-composer-attachment').length, 0)
+  assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-issue-kind'), true)
+  assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-submit-mode'), true)
+
+  // Footer shows active kind & mode, and inline error notice replaces right hint without a banner
+  const footerLine = plainLines[plainLines.length - 1]
+  assert.ok(footerLine.includes('● 新功能'))
+  assert.ok(footerLine.includes('Skill 规范提单'))
+
+  state.errorNotice = '剪贴板中未检测到截图'
+  const errBuf = renderTui(state, 110, 30)
+  const errFooter = stripAnsi(errBuf.renderLines()[29])
+  assert.ok(errFooter.includes('⚠ 剪贴板中未检测到截图'))
+
+  // Reply modal also keeps [Image #1] inline without duplicate attachment chips
   const snap = state.snapshot!
   const questionItem = snap.needsYou[0]
   assert.equal(questionItem.kind, 'agent-question')
@@ -334,9 +356,9 @@ test('renderTui renders inline [Image #1] tokens and clickable remove chips in c
       sending: false
     }
     const modalBuf = renderTui(state, 110, 30)
-    const replyRemoveHits = modalBuf.hitBoxes.filter((h) => h.action === 'remove-reply-attachment')
-    assert.equal(replyRemoveHits.length, 1)
-    assert.equal(replyRemoveHits[0]?.payload, 1)
+    const modalText = modalBuf.renderLines().map(stripAnsi).join('\n')
+    assert.ok(modalText.includes('[Image #1]'))
+    assert.equal(modalBuf.hitBoxes.filter((h) => h.action === 'remove-reply-attachment').length, 0)
   }
 })
 
@@ -354,7 +376,7 @@ test('Codex-style footer displays active issue kind and submit mode with cycling
   const footerLine = stripAnsi(buf.renderLines()[29]!)
   assert.ok(footerLine.includes('● 新功能'))
   assert.ok(footerLine.includes('Skill 规范提单'))
-  assert.ok(footerLine.includes('⇧Tab 切换类型'))
+  assert.ok(footerLine.includes('⇧Tab 切换'))
   assert.ok(!footerLine.includes('Enter 提交/执行'))
 
   const kindHits = buf.hitBoxes.filter((h) => h.action === 'cycle-issue-kind')

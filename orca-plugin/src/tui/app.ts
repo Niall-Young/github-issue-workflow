@@ -34,6 +34,7 @@ import {
 import {
   buildMainRows,
   computeComposerHeight,
+  DEFAULT_SUBMIT_MODE,
   nextIssueKind,
   nextSubmitMode,
   renderTui,
@@ -42,6 +43,31 @@ import {
 import { ANSI, type ScreenBuffer } from './screen'
 
 const POLL_INTERVAL_MS = 12_000
+
+export function createInitialTuiState(): TuiState {
+  return {
+    snapshot: null,
+    loading: true,
+    activeTab: 'issues',
+    activePane: 'main',
+    selectedIndex: 1,
+    scrollOffset: 0,
+    attentionIndex: 0,
+    attentionScroll: 0,
+    busyIds: new Set(),
+    composer: {
+      text: '',
+      mode: DEFAULT_SUBMIT_MODE,
+      kind: 'feature',
+      followUpOf: null,
+      attachments: [],
+      submitting: false,
+      slashIndex: 0
+    },
+    modal: { type: 'none' },
+    errorNotice: null
+  }
+}
 
 export class IssueBoardTui {
   private readonly targetPath: string
@@ -56,28 +82,7 @@ export class IssueBoardTui {
 
   constructor(targetPath: string) {
     this.targetPath = resolve(targetPath)
-    this.state = {
-      snapshot: null,
-      loading: true,
-      activeTab: 'issues',
-      activePane: 'main',
-      selectedIndex: 1,
-      scrollOffset: 0,
-      attentionIndex: 0,
-      attentionScroll: 0,
-      busyIds: new Set(),
-      composer: {
-        text: '',
-        mode: 'handoff',
-        kind: 'feature',
-        followUpOf: null,
-        attachments: [],
-        submitting: false,
-        slashIndex: 0
-      },
-      modal: { type: 'none' },
-      errorNotice: null
-    }
+    this.state = createInitialTuiState()
   }
 
   start() {

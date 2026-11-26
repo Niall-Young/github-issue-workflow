@@ -26,15 +26,17 @@ import {
   loadBoardSnapshot,
   type PendingHandoff
 } from './orca-cli'
+import { createInitialTuiState } from './app'
 import {
   buildMainRows,
   computeComposerHeight,
+  DEFAULT_SUBMIT_MODE,
   nextIssueKind,
   nextSubmitMode,
   renderTui,
   type TuiState
 } from './render'
-import { ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
+import { PALETTE, ScreenBuffer, stringDisplayWidth, truncateToWidth, wrapTextToWidth } from './screen'
 
 function makeSampleSnapshot(): BoardSnapshot {
   return {
@@ -109,7 +111,7 @@ function makeBaseState(text = ''): TuiState {
     busyIds: new Set(),
     composer: {
       text,
-      mode: 'handoff',
+      mode: DEFAULT_SUBMIT_MODE,
       kind: 'feature',
       followUpOf: null,
       attachments: [],
@@ -345,10 +347,11 @@ test('renderTui keeps inline [Image #1] on a single composer line without duplic
   assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-issue-kind'), true)
   assert.equal(buf.hitBoxes.some((h) => h.action === 'cycle-submit-mode'), true)
 
-  // Footer shows active kind & mode, and inline error notice replaces right hint without a banner
+  // Footer shows active kind & default direct mode (Skill handoff off), and inline error notice replaces right hint without a banner
   const footerLine = plainLines[plainLines.length - 1]
   assert.ok(footerLine.includes('● 新功能'))
-  assert.ok(footerLine.includes('Skill 规范提单'))
+  assert.ok(footerLine.includes('○ 快速直提'))
+  assert.ok(!footerLine.includes('Skill 规范提单'))
 
   state.errorNotice = '剪贴板中未检测到截图'
   const errBuf = renderTui(state, 110, 30)
@@ -374,7 +377,9 @@ test('renderTui keeps inline [Image #1] on a single composer line without duplic
   }
 })
 
-test('Codex-style footer displays active issue kind and submit mode with cycling helpers and hit-boxes', () => {
+test('Codex-style footer defaults to direct mode and toggles highlighted Skill handoff badge with synchronized slash menu', () => {
+  assert.equal(DEFAULT_SUBMIT_MODE, 'direct')
+  assert.equal(createInitialTuiState().composer.mode, 'direct')
   assert.equal(nextIssueKind('feature'), 'bug')
   assert.equal(nextIssueKind('bug'), 'polish')
   assert.equal(nextIssueKind('polish'), 'feature')
@@ -383,11 +388,16 @@ test('Codex-style footer displays active issue kind and submit mode with cycling
 
   const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
 
+  // Default state: Skill handoff off (direct), low-brightness unselected indicator
   const state = makeBaseState('')
   const buf = renderTui(state, 110, 30)
-  const footerLine = stripAnsi(buf.renderLines()[29]!)
+  const rawFooter = buf.renderLines()[29]!
+  const footerLine = stripAnsi(rawFooter)
   assert.ok(footerLine.includes('● 新功能'))
-  assert.ok(footerLine.includes('Skill 规范提单'))
+  assert.ok(footerLine.includes('○ 快速直提'))
+  assert.ok(!footerLine.includes('Skill 规范提单'))
+  assert.ok(rawFooter.includes(`${PALETTE.dim} · ○ 快速直提`))
+  assert.ok(!rawFooter.includes(PALETTE.green))
   assert.ok(footerLine.includes('⇧Tab 切换'))
   assert.ok(!footerLine.includes('Enter 提交/执行'))
 
@@ -398,15 +408,58 @@ test('Codex-style footer displays active issue kind and submit mode with cycling
   assert.equal(modeHits.length, 1)
   assert.equal(modeHits[0]?.y, 29)
 
-  // Cycling to bug and direct mode updates the footer directly without any toast bar
+  // Slash menu active checkmark reflects default direct mode
+  const directSlashState = makeBaseState('/')
+  const directSlashBuf = renderTui(directSlashState, 110, 30)
+  const directSlashLines = directSlashBuf.renderLines().map(stripAnsi)
+  const directSlashRow = directSlashLines.find((line) => line.includes('/direct'))
+  const handoffSlashRow = directSlashLines.find((line) => line.includes('/handoff'))
+  assert.ok(directSlashRow?.includes('✓'))
+  assert.ok(!handoffSlashRow?.includes('✓'))
+
+  // Toggling to handoff mode highlights the Skill 规范提单 active badge and keeps hitbox clickable
   state.composer.kind = nextIssueKind(state.composer.kind)
   state.composer.mode = nextSubmitMode(state.composer.mode)
   state.composer.followUpOf = 42
-  const updatedBuf = renderTui(state, 110, 30)
-  const updatedFooter = stripAnsi(updatedBuf.renderLines()[29]!)
-  assert.ok(updatedFooter.includes('● 修 Bug'))
-  assert.ok(updatedFooter.includes('快速直提'))
-  assert.ok(updatedFooter.includes('追提 #42'))
+  assert.equal(state.composer.mode, 'handoff')
+  const handoffBuf = renderTui(state, 110, 30)
+  const rawHandoffFooter = handoffBuf.renderLines()[29]!
+  const handoffFooter = stripAnsi(rawHandoffFooter)
+  assert.ok(handoffFooter.includes('● 修 Bug'))
+  assert.ok(handoffFooter.includes('● Skill 规范提单'))
+  assert.ok(rawHandoffFooter.includes(`${PALETTE.green}● Skill 规范提单`))
+  assert.ok(handoffFooter.includes('追提 #42'))
+  assert.equal(handoffBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode').length, 1)
+
+  // Slash menu active checkmark switches to /handoff
+  const handoffSlashState = makeBaseState('/')
+  handoffSlashState.composer.mode = 'handoff'
+  const handoffSlashBuf = renderTui(handoffSlashState, 110, 30)
+  const handoffSlashLines = handoffSlashBuf.renderLines().map(stripAnsi)
+  const directRowWhenHandoff = handoffSlashLines.find((line) => line.includes('/direct'))
+  const handoffRowWhenHandoff = handoffSlashLines.find((line) => line.includes('/handoff'))
+  assert.ok(!directRowWhenHandoff?.includes('✓'))
+  assert.ok(handoffRowWhenHandoff?.includes('✓'))
+
+  // Toggling back returns to unselected direct state
+  state.composer.mode = nextSubmitMode(state.composer.mode)
+  assert.equal(state.composer.mode, 'direct')
+  const backBuf = renderTui(state, 110, 30)
+  const backFooter = stripAnsi(backBuf.renderLines()[29]!)
+  assert.ok(backFooter.includes('○ 快速直提'))
+  assert.ok(!backFooter.includes('Skill 规范提单'))
+  assert.equal(backBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode').length, 1)
+
+  // Narrow terminal width keeps truncation safe without overlapping right-side error/hint
+  const narrowState = makeBaseState('')
+  narrowState.composer.mode = 'handoff'
+  narrowState.errorNotice = '网络连接超时'
+  const narrowBuf = renderTui(narrowState, 46, 20)
+  const narrowFooter = stripAnsi(narrowBuf.renderLines()[19]!)
+  assert.ok(stringDisplayWidth(narrowFooter) <= 46)
+  assert.ok(narrowFooter.includes('● Skill 规范提单'))
+  assert.ok(narrowFooter.includes('⚠'))
+  assert.equal(narrowBuf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode').length, 1)
 })
 
 test('extractTerminalQuestion strips CLI chrome and handoff issue detection matches created URLs', () => {

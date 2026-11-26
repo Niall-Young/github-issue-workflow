@@ -71,8 +71,8 @@ export type TuiState = {
 }
 
 export const ISSUE_KINDS: readonly IssueKind[] = ['feature', 'bug', 'polish']
-export const SUBMIT_MODES: readonly SubmitMode[] = ['direct', 'handoff']
-export const DEFAULT_SUBMIT_MODE: SubmitMode = 'direct'
+export const SUBMIT_MODES: readonly SubmitMode[] = ['handoff', 'direct']
+export const DEFAULT_SUBMIT_MODE: SubmitMode = 'handoff'
 
 export function nextIssueKind(current: IssueKind): IssueKind {
   const idx = ISSUE_KINDS.indexOf(current)
@@ -85,8 +85,8 @@ export function nextSubmitMode(current: SubmitMode): SubmitMode {
 }
 
 const MODE_DISPLAY: Record<SubmitMode, { label: string; style: string }> = {
-  direct: { label: '○ Skill 规范提单', style: PALETTE.dim },
-  handoff: { label: '✓ Skill 规范提单', style: PALETTE.accentBold }
+  handoff: { label: '✓ handoff 规范提单', style: PALETTE.accentBold },
+  direct: { label: '○ direct 快速直提', style: PALETTE.dim }
 }
 
 const KIND_LABELS: Record<IssueKind, string> = {

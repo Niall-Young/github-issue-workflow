@@ -448,11 +448,11 @@ test('findAutopilotConfigForRepo reads agent and policy settings and buildAutopi
     const localPrompt = buildLocalDevPrompt({
       repoPath: '/Users/demo/project',
       branch: 'main',
-      kind: 'bug',
       title: '修复按钮对齐',
       lockPath: '/tmp/demo/.git/autopilot-local-dev.lock.json'
     })
     assert.ok(localPrompt.includes('单会话本地直改模式'))
+    assert.ok(!localPrompt.includes('- 类型：'))
     assert.ok(localPrompt.includes('git pull --rebase origin main'))
     assert.ok(localPrompt.includes('git push origin main'))
     assert.ok(localPrompt.includes('/tmp/demo/.git/autopilot-local-dev.lock.json'))

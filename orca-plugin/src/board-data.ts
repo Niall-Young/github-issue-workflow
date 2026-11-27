@@ -396,21 +396,18 @@ export const LOCAL_DEV_LOCK_FILENAME = 'autopilot-local-dev.lock.json'
 export function buildLocalDevPrompt(params: {
   repoPath: string
   branch: string
-  kind: IssueKind
+  kind?: IssueKind
   title: string
   details?: string
   savedAttachments?: SavedAttachment[]
   lockPath: string
 }): string {
-  const kindLabel =
-    params.kind === 'bug' ? '修 Bug' : params.kind === 'polish' ? '体验优化' : '新功能'
   const lines: string[] = [
     `请在当前本地仓库（\`${params.repoPath}\`，分支 \`${params.branch}\`）直接完成以下开发任务（单会话本地直改模式）：`,
     `- 不要创建 GitHub Issue、不要新开 worktree、不要额外启动独立 Reviewer 子 Agent。`,
     `- 专注在当前会话内完成实现、运行相关测试并保持改动干净。`,
     '',
     `## 任务内容`,
-    `- 类型：${kindLabel}`,
     `- 需求：${params.title.trim()}`
   ]
   if (params.details && params.details.trim()) {

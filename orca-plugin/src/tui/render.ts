@@ -457,17 +457,22 @@ function writeLineWithAttachmentTokens(
 
 function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number, y: number) {
   const c = state.composer
+  const isLocalMode = c.mode === 'local'
   let cx = 1
 
-  const kindText = `● ${KIND_LABELS[c.kind]}`
-  const kindW = buf.writeText(cx, y, kindText, KIND_STYLES[c.kind], Math.max(0, width - cx - 1))
-  if (kindW > 0) {
-    buf.addHitBox(cx, y, kindW, 1, 'cycle-issue-kind')
-    cx += kindW
+  if (!isLocalMode) {
+    const kindText = `● ${KIND_LABELS[c.kind]}`
+    const kindW = buf.writeText(cx, y, kindText, KIND_STYLES[c.kind], Math.max(0, width - cx - 1))
+    if (kindW > 0) {
+      buf.addHitBox(cx, y, kindW, 1, 'cycle-issue-kind')
+      cx += kindW
+    }
   }
 
   if (cx < width - 4) {
-    cx += buf.writeText(cx, y, ' · ', PALETTE.dim, Math.max(0, width - cx - 1))
+    if (!isLocalMode) {
+      cx += buf.writeText(cx, y, ' · ', PALETTE.dim, Math.max(0, width - cx - 1))
+    }
     const modeDisplay = MODE_DISPLAY[c.mode]
     const modeW = buf.writeText(
       cx,
@@ -497,10 +502,12 @@ function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number
     return
   }
 
-  const rightHint = '⇧Tab 切换'
-  const rightHintW = stringDisplayWidth(rightHint)
-  if (rightHintW <= rightBudget) {
-    buf.writeText(width - rightHintW - 1, y, rightHint, PALETTE.dim, rightHintW)
+  if (!isLocalMode) {
+    const rightHint = '⇧Tab 切换'
+    const rightHintW = stringDisplayWidth(rightHint)
+    if (rightHintW <= rightBudget) {
+      buf.writeText(width - rightHintW - 1, y, rightHint, PALETTE.dim, rightHintW)
+    }
   }
 }
 
@@ -549,7 +556,7 @@ function renderBottomComposer(
 
 function isCommandActive(cmd: SlashCommandDef, composer: ComposerState): boolean {
   if (cmd.id === 'bug' || cmd.id === 'feature' || cmd.id === 'polish') {
-    return composer.kind === cmd.id
+    return composer.mode !== 'local' && composer.kind === cmd.id
   }
   if (cmd.id === 'handoff' || cmd.id === 'direct' || cmd.id === 'local') {
     return composer.mode === cmd.id

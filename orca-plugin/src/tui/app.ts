@@ -273,6 +273,7 @@ export class IssueBoardTui {
   }
 
   private cycleIssueKind() {
+    if (this.state.composer.mode === 'local') return
     this.state.composer.kind = nextIssueKind(this.state.composer.kind)
     this.render()
   }
@@ -420,6 +421,9 @@ export class IssueBoardTui {
       case 'feature':
       case 'polish': {
         c.kind = id as IssueKind
+        if (c.mode === 'local') {
+          c.mode = DEFAULT_SUBMIT_MODE
+        }
         if (arg.trim()) {
           void this.handleComposerSubmit(arg)
         } else {

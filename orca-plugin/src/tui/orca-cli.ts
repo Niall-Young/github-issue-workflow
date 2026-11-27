@@ -1030,7 +1030,6 @@ export async function submitIssueFromTui(params: {
     const prompt = buildLocalDevPrompt({
       repoPath: params.repoPath,
       branch,
-      kind: params.kind,
       title,
       details: params.details,
       savedAttachments,

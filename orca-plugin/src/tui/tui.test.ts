@@ -1793,6 +1793,37 @@ test('local direct mode and /lite command render badges, manage lock file, and t
   const footer = strip(buf.renderLines()[29] ?? '')
   assert.match(header, /● 自动处理·Lite/)
   assert.ok(footer.includes('⚡ local 本地直改'))
+  assert.ok(!footer.includes('● 新功能'))
+  assert.ok(!footer.includes('● 修 Bug'))
+  assert.ok(!footer.includes('● 体验优化'))
+  assert.ok(!footer.includes('⇧Tab 切换'))
+  assert.equal(buf.hitBoxes.filter((h) => h.action === 'cycle-issue-kind').length, 0)
+  const localModeHits = buf.hitBoxes.filter((h) => h.action === 'cycle-submit-mode')
+  assert.equal(localModeHits.length, 1)
+  assert.equal(localModeHits[0]?.x, 1)
+
+  // In local mode, slash menu marks /local active and does not mark Issue kind commands active
+  const slashLocalState = makeBaseState('/')
+  slashLocalState.composer.mode = 'local'
+  const slashLocalLines = renderTui(slashLocalState, 120, 30).renderLines().map(strip)
+  const featureRowLocal = slashLocalLines.find((l) => l.includes('/feature'))!
+  const localRowLocal = slashLocalLines.find((l) => l.includes('/local'))!
+  assert.ok(localRowLocal.trimEnd().endsWith('✓'))
+  assert.ok(!featureRowLocal.trimEnd().endsWith('✓'))
+
+  // In local mode, cycle-issue-kind is ignored and explicit /bug exits local mode to handoff
+  const localApp = new IssueBoardTui('/tmp/demo-local', { writeOutput: () => {} }) as unknown as {
+    state: TuiState
+    dispatchAction: (action: string, payload?: unknown) => void
+  }
+  localApp.dispatchAction('exec-slash', 'local')
+  assert.equal(localApp.state.composer.mode, 'local')
+  assert.equal(localApp.state.composer.kind, 'feature')
+  localApp.dispatchAction('cycle-issue-kind')
+  assert.equal(localApp.state.composer.kind, 'feature')
+  localApp.dispatchAction('exec-slash', 'bug')
+  assert.equal(localApp.state.composer.kind, 'bug')
+  assert.equal(localApp.state.composer.mode, 'handoff')
 
   const root = mkdtempSync(join(tmpdir(), 'tui-local-dev-'))
   try {

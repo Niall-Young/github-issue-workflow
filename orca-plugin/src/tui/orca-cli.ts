@@ -1475,9 +1475,10 @@ export function sanitizeTerminalTitle(raw: string): string {
     .trim()
 }
 
-export function formatDefaultTerminalTitle(projectName: string): string {
-  const clean = sanitizeTerminalTitle(projectName)
-  return clean ? `Orca Autopilot · ${clean}` : 'Orca Autopilot'
+export const DEFAULT_TERMINAL_TITLE = 'Autopilot'
+
+export function formatDefaultTerminalTitle(_projectName?: string): string {
+  return DEFAULT_TERMINAL_TITLE
 }
 
 export function formatOscTitleSequence(title: string): string {

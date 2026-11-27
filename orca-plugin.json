@@ -36,7 +36,7 @@
       {
         "id": "autopilot-status",
         "text": "Autopilot",
-        "icon": "terminal",
+        "icon": "rocket",
         "tone": "neutral",
         "tooltip": "在终端打开当前项目的 Orca Autopilot 控制台 (TUI)",
         "command": "open-autopilot"

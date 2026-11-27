@@ -245,7 +245,7 @@ export default function activate(orca: OrcaWorkerApi) {
     const command = `if command -v bun >/dev/null 2>&1; then exec bun ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; else exec node ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; fi`
     const created = await orca.host.call('terminal.create', {
       workspaceId,
-      title: `Orca Autopilot · ${basename(repoPath)}`,
+      title: 'Autopilot',
       command
     })
     activeBoardTerminals.set(workspaceId, created.terminalId)

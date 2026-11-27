@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/autopilot-logo.svg" alt="Orca Autopilot Logo" width="80" height="80" />
+</p>
+
 # Orca Autopilot
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -122,7 +126,7 @@ orca-autopilot update
 | `/lite` | 切换后台单会话轻量模式省 Token（`/lite on\|off`） |
 | `/agent` | 配置默认执行 Agent 与允许的 `agent:<id>` 覆盖列表 |
 | `/autopilot` `/stop` | 开启或暂停当前仓库的自动处理循环 |
-| `/title` | 自定义当前终端标签名称（`/title 新名称`，留空恢复默认 `Orca Autopilot · <项目名>`；启动时也支持 `--title`） |
+| `/title` | 自定义当前终端标签名称（`/title 新名称`，留空恢复默认 `Autopilot`；启动时也支持 `--title`） |
 | `/issues` `/prs` `/refresh` `/quit` | 切换视图、手动刷新、退出控制台 |
 
 更多 TUI 交互细节见 [`orca-plugin/README.md`](orca-plugin/README.md)。
@@ -344,7 +348,7 @@ Launch `orca-autopilot`, type your request in the bottom composer, and press `En
 | `/lite` | Toggle single-session lite worker mode to save tokens (`/lite on\|off`) |
 | `/agent` | Configure default execution Agent and allowed `agent:<id>` overrides |
 | `/autopilot` `/stop` | Start or pause the repository's autopilot loop |
-| `/title` | Customize the terminal tab title (`/title New Name`, empty to restore `Orca Autopilot · <project>`; also supports `--title` on launch) |
+| `/title` | Customize the terminal tab title (`/title New Name`, empty to restore `Autopilot`; also supports `--title` on launch) |
 | `/issues` `/prs` `/refresh` `/quit` | Switch views, refresh data, or exit the console |
 
 See [`orca-plugin/README.md`](orca-plugin/README.md) for full TUI interaction details.

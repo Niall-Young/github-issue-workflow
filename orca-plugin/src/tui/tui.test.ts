@@ -1862,8 +1862,8 @@ test('local direct mode and /lite command render badges, manage lock file, and t
 
 test('terminal title helpers sanitize control chars, format OSC 0, and call orca terminal rename', async () => {
   assert.equal(sanitizeTerminalTitle('  My\x1b[31m\nBoard\tName  '), 'My [31m Board Name')
-  assert.equal(formatDefaultTerminalTitle('orca-autopilot'), 'Orca Autopilot · orca-autopilot')
-  assert.equal(formatDefaultTerminalTitle(''), 'Orca Autopilot')
+  assert.equal(formatDefaultTerminalTitle('orca-autopilot'), 'Autopilot')
+  assert.equal(formatDefaultTerminalTitle(''), 'Autopilot')
   assert.equal(formatOscTitleSequence('Autopilot\nTab'), '\x1b]0;Autopilot Tab\x07')
 
   const calls: Array<{ cmd: string; args: string[] }> = []
@@ -1872,14 +1872,14 @@ test('terminal title helpers sanitize control chars, format OSC 0, and call orca
     return { exitCode: 0, stdout: '{"ok":true}', stderr: '' }
   }
 
-  const ok = await setOrcaTerminalTitle('Orca Autopilot · demo', {
+  const ok = await setOrcaTerminalTitle('Autopilot', {
     terminalHandle: 'term_abc',
     runner
   })
   assert.equal(ok, true)
   assert.deepEqual(calls[0], {
     cmd: 'orca',
-    args: ['terminal', 'rename', '--terminal', 'term_abc', '--title', 'Orca Autopilot · demo', '--json']
+    args: ['terminal', 'rename', '--terminal', 'term_abc', '--title', 'Autopilot', '--json']
   })
 
   const resetOk = await setOrcaTerminalTitle('', {
@@ -1943,6 +1943,6 @@ test('parseTuiCliArgs and /title slash command support custom terminal tab title
   await (tui as unknown as { handleRenameTerminal(arg: string): Promise<void> }).handleRenameTerminal(
     ''
   )
-  assert.deepEqual(renamedTitles, ['我的 Autopilot', 'Orca Autopilot · demo-app'])
-  assert.ok(chunks.some((c) => c.includes('\x1b]0;Orca Autopilot · demo-app\x07')))
+  assert.deepEqual(renamedTitles, ['我的 Autopilot', 'Autopilot'])
+  assert.ok(chunks.some((c) => c.includes('\x1b]0;Autopilot\x07')))
 })

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128"
+     viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Orca Autopilot</title>
+  <path fill="#CC6B49" d="
+    M 108 51
+    C 119 73 106 99 81 110
+    C 54 122 24 114 15 92
+    C 4 65 25 33 55 23
+    C 66 19 77 18 87 20
+    L 72 32
+    C 51 32 29 52 25 73
+    C 24 80 25 86 29 91
+    C 41 87 47 71 59 55
+    C 72 38 90 24 112 15
+    C 98 39 89 61 90 79
+    L 72 68
+    C 64 82 52 94 39 100
+    C 49 106 63 105 76 100
+    C 94 92 103 76 100 64
+    Z"/>
+</svg>

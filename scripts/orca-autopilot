@@ -648,7 +648,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--title",
         default=None,
-        help="自定义终端标签名称（默认 Orca Autopilot · <项目名>）",
+        help="自定义终端标签名称（默认 Autopilot）",
     )
     parser.add_argument(
         "--install",

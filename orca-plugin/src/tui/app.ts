@@ -218,8 +218,7 @@ export class IssueBoardTui {
 
   private resolveDesiredTerminalTitle(): string {
     if (this.customTitle) return this.customTitle
-    const projectName = this.state.snapshot?.projectName || basename(this.targetPath)
-    return formatDefaultTerminalTitle(projectName)
+    return formatDefaultTerminalTitle(this.state.snapshot?.projectName || basename(this.targetPath))
   }
 
   private async applyTerminalTitle(title: string, force = false): Promise<boolean> {

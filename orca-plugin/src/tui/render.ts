@@ -245,7 +245,7 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   const rightStatusW = stringDisplayWidth(rightStatus)
 
   let col = 1
-  col += buf.writeText(col, 0, '◆ ', PALETTE.accentBold)
+  col += buf.writeText(col, 0, '➚ ', PALETTE.accentBold)
   col += buf.writeText(col, 0, projectLabel, PALETTE.bright)
   if (repoLabel) {
     col += buf.writeText(col, 0, repoLabel, PALETTE.dim, Math.max(0, width - col - rightStatusW - 18))

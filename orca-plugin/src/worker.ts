@@ -25,6 +25,17 @@ function shellQuote(arg: string): string {
   return `'${arg.replace(/'/g, `'\\''`)}'`
 }
 
+function psQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `''`)}'`
+}
+
+function buildOpenTuiShellCommand(tuiScriptPath: string, repoPath: string): string {
+  if (process.platform === 'win32') {
+    return `if (Get-Command bun -ErrorAction SilentlyContinue) { & bun ${psQuote(tuiScriptPath)} ${psQuote(repoPath)} } else { & node ${psQuote(tuiScriptPath)} ${psQuote(repoPath)} }`
+  }
+  return `if command -v bun >/dev/null 2>&1; then exec bun ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; else exec node ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; fi`
+}
+
 export default function activate(orca: OrcaWorkerApi) {
   const pluginRoot = resolvePluginRootDir()
   const tuiScriptPath = join(pluginRoot, 'src', 'tui', 'app.ts')
@@ -265,7 +276,7 @@ export default function activate(orca: OrcaWorkerApi) {
       }
     }
 
-    const command = `if command -v bun >/dev/null 2>&1; then exec bun ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; else exec node ${shellQuote(tuiScriptPath)} ${shellQuote(repoPath)}; fi`
+    const command = buildOpenTuiShellCommand(tuiScriptPath, repoPath)
     const created = await orca.host.call('terminal.create', {
       workspaceId,
       title: 'Autopilot',

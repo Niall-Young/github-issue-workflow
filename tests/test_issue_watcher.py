@@ -36,6 +36,7 @@ class IssueWatcherTests(unittest.TestCase):
         self.db = self.root / "state.sqlite3"
 
     def tearDown(self) -> None:
+        WATCHER.Ledger.close_all()
         self.temporary.cleanup()
 
     @staticmethod
@@ -270,15 +271,15 @@ class IssueWatcherTests(unittest.TestCase):
     def test_review_and_human_stops_do_not_requeue_when_issue_stays_open(self) -> None:
         for status in ("ready-for-review", "needs-human", "blocked"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
-                ledger = WATCHER.Ledger(Path(temporary) / "state.sqlite3",
-                                        lease_seconds=20, max_attempts=2)
-                issue = self.issue()
-                ledger.enqueue(issue)
-                claimed = ledger.claim_next()
-                ledger.finish(claimed["node_id"], claimed["attempt_number"], status,
-                              summary="wait for a person")
-                self.assertFalse(ledger.enqueue(issue))
-                self.assertIsNone(ledger.claim_next())
+                with WATCHER.Ledger(Path(temporary) / "state.sqlite3",
+                                    lease_seconds=20, max_attempts=2) as ledger:
+                    issue = self.issue()
+                    ledger.enqueue(issue)
+                    claimed = ledger.claim_next()
+                    ledger.finish(claimed["node_id"], claimed["attempt_number"], status,
+                                  summary="wait for a person")
+                    self.assertFalse(ledger.enqueue(issue))
+                    self.assertIsNone(ledger.claim_next())
 
     def test_overlapping_failed_issue_scans_only_requeue_once(self) -> None:
         first = self.ledger(attempts=2)
@@ -877,7 +878,7 @@ class IssueWatcherTests(unittest.TestCase):
             return WATCHER.doctor(config)
 
     def test_doctor_accepts_executable_absolute_orca_cli(self) -> None:
-        executable = self.root / "orca"
+        executable = self.root / ("orca.cmd" if sys.platform == "win32" else "orca")
         executable.write_text("#!/bin/sh\n", encoding="utf-8")
         executable.chmod(0o700)
         result = self.doctor_with_orca_cli(str(executable))

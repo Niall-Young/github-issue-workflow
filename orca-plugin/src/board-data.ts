@@ -14,6 +14,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import type {
   AttachmentPayload,
@@ -42,20 +43,42 @@ export type CommandRunner = (
 ) => Promise<{ stdout: string; stderr: string; exitCode: number }>
 
 export const defaultRunner: CommandRunner = async (cmd, args, options = {}) => {
-  try {
+  const runOnce = async (resolvedCmd: string, useShell = false) => {
     const env = { ...process.env }
-    if (basename(cmd) === 'gh') {
+    if (basename(resolvedCmd).replace(/\.exe$/i, '').toLowerCase() === 'gh') {
       env.GODEBUG = env.GODEBUG || 'http2client=0'
     }
-    const { stdout, stderr } = await execFileAsync(cmd, args, {
+    const { stdout, stderr } = await execFileAsync(resolvedCmd, args, {
       cwd: options.cwd,
       timeout: options.timeoutMs ?? 20_000,
       maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+      shell: useShell,
       env
     })
     return { stdout: stdout ?? '', stderr: stderr ?? '', exitCode: 0 }
+  }
+
+  const primaryCmd = process.platform === 'win32' && cmd === 'python3' ? 'python' : cmd
+  try {
+    return await runOnce(primaryCmd)
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; code?: number | string; message?: string }
+    if (process.platform === 'win32' && (e.code === 'ENOENT' || e.code === 'EINVAL')) {
+      if (primaryCmd === 'python' && cmd === 'python3') {
+        try {
+          return await runOnce('py', false)
+        } catch {
+          // fall through
+        }
+      } else if (!primaryCmd.toLowerCase().endsWith('.exe')) {
+        try {
+          return await runOnce(`${primaryCmd}.exe`, false)
+        } catch {
+          // fall through
+        }
+      }
+    }
     return {
       stdout: typeof e.stdout === 'string' ? e.stdout : '',
       stderr: typeof e.stderr === 'string' ? e.stderr : e.message || String(err),
@@ -621,13 +644,35 @@ export async function readLedgerIssues(
     LIMIT 60;
   `
   const res = await runner('sqlite3', ['-readonly', '-json', dbPath, query])
-  if (res.exitCode !== 0 || !res.stdout.trim()) return []
-  try {
-    const parsed = JSON.parse(res.stdout)
-    return Array.isArray(parsed) ? (parsed as LedgerIssueRow[]) : []
-  } catch {
-    return []
+  if (res.exitCode === 0 && res.stdout.trim()) {
+    try {
+      const parsed = JSON.parse(res.stdout)
+      return Array.isArray(parsed) ? (parsed as LedgerIssueRow[]) : []
+    } catch {
+      // fall through to Python sqlite3 fallback
+    }
   }
+  if (process.platform === 'win32') {
+    const pyScript = [
+      'import json, pathlib, sqlite3, sys',
+      'uri = pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro"',
+      'conn = sqlite3.connect(uri, uri=True)',
+      'conn.row_factory = sqlite3.Row',
+      'rows = [dict(r) for r in conn.execute(sys.argv[2]).fetchall()]',
+      'conn.close()',
+      'print(json.dumps(rows))'
+    ].join('; ')
+    const pyRes = await runner('python3', ['-c', pyScript, dbPath, query])
+    if (pyRes.exitCode === 0 && pyRes.stdout.trim()) {
+      try {
+        const parsed = JSON.parse(pyRes.stdout)
+        return Array.isArray(parsed) ? (parsed as LedgerIssueRow[]) : []
+      } catch {
+        return []
+      }
+    }
+  }
+  return []
 }
 
 export async function resolveGitRepository(
@@ -1460,7 +1505,7 @@ export function resolvePluginRootDir(): string {
   try {
     const fileUrl = import.meta.url
     if (fileUrl.startsWith('file://')) {
-      return resolve(dirname(new URL(fileUrl).pathname), '..')
+      return resolve(dirname(fileURLToPath(fileUrl)), '..')
     }
   } catch {
     // ignore
@@ -1560,8 +1605,23 @@ export function syncBundledSkillsAndCli(
         needsLink = true
       }
       if (needsLink) {
-        symlinkSync(cliScript, linkPath)
-        installedCliPaths.push(linkPath)
+        try {
+          symlinkSync(cliScript, linkPath)
+          installedCliPaths.push(linkPath)
+        } catch (err: unknown) {
+          const code = (err as { code?: string })?.code
+          if (process.platform === 'win32' || code === 'EPERM' || code === 'EACCES') {
+            const posixScript = cliScript.replace(/\\/g, '/')
+            writeFileSync(linkPath, `#!/usr/bin/env sh\nexec python "${posixScript}" "$@"\n`, 'utf8')
+            installedCliPaths.push(linkPath)
+            if (process.platform === 'win32') {
+              const cmdPath = `${linkPath}.cmd`
+              writeFileSync(cmdPath, `@echo off\r\npython "${cliScript}" %*\r\n`, 'utf8')
+            }
+          } else {
+            throw err
+          }
+        }
       }
     }
   }

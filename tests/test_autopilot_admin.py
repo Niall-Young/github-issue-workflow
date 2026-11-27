@@ -58,9 +58,10 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertEqual(str(config), value["ProgramArguments"][-1])
         plist_path = self.root / "autopilot.plist"
         plist_path.write_bytes(ADMIN.build_plist(paths, config))
-        lint = subprocess.run(["plutil", "-lint", str(plist_path)], text=True, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE)
-        self.assertEqual(0, lint.returncode, lint.stderr)
+        if ADMIN.shutil.which("plutil"):
+            lint = subprocess.run(["plutil", "-lint", str(plist_path)], text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+            self.assertEqual(0, lint.returncode, lint.stderr)
 
     def test_config_uses_orca_and_user_selected_default_agent(self) -> None:
         paths = {"database": self.root / "state.sqlite3", "key": "abc123",
@@ -188,7 +189,7 @@ class AutopilotAdminTests(unittest.TestCase):
             )
             connection.close()
             with mock.patch.object(ADMIN, "stop", return_value={"status": "stopped"}), self.assertRaisesRegex(
-                ADMIN.AdminError, "#8 \(running\)"
+                ADMIN.AdminError, r"#8 \(running\)"
             ):
                 ADMIN.uninstall(repository="owner/repo")
         self.assertTrue(Path(paths["config"]).exists())
@@ -245,8 +246,13 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertEqual("started", result["status"])
         create_args = call.call_args_list[-1].args
         command_value = create_args[create_args.index("--command") + 1]
-        self.assertTrue(command_value.startswith("exec "))
-        self.assertIn("issue_watcher.py run", command_value)
+        if os.name == "nt":
+            self.assertTrue(command_value.startswith("& "))
+            self.assertIn("issue_watcher.py", command_value)
+            self.assertIn("exit $LASTEXITCODE", command_value)
+        else:
+            self.assertTrue(command_value.startswith("exec "))
+            self.assertIn("issue_watcher.py run", command_value)
 
     def runtime_refresh_fixture(self) -> tuple[Path, dict, dict]:
         paths = ADMIN.build_paths("R_one")

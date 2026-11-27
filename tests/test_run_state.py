@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -39,7 +40,7 @@ class RunStateTests(unittest.TestCase):
 
     def cli(self, *args: str, ok: bool = True) -> dict:
         result = subprocess.run(
-            ["python3", str(SCRIPT), *args],
+            [sys.executable, str(SCRIPT), *args],
             check=False,
             text=True,
             stdout=subprocess.PIPE,

@@ -128,7 +128,7 @@ function resolvePluginRootFromTui(): string {
     const fileUrl = import.meta.url
     if (fileUrl.startsWith('file://')) {
       // orca-plugin/src/tui/orca-cli.ts -> orca-plugin
-      return resolve(new URL(fileUrl).pathname, '..', '..', '..')
+      return resolve(fileURLToPath(fileUrl), '..', '..', '..')
     }
   } catch {
     // ignore
@@ -136,14 +136,23 @@ function resolvePluginRootFromTui(): string {
   return process.cwd()
 }
 
+function normalizeComparablePath(p: string): string {
+  const unified = resolve(p).replace(/\\/g, '/')
+  return process.platform === 'win32' ? unified.toLowerCase() : unified
+}
+
 function matchesProject(
   entry: { worktreeId?: string; worktreePath?: string; repo?: string },
   repoPath: string
 ): boolean {
-  const normalized = resolve(repoPath)
-  if (entry.worktreePath && resolve(entry.worktreePath) === normalized) return true
-  if (entry.worktreeId && entry.worktreeId.includes(normalized)) return true
-  const projectName = basename(normalized)
+  const normalized = normalizeComparablePath(repoPath)
+  const strippedDrive = normalized.replace(/^[a-z]:/, '')
+  if (entry.worktreePath && normalizeComparablePath(entry.worktreePath) === normalized) return true
+  if (entry.worktreeId) {
+    const wid = (process.platform === 'win32' ? entry.worktreeId.toLowerCase() : entry.worktreeId).replace(/\\/g, '/')
+    if (wid.includes(normalized) || (strippedDrive.startsWith('/') && wid.includes(`::${strippedDrive}`))) return true
+  }
+  const projectName = basename(resolve(repoPath))
   if (entry.repo && entry.repo === projectName) return true
   return false
 }
@@ -583,7 +592,7 @@ export async function loadBoardSnapshot(
   }
 
   for (const [terminalId, entry] of pendingHandoffs.entries()) {
-    if (entry.repoPath !== repoPath) continue
+    if (normalizeComparablePath(entry.repoPath) !== normalizeComparablePath(repoPath)) continue
     if (entry.exitedWithoutIssue) {
       if (entry.sessionKind === 'local') {
         pushLocalExitAlert(terminalId, entry)
@@ -1689,6 +1698,10 @@ export async function openUrlInBrowser(
   runner: CommandRunner = defaultRunner
 ): Promise<void> {
   if (!url) return
+  if (process.platform === 'win32') {
+    await runner('cmd', ['/c', 'start', '', url], { timeoutMs: 5_000 })
+    return
+  }
   const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open'
   await runner(cmd, [url], { timeoutMs: 5_000 })
 }
@@ -1732,7 +1745,12 @@ function normalizePathCandidate(raw: string): string | null {
   if (!s) return null
   if (s.startsWith('file://')) {
     try {
-      s = fileURLToPath(s)
+      let urlStr = s
+      const winDriveMatch = /^file:\/\/\/?([A-Za-z](?:%3A|:).*)$/i.exec(urlStr)
+      if (winDriveMatch) {
+        urlStr = `file:///${winDriveMatch[1].replace(/%3A/i, ':').replace(/%5C/gi, '/').replace(/\\/g, '/')}`
+      }
+      s = fileURLToPath(urlStr)
     } catch {
       return null
     }
@@ -1751,6 +1769,18 @@ function isExistingRegularFile(filePath: string): boolean {
   } catch {
     return false
   }
+}
+
+function looksLikeWindowsPathPrefix(s: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(s) || s.startsWith('\\\\')
+}
+
+function unescapePathToken(raw: string): string {
+  if (looksLikeWindowsPathPrefix(raw)) {
+    // Preserve Windows backslash path separators while unescaping shell-escaped spaces/parens
+    return raw.replace(/\\([ ()[\]{}'"&;$`!#])/g, '$1')
+  }
+  return raw.replace(/\\(.)/g, '$1')
 }
 
 function tokenizeShellPaths(input: string): string[] | null {
@@ -1774,7 +1804,10 @@ function tokenizeShellPaths(input: string): string[] | null {
         quote = null
       } else if (ch === '\\' && i + 1 < input.length) {
         const next = input[i + 1]
-        if (next === '"' || next === '\\' || next === '$' || next === '`') {
+        if (!looksLikeWindowsPathPrefix(current) && (next === '"' || next === '\\' || next === '$' || next === '`')) {
+          current += next
+          i += 1
+        } else if (looksLikeWindowsPathPrefix(current) && next === '"') {
           current += next
           i += 1
         } else {
@@ -1800,7 +1833,13 @@ function tokenizeShellPaths(input: string): string[] | null {
       continue
     }
     if (ch === '\\' && i + 1 < input.length) {
-      current += input[i + 1]
+      const next = input[i + 1]
+      if (looksLikeWindowsPathPrefix(current) && !/[ ()[\]{}'"&;$`!#]/.test(next)) {
+        current += ch
+        hasToken = true
+        continue
+      }
+      current += next
       i += 1
       hasToken = true
       continue
@@ -1821,7 +1860,7 @@ function parseSingleFilePath(candidate: string): string | null {
     (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) ||
     (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2)
       ? trimmed.slice(1, -1)
-      : trimmed.replace(/\\(.)/g, '$1')
+      : unescapePathToken(trimmed)
   const normalized = normalizePathCandidate(unquoted)
   if (normalized && isExistingRegularFile(normalized)) {
     return normalized
@@ -1942,12 +1981,57 @@ export async function captureClipboardAttachments(
   stateRoot = getAutopilotStateRoot(),
   runner: CommandRunner = defaultRunner
 ): Promise<SavedAttachment[]> {
-  if (process.platform !== 'darwin') return []
+  if (process.platform !== 'darwin' && process.platform !== 'win32') return []
   const repoSlug = basename(resolve(repoPath)).replace(/[^\w.-]+/g, '_') || 'project'
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const targetDir = join(stateRoot, 'attachments', repoSlug, stamp)
   mkdirSync(targetDir, { recursive: true })
   const outPath = join(targetDir, `clipboard-${Date.now()}.png`)
+
+  if (process.platform === 'win32') {
+    const psScript = `
+      Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+      $files = [System.Windows.Forms.Clipboard]::GetFileDropList()
+      if ($files -and $files.Count -gt 0) {
+        @{ kind = 'files'; paths = @($files) } | ConvertTo-Json -Compress
+        exit 0
+      }
+      $img = [System.Windows.Forms.Clipboard]::GetImage()
+      if ($img -ne $null) {
+        $out = ${JSON.stringify(outPath)}
+        $img.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
+        $img.Dispose()
+        @{ kind = 'image'; path = $out } | ConvertTo-Json -Compress
+        exit 0
+      }
+      $txt = [System.Windows.Forms.Clipboard]::GetText()
+      if ($txt -and $txt.Trim().Length -gt 0) {
+        @{ kind = 'text'; text = $txt } | ConvertTo-Json -Compress
+        exit 0
+      }
+      @{ kind = 'empty' } | ConvertTo-Json -Compress
+    `
+    const res = await runner('powershell', ['-NoProfile', '-STA', '-Command', psScript], { timeoutMs: 5_000 })
+    if (res.exitCode !== 0 || !res.stdout.trim()) return []
+    try {
+      const parsed = JSON.parse(res.stdout.trim()) as { kind?: string; paths?: unknown; path?: unknown; text?: unknown }
+      if (parsed.kind === 'files' && Array.isArray(parsed.paths)) {
+        const validFiles = parsed.paths.filter((p): p is string => typeof p === 'string' && isExistingRegularFile(p))
+        return copyFilesToAttachmentDir(repoPath, validFiles, stateRoot)
+      }
+      if (parsed.kind === 'image' && typeof parsed.path === 'string' && existsSync(parsed.path)) {
+        const st = statSync(parsed.path)
+        if (st.size === 0) return []
+        return [{ name: basename(parsed.path), mimeType: 'image/png', size: st.size, path: parsed.path }]
+      }
+      if (parsed.kind === 'text' && typeof parsed.text === 'string') {
+        return attachLocalFilePaths(repoPath, parsed.text, stateRoot)
+      }
+    } catch {
+      return []
+    }
+    return []
+  }
 
   // Use macOS JXA + AppKit NSPasteboard to inspect copied Finder files, images (PNG/TIFF/JPEG),
   // or local file path text in priority order without external dependencies.

@@ -48,8 +48,12 @@ class OrcaAutopilotCliTests(unittest.TestCase):
             installed = self.mod.install_cli(bin_dir=bin_dir, script_path=SCRIPT_PATH)
             self.assertEqual([p.name for p in installed], ["orca-autopilot", "orca-board"])
             for link in installed:
-                self.assertTrue(link.is_symlink())
-                self.assertEqual(link.resolve(), SCRIPT_PATH.resolve())
+                if link.is_symlink():
+                    self.assertEqual(link.resolve(), SCRIPT_PATH.resolve())
+                else:
+                    self.assertEqual(os.name, "nt")
+                    self.assertTrue(link.is_file())
+                    self.assertTrue(link.with_suffix(".cmd").is_file())
 
     def test_install_standalone_files_survives_source_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +122,7 @@ class OrcaAutopilotCliTests(unittest.TestCase):
                 which=lambda name: "/usr/local/bin/bun" if name == "bun" else None,
             )
             self.assertEqual(cmd[0], "/usr/local/bin/bun")
-            self.assertTrue(cmd[1].endswith("orca-plugin/src/tui/app.ts"))
+            self.assertTrue(Path(cmd[1]).as_posix().endswith("orca-plugin/src/tui/app.ts"))
             self.assertEqual(cmd[2], str(repo.resolve()))
 
     def test_build_tui_command_falls_back_to_node(self):
@@ -335,7 +339,10 @@ class OrcaAutopilotCliTests(unittest.TestCase):
             ])
             self.assertEqual(rc, 0)
             self.assertTrue((install_dir / "orca-plugin.json").is_file())
-            self.assertTrue((bin_dir / "orca-autopilot").is_symlink())
+            self.assertTrue(
+                (bin_dir / "orca-autopilot").is_symlink()
+                or (os.name == "nt" and (bin_dir / "orca-autopilot").is_file())
+            )
             self.assertTrue((skills_dir / "github-issue-autopilot" / "SKILL.md").is_file())
 
     def test_refresh_installed_runtimes_invokes_admin_script(self):

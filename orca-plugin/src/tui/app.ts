@@ -5,6 +5,7 @@
 // and macOS clipboard screenshot paste (^V).
 
 import { basename, resolve } from 'node:path'
+import { getLocale, normalizeLocaleTag, pick, saveLocalePreference, type Locale } from '../i18n'
 import type { IssueKind, NeedsYouItem, SavedAttachment, SubmitMode } from '../protocol'
 import {
   appendInlineAttachment,
@@ -144,7 +145,13 @@ export class IssueBoardTui {
 
   start() {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
-      console.error('orca-autopilot 需要在交互式终端（TTY）中运行。')
+      console.error(
+        pick({
+          es: 'orca-autopilot requiere ejecutarse en una terminal interactiva (TTY).',
+          en: 'orca-autopilot requires an interactive terminal (TTY).',
+          zh: 'orca-autopilot 需要在交互式终端（TTY）中运行。'
+        })
+      )
       process.exit(1)
     }
 
@@ -242,7 +249,13 @@ export class IssueBoardTui {
     } else {
       const clean = sanitizeTerminalTitle(trimmed)
       if (!clean) {
-        this.showError('终端名称不能为空')
+        this.showError(
+          pick({
+            es: 'El nombre de la pestaña no puede estar vacío',
+            en: 'Terminal title cannot be empty',
+            zh: '终端名称不能为空'
+          })
+        )
         return
       }
       this.customTitle = clean
@@ -379,7 +392,13 @@ export class IssueBoardTui {
     if (result.kind === 'open') {
       this.dispatchAction('open-url', result.url)
     } else if (result.kind === 'no-url') {
-      this.showError('该条目尚未生成 GitHub 链接')
+      this.showError(
+        pick({
+          es: 'Este elemento todavía no tiene enlace de GitHub',
+          en: 'This item does not have a GitHub URL yet',
+          zh: '该条目尚未生成 GitHub 链接'
+        })
+      )
     }
   }
 
@@ -495,6 +514,16 @@ export class IssueBoardTui {
         c.text = existingTokens
         void this.handleRenameTerminal(arg)
         return
+      case 'lang': {
+        c.text = existingTokens
+        const order: readonly Locale[] = ['es', 'en', 'zh']
+        const requested = normalizeLocaleTag(arg)
+        const nextLang =
+          requested ?? order[(order.indexOf(getLocale()) + 1) % order.length]
+        saveLocalePreference(nextLang)
+        void this.refresh()
+        return
+      }
       case 'clear':
         c.text = ''
         c.attachments = []
@@ -802,7 +831,13 @@ export class IssueBoardTui {
           if (picked) {
             this.executeSlashCommand(picked.id, '')
           } else {
-            this.showError(`未知命令：${c.text.trim()}`)
+            this.showError(
+              pick({
+                es: `Comando desconocido: ${c.text.trim()}`,
+                en: `Unknown command: ${c.text.trim()}`,
+                zh: `未知命令：${c.text.trim()}`
+              })
+            )
           }
           return
         }
@@ -844,7 +879,13 @@ export class IssueBoardTui {
           if (parsed?.kind === 'command') {
             this.executeSlashCommand(parsed.command.id, parsed.arg)
           } else if (parsed?.kind === 'unknown') {
-            this.showError(`未知命令：${parsed.name}`)
+            this.showError(
+              pick({
+                es: `Comando desconocido: ${parsed.name}`,
+                en: `Unknown command: ${parsed.name}`,
+                zh: `未知命令：${parsed.name}`
+              })
+            )
           }
           return
         }
@@ -1003,7 +1044,13 @@ export class IssueBoardTui {
       return
     }
     if (attached.length === 0) {
-      this.showError('剪贴板中未检测到图片或文件')
+      this.showError(
+        pick({
+          es: 'No se detectó ninguna imagen o archivo en el portapapeles',
+          en: 'No image or file detected in clipboard',
+          zh: '剪贴板中未检测到图片或文件'
+        })
+      )
       return
     }
     if (this.state.modal.type === 'reply') {
@@ -1032,7 +1079,13 @@ export class IssueBoardTui {
     const cleanedText = stripInlineAttachmentTokens(rawText, c.attachments)
     const { title, details } = splitComposerText(cleanedText)
     if (!title) {
-      this.showError('请先输入需求描述')
+      this.showError(
+        pick({
+          es: 'Escribí primero una descripción de lo que necesitás',
+          en: 'Please enter a task description first',
+          zh: '请先输入需求描述'
+        })
+      )
       return
     }
     const snap = this.state.snapshot
@@ -1107,7 +1160,14 @@ export class IssueBoardTui {
     this.state.busyIds.add(item.id)
     this.render()
     try {
-      await replyToAgentTerminal(item.terminalId, '同意，请继续执行')
+      await replyToAgentTerminal(
+        item.terminalId,
+        pick({
+          es: 'De acuerdo, continuá con la ejecución',
+          en: 'Approved, please continue',
+          zh: '同意，请继续执行'
+        })
+      )
       void this.refresh(true)
     } catch (err) {
       this.showError(err instanceof Error ? err.message : String(err))
@@ -1218,7 +1278,13 @@ export class IssueBoardTui {
   private async handleStopAutopilot() {
     const snap = this.state.snapshot
     if (snap && !snap.autopilotInstalled) {
-      this.showError('当前项目尚未开启自动处理循环')
+      this.showError(
+        pick({
+          es: 'Este proyecto todavía no tiene Autopilot activado',
+          en: 'Autopilot is not enabled for this project yet',
+          zh: '当前项目尚未开启自动处理循环'
+        })
+      )
       return
     }
     const repoPath = snap?.repoPath || this.targetPath

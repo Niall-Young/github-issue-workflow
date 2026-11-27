@@ -4,12 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -17,6 +23,8 @@ PLUGIN_DIR = REPO_ROOT
 TUI_ENTRY = REPO_ROOT / "orca-plugin" / "src" / "tui" / "app.ts"
 DEFAULT_INSTALL_DIR = Path.home() / ".local" / "share" / "orca-autopilot"
 DEFAULT_PLUGIN_KEY = "local.issue-autopilot"
+DEFAULT_RELEASE_REPO = "Niall-Young/orca-autopilot"
+FULL_BUNDLE_PREFIX = "github-issue-workflow-full-"
 CLI_NAMES = ("orca-autopilot", "orca-board")
 MANAGED_SKILLS = (
     "github-issue-handoff",
@@ -323,6 +331,203 @@ def launch_tui(target: Path) -> int:
     return proc.returncode
 
 
+def read_installed_version(root: Path = REPO_ROOT) -> str | None:
+    manifest = root / "orca-plugin.json"
+    if not manifest.is_file():
+        return None
+    try:
+        version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        return str(version).strip() if version else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _http_get_bytes(url: str, *, timeout: int = 30) -> bytes:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise RuntimeError(f"仅允许通过 HTTPS 下载更新包：{url}")
+    headers = {
+        "User-Agent": "orca-autopilot-cli",
+        "Accept": "application/vnd.github+json" if parsed.hostname == "api.github.com" else "*/*",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and parsed.hostname == "api.github.com":
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"下载失败（{url}）：{exc}") from exc
+
+
+def _parse_sha256_file(text: str, expected_name: str) -> str:
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[1].lstrip("*") == expected_name:
+            digest = parts[0].lower()
+            if re.fullmatch(r"[0-9a-f]{64}", digest):
+                return digest
+        elif len(parts) == 1 and re.fullmatch(r"[0-9a-f]{64}", parts[0].lower()):
+            return parts[0].lower()
+    raise RuntimeError(f"校验文件缺少 {expected_name} 的有效 SHA-256")
+
+
+def extract_verified_bundle(archive_path: Path, expected_sha256: str, dest_dir: Path) -> Path:
+    actual = hashlib.sha256(archive_path.read_bytes()).hexdigest().lower()
+    if actual != expected_sha256.lower():
+        raise RuntimeError(
+            f"更新包 SHA-256 校验失败：期望 {expected_sha256}，实际 {actual}"
+        )
+    dest_resolved = dest_dir.resolve()
+    with tarfile.open(archive_path, mode="r:gz") as tar:
+        members = tar.getmembers()
+        for member in members:
+            if member.issym() or member.islnk():
+                raise RuntimeError(f"拒绝解压包含链接的归档条目：{member.name}")
+            target = (dest_resolved / member.name).resolve()
+            if target != dest_resolved and dest_resolved not in target.parents:
+                raise RuntimeError(f"拒绝解压越界路径：{member.name}")
+        tar.extractall(dest_resolved)
+
+    roots = [
+        p for p in dest_resolved.iterdir()
+        if p.is_dir() and (p / "orca-plugin.json").is_file()
+    ]
+    if len(roots) != 1:
+        raise RuntimeError("更新包目录结构无效：未找到包含 orca-plugin.json 的唯一根目录")
+    return roots[0]
+
+
+def fetch_latest_release_bundle(
+    dest_dir: Path,
+    *,
+    repo: str = DEFAULT_RELEASE_REPO,
+    fetcher=_http_get_bytes,
+) -> tuple[Path, str]:
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    release = json.loads(fetcher(api_url).decode("utf-8"))
+    tag = str(release.get("tag_name") or "").strip()
+    if not tag:
+        raise RuntimeError(f"无法从 {repo} 获取最新 Release 版本号")
+    archive_name = f"{FULL_BUNDLE_PREFIX}{tag}.tar.gz"
+    checksum_name = f"{archive_name}.sha256"
+    assets = release.get("assets") or []
+    archive_url = next(
+        (str(a.get("browser_download_url")) for a in assets if a.get("name") == archive_name),
+        None,
+    )
+    checksum_url = next(
+        (str(a.get("browser_download_url")) for a in assets if a.get("name") == checksum_name),
+        None,
+    )
+    if not archive_url or not checksum_url:
+        raise RuntimeError(f"Release {tag} 缺少完整安装包资产（{archive_name} / {checksum_name}）")
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = dest_dir / archive_name
+    archive_path.write_bytes(fetcher(archive_url))
+    checksum_text = fetcher(checksum_url).decode("utf-8")
+    expected_sha = _parse_sha256_file(checksum_text, archive_name)
+    extracted = extract_verified_bundle(archive_path, expected_sha, dest_dir / "extracted")
+    return extracted, tag
+
+
+def refresh_installed_runtimes(
+    runtime_root: Path,
+    *,
+    runner=run_cmd,
+) -> dict | None:
+    admin_script = runtime_root / "github-issue-autopilot" / "scripts" / "autopilot_admin.py"
+    if not admin_script.is_file():
+        return None
+    res = runner([sys.executable, str(admin_script), "refresh-runtimes", "--all"])
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"刷新已安装 Autopilot runtime 失败：{res.stderr.strip() or res.stdout.strip()}"
+        )
+    try:
+        return json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return {"status": "refreshed", "installations": 0, "repositories": []}
+
+
+def perform_install(
+    source_root: Path,
+    args: argparse.Namespace,
+    *,
+    is_update: bool = False,
+) -> int:
+    if args.dev:
+        runtime_root = source_root.resolve()
+    else:
+        install_dir = Path(args.install_dir).expanduser() if args.install_dir else None
+        runtime_root = install_standalone_files(source_root=source_root, install_dir=install_dir)
+        action_word = "更新" if is_update else "独立安装"
+        print(f"已{action_word}运行文件到：{runtime_root}")
+
+    bin_dir = Path(args.bin_dir).expanduser() if args.bin_dir else None
+    cli_script = runtime_root / "scripts" / "orca-autopilot"
+    installed = install_cli(bin_dir=bin_dir, script_path=cli_script)
+    installed_dir = installed[0].parent
+    print("已安装终端命令：" + ", ".join(str(p) for p in installed))
+    path_entries = [
+        Path(p).expanduser().resolve()
+        for p in os.environ.get("PATH", "").split(os.pathsep)
+        if p
+    ]
+    if installed_dir.resolve() not in path_entries:
+        print(
+            f"提示：请将 {installed_dir} 加入 PATH，例如：\n"
+            f'  export PATH="{installed_dir}:$PATH"'
+        )
+
+    if not args.no_skills:
+        skill_dirs = [Path(p) for p in args.skills_dir] if args.skills_dir else None
+        skill_results = install_skills(source_root=runtime_root, skill_dirs=skill_dirs)
+        print(
+            "已自动同步内置 Skill（"
+            + ", ".join(MANAGED_SKILLS)
+            + "）到："
+            + ", ".join(str(d) for d in skill_results)
+        )
+
+    if not args.no_plugin:
+        try:
+            ensure_plugin_ready(
+                plugin_dir=runtime_root,
+                dev_mode=args.dev,
+            )
+            mode_label = "开发模式" if args.dev else "正式"
+            print(
+                f"Orca Autopilot {mode_label}插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开控制台）。"
+            )
+        except (RuntimeError, FileNotFoundError) as exc:
+            print(f"提示：Orca 状态栏插件跳过（{exc}），不影响终端直接运行 `orca-autopilot`。")
+
+    if not args.no_refresh_runtimes:
+        try:
+            refreshed = refresh_installed_runtimes(runtime_root)
+            if refreshed and int(refreshed.get("installations") or 0) > 0:
+                repos = ", ".join(refreshed.get("repositories") or [])
+                print(
+                    f"已刷新 {refreshed['installations']} 个仓库的 Autopilot runtime"
+                    + (f"：{repos}" if repos else "")
+                )
+        except RuntimeError as exc:
+            print(f"提示：{exc}")
+
+    if is_update:
+        new_version = read_installed_version(runtime_root)
+        ver_suffix = f"（当前版本 v{new_version}）" if new_version else ""
+        print(f"本机 Orca Autopilot 已全部更新完成{ver_suffix}。")
+    else:
+        if not args.dev:
+            print("全部组件已独立安装完成，之后删除本源码/解压目录也不影响使用。")
+        print("在任意项目目录直接运行 `orca-autopilot` 即可启动终端控制台。")
+    return 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="orca-autopilot",
@@ -332,12 +537,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "path",
         nargs="?",
         default=None,
-        help="项目目录路径（默认使用当前工作目录）",
+        help="项目目录路径（默认使用当前工作目录）；也可传入 `update` 执行一键更新",
     )
     parser.add_argument(
         "--install",
         action="store_true",
         help="独立安装 orca-autopilot（含兼容别名 orca-board）、全部内置 Skill 及 Orca 正式插件，安装后可安全删除源码目录",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="一键更新本机 orca-autopilot 运行文件、内置 Skill、Orca 插件与已安装的 Autopilot runtime",
+    )
+    parser.add_argument(
+        "--from",
+        dest="source_from",
+        default=None,
+        help="配合 --update 使用，直接从指定本地源码目录同步更新（默认从 GitHub 最新 Release 下载）",
+    )
+    parser.add_argument(
+        "--repo",
+        default=DEFAULT_RELEASE_REPO,
+        help=f"配合 --update 使用，指定 GitHub Release 仓库（默认 {DEFAULT_RELEASE_REPO}）",
     )
     parser.add_argument(
         "--dev",
@@ -347,28 +568,33 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-plugin",
         action="store_true",
-        help="配合 --install 使用，跳过 Orca 状态栏插件安装",
+        help="配合 --install/--update 使用，跳过 Orca 状态栏插件安装",
     )
     parser.add_argument(
         "--no-skills",
         action="store_true",
-        help="配合 --install 使用，跳过内置 Agent Skill 自动安装",
+        help="配合 --install/--update 使用，跳过内置 Agent Skill 自动安装",
+    )
+    parser.add_argument(
+        "--no-refresh-runtimes",
+        action="store_true",
+        help="配合 --install/--update 使用，跳过自动刷新已安装仓库的 Autopilot runtime",
     )
     parser.add_argument(
         "--install-dir",
         default=None,
-        help="配合 --install 使用，指定独立安装目录（默认 ~/.local/share/orca-autopilot）",
+        help="配合 --install/--update 使用，指定独立安装目录（默认 ~/.local/share/orca-autopilot）",
     )
     parser.add_argument(
         "--bin-dir",
         default=None,
-        help="配合 --install 使用，指定命令安装目录（默认 ~/.local/bin）",
+        help="配合 --install/--update 使用，指定命令安装目录（默认 ~/.local/bin）",
     )
     parser.add_argument(
         "--skills-dir",
         action="append",
         default=None,
-        help="配合 --install 使用，指定 Skill 安装目录（可重复传入；默认自动检测已安装的 Agent 运行时）",
+        help="配合 --install/--update 使用，指定 Skill 安装目录（可重复传入；默认自动检测已安装的 Agent 运行时）",
     )
     return parser.parse_args(argv)
 
@@ -376,57 +602,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
+        is_update = bool(args.update) or (
+            args.path == "update" and not (Path.cwd() / "update").exists()
+        )
+        if is_update:
+            if args.source_from:
+                src = Path(args.source_from).expanduser().resolve()
+                if not (src / "orca-plugin.json").is_file():
+                    raise RuntimeError(f"指定的源码目录缺少 orca-plugin.json：{src}")
+                return perform_install(src, args, is_update=True)
+            current_ver = read_installed_version(REPO_ROOT)
+            with tempfile.TemporaryDirectory(prefix="orca-autopilot-update-") as tmp:
+                extracted_root, tag = fetch_latest_release_bundle(
+                    Path(tmp),
+                    repo=args.repo,
+                )
+                if current_ver:
+                    print(f"正在更新 Orca Autopilot：v{current_ver} → {tag}")
+                else:
+                    print(f"正在更新 Orca Autopilot：{tag}")
+                return perform_install(extracted_root, args, is_update=True)
+
         if args.install:
-            if args.dev:
-                runtime_root = REPO_ROOT
-            else:
-                install_dir = Path(args.install_dir).expanduser() if args.install_dir else None
-                runtime_root = install_standalone_files(source_root=REPO_ROOT, install_dir=install_dir)
-                print(f"已独立安装运行文件到：{runtime_root}")
-
-            bin_dir = Path(args.bin_dir).expanduser() if args.bin_dir else None
-            cli_script = runtime_root / "scripts" / "orca-autopilot"
-            installed = install_cli(bin_dir=bin_dir, script_path=cli_script)
-            installed_dir = installed[0].parent
-            print("已安装终端命令：" + ", ".join(str(p) for p in installed))
-            path_entries = [
-                Path(p).expanduser().resolve()
-                for p in os.environ.get("PATH", "").split(os.pathsep)
-                if p
-            ]
-            if installed_dir.resolve() not in path_entries:
-                print(
-                    f"提示：请将 {installed_dir} 加入 PATH，例如：\n"
-                    f'  export PATH="{installed_dir}:$PATH"'
-                )
-
-            if not args.no_skills:
-                skill_dirs = [Path(p) for p in args.skills_dir] if args.skills_dir else None
-                skill_results = install_skills(source_root=runtime_root, skill_dirs=skill_dirs)
-                print(
-                    "已自动安装内置 Skill（"
-                    + ", ".join(MANAGED_SKILLS)
-                    + "）到："
-                    + ", ".join(str(d) for d in skill_results)
-                )
-
-            if not args.no_plugin:
-                try:
-                    ensure_plugin_ready(
-                        plugin_dir=runtime_root,
-                        dev_mode=args.dev,
-                    )
-                    mode_label = "开发模式" if args.dev else "正式"
-                    print(
-                        f"Orca Autopilot {mode_label}插件已就绪（点击状态栏或按 Cmd+Shift+I 可在终端打开控制台）。"
-                    )
-                except (RuntimeError, FileNotFoundError) as exc:
-                    print(f"提示：Orca 状态栏插件跳过（{exc}），不影响终端直接运行 `orca-autopilot`。")
-
-            if not args.dev:
-                print("全部组件已独立安装完成，之后删除本源码/解压目录也不影响使用。")
-            print("在任意项目目录直接运行 `orca-autopilot` 即可启动终端控制台。")
-            return 0
+            return perform_install(REPO_ROOT, args, is_update=False)
 
         target = Path(args.path).expanduser() if args.path else Path.cwd()
         return launch_tui(target)

@@ -161,7 +161,7 @@ $github-issue-workflow-update 更新 issue-workflow
 
 - **检查**为只读操作，仅比较当前版本与最新稳定 Release；
 - **更新**从 `Niall-Young/orca-autopilot` 拉取稳定 Release，校验来源、SHA-256、清单与逐文件哈希后事务式替换四个官方 Skill 并同步已安装的 Autopilot runtime，失败自动回滚（保留配置、SQLite 账本、日志、attempt 历史和 worktree）；
-- 插件与终端控制台的升级可通过下载最新 `github-issue-workflow-full-vX.Y.Z.tar.gz`（或 `git pull`）后重新运行 `./scripts/orca-autopilot --install` 完成。
+- 插件与终端控制台的一键升级可直接运行 `orca-autopilot --update`（或 `orca-autopilot update`），自动从 GitHub 最新稳定 Release 下载并校验 SHA-256，一站式更新运行文件、CLI、全部 4 个内置 Skill、Orca 插件并刷新已安装仓库的 Autopilot runtime；本地源码调试时可用 `orca-autopilot --update --from /path/to/repo` 直接同步。
 
 ### 项目结构
 
@@ -365,7 +365,7 @@ $github-issue-workflow-update update issue-workflow
 
 - **Check** is read-only and reports installed vs. latest stable Release versions.
 - **Update** fetches the latest published stable Release from `Niall-Young/orca-autopilot`, verifies origin, SHA-256, manifest, and per-file hashes, transactionally replaces the four official Skills, and refreshes installed Autopilot runtimes with automatic rollback on failure (preserving configs, SQLite ledgers, logs, attempt history, and worktrees).
-- To upgrade the Orca plugin and terminal CLI, download the latest `github-issue-workflow-full-vX.Y.Z.tar.gz` (or `git pull`) and re-run `./scripts/orca-autopilot --install`.
+- To upgrade the CLI, plugin, bundled Skills, and installed Autopilot runtimes in one command, run `orca-autopilot --update` (or `orca-autopilot update`), which downloads and SHA-256-verifies the latest stable Release bundle; for local source checkouts, run `orca-autopilot --update --from /path/to/repo`.
 
 ### Project Structure
 

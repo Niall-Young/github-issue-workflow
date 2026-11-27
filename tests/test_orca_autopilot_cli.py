@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -261,6 +264,93 @@ class OrcaAutopilotCliTests(unittest.TestCase):
             f"orca plugin install {self.mod.PLUGIN_DIR} --approve ap1-deadbeef1234",
             str(ctx.exception),
         )
+
+    def test_fetch_latest_release_bundle_verifies_sha256_and_extracts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            tar_buf = io.BytesIO()
+            with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
+                manifest_bytes = b'{"version": "0.9.0"}\n'
+                info = tarfile.TarInfo("github-issue-workflow-full-v0.9.0/orca-plugin.json")
+                info.size = len(manifest_bytes)
+                tar.addfile(info, io.BytesIO(manifest_bytes))
+            archive_bytes = tar_buf.getvalue()
+            sha = hashlib.sha256(archive_bytes).hexdigest()
+            archive_name = "github-issue-workflow-full-v0.9.0.tar.gz"
+            checksum_name = f"{archive_name}.sha256"
+
+            release_json = json.dumps({
+                "tag_name": "v0.9.0",
+                "assets": [
+                    {"name": archive_name, "browser_download_url": f"https://example.test/{archive_name}"},
+                    {"name": checksum_name, "browser_download_url": f"https://example.test/{checksum_name}"},
+                ],
+            }).encode("utf-8")
+
+            def fake_fetcher(url: str) -> bytes:
+                if url.endswith("/releases/latest"):
+                    return release_json
+                if url.endswith(archive_name):
+                    return archive_bytes
+                if url.endswith(checksum_name):
+                    return f"{sha}  {archive_name}\n".encode("utf-8")
+                raise AssertionError(f"Unexpected URL: {url}")
+
+            extracted, tag = self.mod.fetch_latest_release_bundle(tmp_path, fetcher=fake_fetcher)
+            self.assertEqual(tag, "v0.9.0")
+            self.assertTrue((extracted / "orca-plugin.json").is_file())
+            self.assertEqual(self.mod.read_installed_version(extracted), "0.9.0")
+
+            # Tampered checksum must fail
+            def bad_fetcher(url: str) -> bytes:
+                if url.endswith(checksum_name):
+                    return f"{'0' * 64}  {archive_name}\n".encode("utf-8")
+                return fake_fetcher(url)
+
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.fetch_latest_release_bundle(tmp_path / "bad", fetcher=bad_fetcher)
+            self.assertIn("SHA-256", str(ctx.exception))
+
+    def test_update_from_local_checkout_syncs_files_skills_and_refreshes_runtimes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            install_dir = tmp_path / "share"
+            bin_dir = tmp_path / "bin"
+            skills_dir = tmp_path / "skills"
+            rc = self.mod.main([
+                "update",
+                "--from",
+                str(REPO_ROOT),
+                "--install-dir",
+                str(install_dir),
+                "--bin-dir",
+                str(bin_dir),
+                "--skills-dir",
+                str(skills_dir),
+                "--no-plugin",
+                "--no-refresh-runtimes",
+            ])
+            self.assertEqual(rc, 0)
+            self.assertTrue((install_dir / "orca-plugin.json").is_file())
+            self.assertTrue((bin_dir / "orca-autopilot").is_symlink())
+            self.assertTrue((skills_dir / "github-issue-autopilot" / "SKILL.md").is_file())
+
+    def test_refresh_installed_runtimes_invokes_admin_script(self):
+        calls = []
+
+        def fake_runner(cmd, cwd=None):
+            calls.append(cmd)
+            return make_proc(0, json.dumps({
+                "status": "refreshed",
+                "installations": 2,
+                "repositories": ["a/b", "c/d"],
+            }))
+
+        result = self.mod.refresh_installed_runtimes(REPO_ROOT, runner=fake_runner)
+        self.assertEqual(result["installations"], 2)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("refresh-runtimes", calls[0])
+        self.assertIn("--all", calls[0])
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ jobs:
           tar -xzf "dist/$bundle.tar.gz" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/$bundle"
           ./scripts/orca-autopilot --install --no-plugin --install-dir "$RUNNER_TEMP/installed" --bin-dir "$RUNNER_TEMP/bin" --skills-dir "$RUNNER_TEMP/skills"
+          cd "$RUNNER_TEMP/installed"
           rm -rf "$RUNNER_TEMP/$bundle"
           "$RUNNER_TEMP/bin/orca-autopilot" --help
           "$RUNNER_TEMP/bin/orca-board" --help

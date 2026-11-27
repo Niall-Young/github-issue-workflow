@@ -4,7 +4,7 @@
 // /agent, /refresh, /quit, etc.), mouse clicks, scroll wheel, bracketed paste,
 // and macOS clipboard screenshot paste (^V).
 
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import type { IssueKind, NeedsYouItem, SubmitMode } from '../protocol'
 import {
   appendInlineAttachment,
@@ -23,11 +23,15 @@ import { InputParser, type InputEvent } from './input'
 import {
   attachLocalFilePath,
   captureClipboardImage,
+  formatDefaultTerminalTitle,
+  formatOscTitleSequence,
   loadBoardSnapshot,
   openUrlInBrowser,
   replyToAgentTerminal,
   runIssueAdminAction,
+  sanitizeTerminalTitle,
   saveAgentConfig,
+  setOrcaTerminalTitle,
   stopAutopilot,
   submitIssueFromTui,
   syncDivergedBranchFromTui,
@@ -50,12 +54,48 @@ const POLL_INTERVAL_MS = 12_000
 export type IssueBoardTuiOptions = {
   openUrl?: (url: string) => Promise<void> | void
   writeOutput?: (chunk: string) => void
+  title?: string
+  setTerminalTitle?: (title: string) => Promise<boolean> | boolean
+}
+
+export function parseTuiCliArgs(
+  argv: readonly string[],
+  fallbackCwd = process.cwd()
+): { targetPath: string; title?: string } {
+  let targetPath: string | undefined
+  let title: string | undefined
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    if (arg === '--title') {
+      const next = argv[i + 1]
+      if (next !== undefined) {
+        title = next
+        i += 1
+      }
+      continue
+    }
+    if (arg.startsWith('--title=')) {
+      title = arg.slice('--title='.length)
+      continue
+    }
+    if (!arg.startsWith('-') && !targetPath) {
+      targetPath = arg
+    }
+  }
+  const cleanTitle = title !== undefined ? sanitizeTerminalTitle(title) : ''
+  return {
+    targetPath: targetPath || fallbackCwd,
+    ...(cleanTitle ? { title: cleanTitle } : {})
+  }
 }
 
 export class IssueBoardTui {
   private readonly targetPath: string
   private readonly openUrl: (url: string) => Promise<void> | void
   private readonly writeOutput: (chunk: string) => void
+  private readonly setTerminalTitle: (title: string) => Promise<boolean> | boolean
+  private customTitle: string | null
+  private currentTerminalTitle = ''
   private readonly pendingHandoffs = new Map<string, PendingHandoff>()
   private readonly dismissedAlertIds = new Set<string>()
   private readonly parser = new InputParser()
@@ -75,6 +115,9 @@ export class IssueBoardTui {
     this.writeOutput = options?.writeOutput ?? ((chunk: string) => {
       process.stdout.write(chunk)
     })
+    this.setTerminalTitle = options?.setTerminalTitle ?? ((title: string) => setOrcaTerminalTitle(title))
+    const initialCustom = options?.title ? sanitizeTerminalTitle(options.title) : ''
+    this.customTitle = initialCustom || null
     this.state = {
       snapshot: null,
       loading: true,
@@ -116,6 +159,8 @@ export class IssueBoardTui {
         ANSI.mouseOn +
         ANSI.bracketedPasteOn
     )
+
+    void this.applyTerminalTitle(this.resolveDesiredTerminalTitle())
 
     process.stdin.on('data', this.onStdinData)
     process.stdout.on('resize', this.onResize)
@@ -160,7 +205,8 @@ export class IssueBoardTui {
       // ignore
     }
     this.writeOutput(
-      ANSI.bracketedPasteOff +
+      formatOscTitleSequence('') +
+        ANSI.bracketedPasteOff +
         ANSI.mouseOff +
         ANSI.autoWrapOn +
         ANSI.cursorShow +
@@ -168,6 +214,43 @@ export class IssueBoardTui {
         ANSI.reset
     )
     process.exit(code)
+  }
+
+  private resolveDesiredTerminalTitle(): string {
+    if (this.customTitle) return this.customTitle
+    const projectName = this.state.snapshot?.projectName || basename(this.targetPath)
+    return formatDefaultTerminalTitle(projectName)
+  }
+
+  private async applyTerminalTitle(title: string, force = false): Promise<boolean> {
+    const clean = sanitizeTerminalTitle(title)
+    if (!clean) return false
+    if (!force && clean === this.currentTerminalTitle) return true
+    this.currentTerminalTitle = clean
+    this.writeOutput(formatOscTitleSequence(clean))
+    try {
+      return Boolean(await this.setTerminalTitle(clean))
+    } catch {
+      return false
+    }
+  }
+
+  private async handleRenameTerminal(arg: string) {
+    const trimmed = arg.trim()
+    const lower = trimmed.toLowerCase()
+    if (!trimmed || ['default', 'reset', '默认', '恢复'].includes(lower)) {
+      this.customTitle = null
+    } else {
+      const clean = sanitizeTerminalTitle(trimmed)
+      if (!clean) {
+        this.showError('终端名称不能为空')
+        return
+      }
+      this.customTitle = clean
+    }
+    const desired = this.resolveDesiredTerminalTitle()
+    await this.applyTerminalTitle(desired, true)
+    this.render()
   }
 
   private showError(text: string) {
@@ -234,6 +317,9 @@ export class IssueBoardTui {
       })
       this.state.snapshot = snap
       this.state.loading = false
+      if (!this.customTitle) {
+        void this.applyTerminalTitle(this.resolveDesiredTerminalTitle())
+      }
       this.normalizeSelection()
       this.render()
     } catch {
@@ -387,6 +473,9 @@ export class IssueBoardTui {
         return
       case 'paste':
         void this.handlePasteClipboardImage()
+        return
+      case 'title':
+        void this.handleRenameTerminal(arg)
         return
       case 'clear':
         c.attachments = []
@@ -1138,7 +1227,7 @@ const isDirectEntry =
   resolve(process.argv[1]).endsWith('app.ts')
 
 if (isDirectEntry) {
-  const target = process.argv[2] || process.cwd()
-  const app = new IssueBoardTui(target)
+  const { targetPath, title } = parseTuiCliArgs(process.argv.slice(2))
+  const app = new IssueBoardTui(targetPath, { title })
   app.start()
 }

@@ -15,6 +15,7 @@ export type SlashCommandId =
   | 'autopilot'
   | 'stop'
   | 'paste'
+  | 'title'
   | 'clear'
   | 'quit'
 
@@ -133,6 +134,14 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
     aliases: ['img', 'image'],
     label: '粘贴截图',
     description: '从 macOS 剪贴板粘贴截图作为附件 (^V)'
+  },
+  {
+    id: 'title',
+    name: '/title',
+    aliases: ['rename', 'name'],
+    label: '修改终端名称',
+    description: '自定义当前终端标签名称 (/title 新名称，留空恢复默认)',
+    takesArg: true
   },
   {
     id: 'clear',

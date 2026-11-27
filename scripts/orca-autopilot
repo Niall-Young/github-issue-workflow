@@ -80,6 +80,7 @@ def build_tui_command(
     tui_entry: Path = TUI_ENTRY,
     runner=run_cmd,
     which=shutil.which,
+    title: str | None = None,
 ) -> list[str]:
     if not target.exists():
         raise RuntimeError(f"目录不存在：{target}")
@@ -87,7 +88,10 @@ def build_tui_command(
         raise RuntimeError(f"未找到终端 TUI 入口：{tui_entry}")
     root = resolve_project_root(target, runner=runner)
     runtime = resolve_tui_runtime(which=which)
-    return [*runtime, str(tui_entry), str(root)]
+    cmd = [*runtime, str(tui_entry), str(root)]
+    if title and title.strip():
+        cmd.extend(["--title", title.strip()])
+    return cmd
 
 
 def _copy_dir_clean(src: Path, dst: Path) -> None:
@@ -325,8 +329,8 @@ def install_cli(
     return installed
 
 
-def launch_tui(target: Path) -> int:
-    cmd = build_tui_command(target)
+def launch_tui(target: Path, *, title: str | None = None) -> int:
+    cmd = build_tui_command(target, title=title)
     proc = subprocess.run(cmd, check=False)
     return proc.returncode
 
@@ -642,6 +646,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="项目目录路径（默认使用当前工作目录）；也可传入 `update` 执行一键更新",
     )
     parser.add_argument(
+        "--title",
+        default=None,
+        help="自定义终端标签名称（默认 Orca Autopilot · <项目名>）",
+    )
+    parser.add_argument(
         "--install",
         action="store_true",
         help="独立安装 orca-autopilot（含兼容别名 orca-board）、全部内置 Skill 及 Orca 正式插件，安装后可安全删除源码目录",
@@ -729,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
             return perform_install(REPO_ROOT, args, is_update=False)
 
         target = Path(args.path).expanduser() if args.path else Path.cwd()
-        return launch_tui(target)
+        return launch_tui(target, title=args.title)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1

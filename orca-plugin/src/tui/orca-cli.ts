@@ -1467,3 +1467,44 @@ export async function captureClipboardImage(
     path: outPath
   }
 }
+
+export function sanitizeTerminalTitle(raw: string): string {
+  return raw
+    .replace(/[\x00-\x1f\x7f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+export function formatDefaultTerminalTitle(projectName: string): string {
+  const clean = sanitizeTerminalTitle(projectName)
+  return clean ? `Orca Autopilot · ${clean}` : 'Orca Autopilot'
+}
+
+export function formatOscTitleSequence(title: string): string {
+  const clean = sanitizeTerminalTitle(title)
+  return `\x1b]0;${clean}\x07`
+}
+
+export async function setOrcaTerminalTitle(
+  title: string,
+  options?: {
+    terminalHandle?: string
+    runner?: CommandRunner
+  }
+): Promise<boolean> {
+  const handle = (options?.terminalHandle ?? process.env.ORCA_TERMINAL_HANDLE ?? '').trim()
+  if (!handle) return false
+  const runner = options?.runner ?? defaultRunner
+  const clean = sanitizeTerminalTitle(title)
+  const args = ['terminal', 'rename', '--terminal', handle]
+  if (clean) {
+    args.push('--title', clean)
+  }
+  args.push('--json')
+  try {
+    const res = await runner('orca', args, { timeoutMs: 4_000 })
+    return res.exitCode === 0
+  } catch {
+    return false
+  }
+}

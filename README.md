@@ -34,7 +34,7 @@ An Orca plugin and pure-terminal console for unattended GitHub Issue autopilot: 
 #### 1. 纯终端控制台 TUI（`orca-autopilot`）
 - **对话式底部输入框**：固定单行输入，长文本横向滚动，`Shift+Enter` 换行；支持 `Ctrl+V` 粘贴 macOS 剪贴板截图与拖入文件路径，附件以内联 `[Image #1]` / `[File #1]` 标识符展示，按 `Backspace` 可整块删除。
 - **三模式提单/直改与类型切换**：默认以 `✓ handoff 规范提单` 唤起 `github-issue-handoff` 查重并套用模板；可点击底部状态栏或执行 `/direct` 切换为 `○ direct 快速直提`，或执行 `/local` 切换为 `⚡ local 本地直改`（不建 Issue/worktree/独立 Review，直接在当前分支新开单会话开发并自动 commit、rebase、push，同时写入本地直改锁防止与后台自动合并分叉）；按 `Shift+Tab` 或点击可在「新功能 / 修 Bug / 体验优化」间切换。
-- **内联斜杠命令**：输入 `/` 展开 Claude Code 风格命令菜单（`/bug`、`/feature`、`/polish`、`/handoff`、`/direct`、`/local`、`/lite`、`/agent`、`/refresh`、`/issues`、`/prs`、`/autopilot`、`/stop`、`/paste`、`/clear`、`/quit`），其中 `/lite` 可一键切换后台单会话轻量模式省 Token，顶部状态徽标支持一键暂停/恢复自动处理循环。
+- **内联斜杠命令**：输入 `/` 展开 Claude Code 风格命令菜单（`/bug`、`/feature`、`/polish`、`/handoff`、`/direct`、`/local`、`/lite`、`/agent`、`/refresh`、`/issues`、`/prs`、`/autopilot`、`/stop`、`/paste`、`/title`、`/clear`、`/quit`），其中 `/lite` 可一键切换后台单会话轻量模式省 Token，`/title`（或启动参数 `--title`）可自定义当前终端标签名称，顶部状态徽标支持一键暂停/恢复自动处理循环。
 - **双视图与「待处理」介入队列**：支持 Issues（进行中 / 已完成）与 PRs（打开中 / 历史、CI 与冲突状态）切换；右侧「待处理」集中汇总 Agent 提问/权限审批、纯文字停顿追问、提单卡死告警、待验收任务、本地分支分叉冲突（「一键自动合并」）以及 `gh` 鉴权/Autopilot 停摆告警，支持一键同意、回复（可附截图/文件）、重试/放弃、重新提单与忽略。
 
 #### 2. 无人值守 Autopilot 闭环
@@ -112,6 +112,7 @@ orca-autopilot
 | `/lite` | 切换后台单会话轻量模式省 Token（`/lite on\|off`） |
 | `/agent` | 配置默认执行 Agent 与允许的 `agent:<id>` 覆盖列表 |
 | `/autopilot` `/stop` | 开启或暂停当前仓库的自动处理循环 |
+| `/title` | 自定义当前终端标签名称（`/title 新名称`，留空恢复默认 `Orca Autopilot · <项目名>`；启动时也支持 `--title`） |
 | `/issues` `/prs` `/refresh` `/quit` | 切换视图、手动刷新、退出控制台 |
 
 更多 TUI 交互细节见 [`orca-plugin/README.md`](orca-plugin/README.md)。
@@ -238,7 +239,7 @@ Plain-language request (TUI / Skill)
 #### 1. Pure-Terminal TUI Console (`orca-autopilot`)
 - **Chat-style persistent composer**: single-row input with horizontal scroll and `Shift+Enter` newlines; supports `Ctrl+V` macOS clipboard screenshot paste and dragged file paths as inline `[Image #1]` / `[File #1]` tokens deleted atomically with `Backspace`.
 - **Three submission/dev modes & kind cycling**: defaults to `✓ handoff 规范提单` (deduplication + template enforcement via `github-issue-handoff`), switchable via the footer toggle or slash commands to `○ direct 快速直提` (`/direct`) or `⚡ local 本地直改` (`/local`, launching a single-session agent directly on the current local branch with automatic commit/rebase/push and a local-dev merge guard lock); press `Shift+Tab` or click to cycle through Feature / Bug / Polish.
-- **Inline slash commands**: type `/` for a Claude Code-style menu (`/bug`, `/feature`, `/polish`, `/handoff`, `/direct`, `/local`, `/lite`, `/agent`, `/refresh`, `/issues`, `/prs`, `/autopilot`, `/stop`, `/paste`, `/clear`, `/quit`), including `/lite` to toggle single-session lite worker mode, plus clickable header badges to pause or resume the autopilot loop.
+- **Inline slash commands**: type `/` for a Claude Code-style menu (`/bug`, `/feature`, `/polish`, `/handoff`, `/direct`, `/local`, `/lite`, `/agent`, `/refresh`, `/issues`, `/prs`, `/autopilot`, `/stop`, `/paste`, `/title`, `/clear`, `/quit`), including `/lite` to toggle single-session lite worker mode, `/title` (or `--title` on launch) to customize the terminal tab name, plus clickable header badges to pause or resume the autopilot loop.
 - **Dual views & Needs You queue**: switch between Issues (In Progress / Completed) and Pull Requests (Open / Merged & Closed with CI and conflict indicators); the Needs You pane aggregates agent questions/permission prompts, plain-text pauses, stalled handoff alerts, manual-review tasks, diverged/conflicting local-branch alerts (with one-click auto-merge), and `gh` auth or stalled-Autopilot health alerts with one-click approve, reply (with attachments), retry/discard, resubmit, and dismiss actions.
 
 #### 2. Unattended Autopilot Loop
@@ -316,6 +317,7 @@ Launch `orca-autopilot`, type your request in the bottom composer, and press `En
 | `/lite` | Toggle single-session lite worker mode to save tokens (`/lite on\|off`) |
 | `/agent` | Configure default execution Agent and allowed `agent:<id>` overrides |
 | `/autopilot` `/stop` | Start or pause the repository's autopilot loop |
+| `/title` | Customize the terminal tab title (`/title New Name`, empty to restore `Orca Autopilot · <project>`; also supports `--title` on launch) |
 | `/issues` `/prs` `/refresh` `/quit` | Switch views, refresh data, or exit the console |
 
 See [`orca-plugin/README.md`](orca-plugin/README.md) for full TUI interaction details.

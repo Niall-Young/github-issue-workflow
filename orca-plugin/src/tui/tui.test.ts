@@ -29,14 +29,18 @@ import {
 import {
   collectOrcaAgentState,
   detectAutopilotRunning,
+  formatDefaultTerminalTitle,
+  formatOscTitleSequence,
   loadBoardSnapshot,
   parseAgentLaunchResult,
+  sanitizeTerminalTitle,
+  setOrcaTerminalTitle,
   stopAutopilot,
   submitIssueFromTui,
   syncDivergedBranchFromTui,
   type PendingHandoff
 } from './orca-cli'
-import { IssueBoardTui } from './app'
+import { IssueBoardTui, parseTuiCliArgs } from './app'
 import {
   buildMainRows,
   DEFAULT_SUBMIT_MODE,
@@ -1854,4 +1858,91 @@ test('local direct mode and /lite command render badges, manage lock file, and t
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('terminal title helpers sanitize control chars, format OSC 0, and call orca terminal rename', async () => {
+  assert.equal(sanitizeTerminalTitle('  My\x1b[31m\nBoard\tName  '), 'My [31m Board Name')
+  assert.equal(formatDefaultTerminalTitle('orca-autopilot'), 'Orca Autopilot · orca-autopilot')
+  assert.equal(formatDefaultTerminalTitle(''), 'Orca Autopilot')
+  assert.equal(formatOscTitleSequence('Autopilot\nTab'), '\x1b]0;Autopilot Tab\x07')
+
+  const calls: Array<{ cmd: string; args: string[] }> = []
+  const runner: CommandRunner = async (cmd, args) => {
+    calls.push({ cmd, args })
+    return { exitCode: 0, stdout: '{"ok":true}', stderr: '' }
+  }
+
+  const ok = await setOrcaTerminalTitle('Orca Autopilot · demo', {
+    terminalHandle: 'term_abc',
+    runner
+  })
+  assert.equal(ok, true)
+  assert.deepEqual(calls[0], {
+    cmd: 'orca',
+    args: ['terminal', 'rename', '--terminal', 'term_abc', '--title', 'Orca Autopilot · demo', '--json']
+  })
+
+  const resetOk = await setOrcaTerminalTitle('', {
+    terminalHandle: 'term_abc',
+    runner
+  })
+  assert.equal(resetOk, true)
+  assert.deepEqual(calls[1], {
+    cmd: 'orca',
+    args: ['terminal', 'rename', '--terminal', 'term_abc', '--json']
+  })
+
+  const noHandle = await setOrcaTerminalTitle('No Handle', {
+    terminalHandle: '',
+    runner
+  })
+  assert.equal(noHandle, false)
+  assert.equal(calls.length, 2)
+})
+
+test('parseTuiCliArgs and /title slash command support custom terminal tab titles', async () => {
+  assert.deepEqual(parseTuiCliArgs(['/repo/app', '--title', '我的看板'], '/cwd'), {
+    targetPath: '/repo/app',
+    title: '我的看板'
+  })
+  assert.deepEqual(parseTuiCliArgs(['--title=开发控制台'], '/cwd'), {
+    targetPath: '/cwd',
+    title: '开发控制台'
+  })
+
+  const parsedTitle = parseSlashCommand('/title 项目看板')
+  assert.equal(parsedTitle?.kind, 'command')
+  if (parsedTitle?.kind === 'command') {
+    assert.equal(parsedTitle.command.id, 'title')
+    assert.equal(parsedTitle.arg, '项目看板')
+  }
+
+  const parsedAlias = parseSlashCommand('/rename 需求台')
+  assert.equal(parsedAlias?.kind, 'command')
+  if (parsedAlias?.kind === 'command') {
+    assert.equal(parsedAlias.command.id, 'title')
+    assert.equal(parsedAlias.arg, '需求台')
+  }
+
+  const chunks: string[] = []
+  const renamedTitles: string[] = []
+  const tui = new IssueBoardTui('/tmp/demo-app', {
+    writeOutput: (chunk) => chunks.push(chunk),
+    setTerminalTitle: async (title) => {
+      renamedTitles.push(title)
+      return true
+    }
+  })
+
+  await (tui as unknown as { handleRenameTerminal(arg: string): Promise<void> }).handleRenameTerminal(
+    '我的 Autopilot'
+  )
+  assert.deepEqual(renamedTitles, ['我的 Autopilot'])
+  assert.ok(chunks.some((c) => c.includes('\x1b]0;我的 Autopilot\x07')))
+
+  await (tui as unknown as { handleRenameTerminal(arg: string): Promise<void> }).handleRenameTerminal(
+    ''
+  )
+  assert.deepEqual(renamedTitles, ['我的 Autopilot', 'Orca Autopilot · demo-app'])
+  assert.ok(chunks.some((c) => c.includes('\x1b]0;Orca Autopilot · demo-app\x07')))
 })

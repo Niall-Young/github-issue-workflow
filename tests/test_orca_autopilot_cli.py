@@ -565,6 +565,22 @@ class OrcaAutopilotCliTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.mod._resolve_latest_release_tag_via_redirect("Niall-Young/orca-autopilot")
 
+    def test_build_tui_command_forwards_custom_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "demo-repo"
+            repo.mkdir()
+
+            cmd = self.mod.build_tui_command(
+                repo,
+                runner=lambda *a, **kw: make_proc(0, str(repo) + "\n"),
+                which=lambda name: "/usr/local/bin/bun" if name == "bun" else None,
+                title="  我的看板  ",
+            )
+            self.assertEqual(cmd[-2:], ["--title", "我的看板"])
+
+            args = self.mod.parse_args(["--title", "控制台 A"])
+            self.assertEqual(args.title, "控制台 A")
+
 
 if __name__ == "__main__":
     unittest.main()

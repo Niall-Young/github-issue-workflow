@@ -36,6 +36,9 @@ PRUNABLE_ATTEMPT_STATES = {"failed", "discarded", "rejected"}
 PROTECTED_ISSUE_STATES = {"claimed", "running", "ready-for-review", "pr-open", "needs-human"}
 PUBLICATION_MODES = {"auto-merge", "pr-only", "never"}
 MERGE_METHODS = {"squash", "merge", "rebase"}
+WORKER_MODES = {"standard", "lite"}
+LOCAL_DEV_LOCK_FILENAME = "autopilot-local-dev.lock.json"
+LOCAL_DEV_LOCK_TTL_SECONDS = 7200
 CI_FAILURE_CONCLUSIONS = {
     "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE",
 }
@@ -174,6 +177,10 @@ def load_config(path: Path) -> dict[str, Any]:
     if max_conflict_resolutions < 0:
         raise WatcherError("policy.max_conflict_resolutions must be non-negative")
     policy["max_conflict_resolutions"] = max_conflict_resolutions
+    worker_mode = str(policy.get("worker_mode", "standard")).strip() or "standard"
+    if worker_mode not in WORKER_MODES:
+        raise WatcherError("policy.worker_mode must be standard or lite")
+    policy["worker_mode"] = worker_mode
     if policy.get("max_risk", "medium") not in {"low", "medium"}:
         raise WatcherError("policy.max_risk must be low or medium")
     config["policy"] = policy
@@ -1212,7 +1219,12 @@ def worktree_paths(repo: Path) -> set[Path]:
             if line.startswith("worktree ")}
 
 
-def validate_attempt(repo: Path, attempt: dict[str, Any]) -> None:
+def validate_attempt(
+    repo: Path,
+    attempt: dict[str, Any],
+    *,
+    require_repair_ledger: bool = True,
+) -> None:
     required = ("run_id", "worktree_path", "branch", "base_sha", "head_sha")
     if any(not isinstance(attempt.get(key), str) or not attempt[key] for key in required):
         raise WatcherError("successful receipt is missing worktree evidence")
@@ -1228,6 +1240,10 @@ def validate_attempt(repo: Path, attempt: dict[str, Any]) -> None:
         raise WatcherError("receipt worktree is not clean")
     if git(repo, "rev-parse", f"{attempt['base_sha']}^{{commit}}") != attempt["base_sha"]:
         raise WatcherError("receipt base SHA is invalid")
+    if not require_repair_ledger:
+        if attempt["head_sha"] == attempt["base_sha"]:
+            raise WatcherError("lite receipt has no new commits beyond base SHA")
+        return
     state = repair_run_state(repo, attempt["run_id"])
     if (state.get("base_sha") != attempt["base_sha"]
             or state.get("state") not in {"REVIEW", "AWAIT_PUBLICATION_APPROVAL"}):
@@ -1558,8 +1574,14 @@ def invalid_receipt_summary(output: str) -> str:
     return "invalid AUTOPILOT_RESULT receipt: expected one exact standalone receipt line"
 
 
-def verified_receipt(receipt: dict[str, Any] | None, repository: dict[str, Any],
-                     run: dict[str, Any], output: str = "") -> tuple[str, str, dict[str, Any]]:
+def verified_receipt(
+    receipt: dict[str, Any] | None,
+    repository: dict[str, Any],
+    run: dict[str, Any],
+    output: str = "",
+    *,
+    worker_mode: str = "standard",
+) -> tuple[str, str, dict[str, Any]]:
     if receipt is None:
         return "failed", invalid_receipt_summary(output), {}
     status = "ready-for-review" if receipt["status"] in {"succeeded", "ready-for-review"} else receipt["status"]
@@ -1570,22 +1592,52 @@ def verified_receipt(receipt: dict[str, Any] | None, repository: dict[str, Any],
     fields = {"base_sha": receipt.get("base_sha"), "head_sha": receipt.get("head_sha")}
     if status == "ready-for-review":
         try:
-            validate_attempt(repository["repo_path"], {
-                **expected, **fields, "orca_worktree_id": run.get("orca_worktree_id")
-            })
+            validate_attempt(
+                repository["repo_path"],
+                {**expected, **fields, "orca_worktree_id": run.get("orca_worktree_id")},
+                require_repair_ledger=(worker_mode != "lite"),
+            )
         except WatcherError as exc:
             return "needs-human", f"unverified success receipt: {exc}", fields
     return status, receipt["summary"], fields if status == "ready-for-review" else {}
 
 
 def prompt_for(run: dict[str, Any], config: dict[str, Any]) -> str:
-    publication = config.get("policy", {}).get("publication", "auto-merge")
+    policy = config.get("policy", {})
+    publication = policy.get("publication", "auto-merge")
+    worker_mode = policy.get("worker_mode", "standard")
     conflict_ctx = run.get("conflict_context")
     if isinstance(conflict_ctx, dict) and conflict_ctx.get("pr_url"):
         pr_url = str(conflict_ctx["pr_url"])
         head_branch = str(conflict_ctx.get("head_branch") or "")
         base_branch = str(conflict_ctx.get("base_branch") or "main")
         round_num = int(conflict_ctx.get("round") or 1)
+        if worker_mode == "lite":
+            return (
+                f"GitHub Issue Autopilot lite PR conflict-resolution mode for {run['url']} "
+                f"(attempt {run['attempt_number']}, conflict resolution round {round_num}). "
+                f"Use run ID {run['run_id']} and the current Orca-managed worktree and branch. "
+                f"An existing PR ({pr_url}) on branch `{head_branch}` has merge conflicts with `{base_branch}`. "
+                "Do not re-implement the Issue from scratch, do not spawn a separate reviewer subagent, "
+                "and do not run repair-ledger ceremonies. Instead: "
+                "1) run `git fetch origin`; "
+                f"2) align your current isolated worktree branch with `origin/{head_branch}` "
+                "(for example `git reset --hard origin/" + head_branch + "`) and record that commit SHA as `base_sha`; "
+                f"3) merge `origin/{base_branch}` into your current branch (`git merge origin/{base_branch}`), "
+                f"resolve all merge conflicts preserving both Issue #{run['issue_number']} and latest `{base_branch}` changes, "
+                "and commit cleanly; "
+                "4) run relevant tests to verify the resolved code. "
+                f"The coordinator will push your verified commit to `{head_branch}` to update {pr_url} and auto-merge once checks pass. "
+                "Do not push, create a new PR, merge, close, comment, or relabel Issues yourself. "
+                "Finish with exactly one single-line receipt using the literal prefix `AUTOPILOT_RESULT: `. "
+                "Example (replace the placeholders):\n"
+                "AUTOPILOT_RESULT: "
+                '{"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>",'
+                '"worktree_path":"<absolute worktree path>","branch":"<assigned branch>"}\n'
+                "Then send the Orca worker_done required by the injected dispatch. Success uses ready-for-review and includes "
+                "summary, run_id, absolute worktree_path, branch, base_sha, and head_sha. Other statuses are needs-human, "
+                "blocked, or failed."
+            )
         return (
             f"Use $github-issue-repair {run['url']} in GitHub Issue Autopilot PR conflict-resolution mode "
             f"(attempt {run['attempt_number']}, conflict resolution round {round_num}). "
@@ -1626,12 +1678,34 @@ def prompt_for(run: dict[str, Any], config: dict[str, Any]) -> str:
         handoff_note = (
             "Never push, create a PR, merge, close, comment, label, release, or deploy. "
         )
+    if worker_mode == "lite":
+        return (
+            f"GitHub Issue Autopilot lite single-session mode for {run['url']} (attempt {run['attempt_number']}). "
+            f"Use run ID {run['run_id']} and the current Orca-managed worktree and branch. "
+            "The dispatcher verified this open Issue against its repository, current open state, author, and labels. "
+            "Work directly in this single session: do not spawn an independent reviewer subagent and do not run "
+            "repair-ledger ceremonies. Instead: "
+            f"1) read the Issue with `gh issue view {run['url']}` and record the starting `git rev-parse HEAD` as `base_sha`; "
+            f"2) implement one bounded local change at risk no greater than {policy.get('max_risk', 'medium')} in this isolated worktree; "
+            "3) run relevant tests/checks and ensure the working tree is clean; "
+            "4) commit only the isolated task changes cleanly and record the final `git rev-parse HEAD` as `head_sha`. "
+            "Stop on ambiguity, unsafe work, dependency upgrades, migrations, security/auth/payment changes, "
+            f"public API changes, destructive operations, or a broad diff. {handoff_note}"
+            "Finish with exactly one single-line receipt using the literal prefix `AUTOPILOT_RESULT: `. "
+            "Example (replace the placeholders):\n"
+            "AUTOPILOT_RESULT: "
+            '{"status":"needs-human","summary":"explain why","run_id":"<assigned run ID>",'
+            '"worktree_path":"<absolute worktree path>","branch":"<assigned branch>"}\n'
+            "Then send the Orca worker_done required by the injected dispatch. Success uses ready-for-review and includes "
+            "summary, run_id, absolute worktree_path, branch, base_sha, and head_sha. Other statuses are needs-human, "
+            "blocked, or failed."
+        )
     return (
         f"Use $github-issue-repair {run['url']} in GitHub Issue Autopilot mode for attempt "
         f"{run['attempt_number']}. Use repair run ID {run['run_id']} and the current Orca-managed worktree and branch. "
         "The dispatcher verified this open Issue against its repository, "
         "current open state, author, and labels. Implement one bounded local package at risk no greater than "
-        f"{config['policy'].get('max_risk', 'medium')} in the isolated Orca worktree and verify it independently. "
+        f"{policy.get('max_risk', 'medium')} in the isolated Orca worktree and verify it independently. "
         "Update the active Orca worktree comment at investigation, implementation, and test checkpoints. "
         "Stop on ambiguity, unsafe work, expansion, dependency upgrades, migrations, security/auth/payment changes, "
         f"public API changes, destructive operations, or a broad diff. {handoff_note}"
@@ -2193,6 +2267,78 @@ def _extract_merge_tree_conflicts(output: str) -> list[str]:
     return conflicts
 
 
+def active_local_dev_lock(
+    repo: Path,
+    *,
+    at: dt.datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return active local direct-dev lock metadata if present and not expired."""
+    try:
+        lock_path = git_common_dir(repo) / LOCAL_DEV_LOCK_FILENAME
+    except WatcherError:
+        return None
+    if not lock_path.is_file():
+        return None
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    current = at or now()
+    started_raw = payload.get("started_at")
+    if isinstance(started_raw, str) and started_raw.strip():
+        try:
+            started_dt = parse_time(started_raw)
+            if (current - started_dt).total_seconds() > LOCAL_DEV_LOCK_TTL_SECONDS:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+        except ValueError:
+            pass
+    return payload
+
+
+def local_main_busy_reason(
+    repo: Path,
+    base_branch: str | None = None,
+    *,
+    at: dt.datetime | None = None,
+) -> str | None:
+    """Return a human-readable reason to defer auto-merge when local base branch is actively edited."""
+    if not repo.is_dir():
+        return None
+    lock = active_local_dev_lock(repo, at=at)
+    if lock is not None:
+        title = str(lock.get("title") or "").strip()
+        return f"active local direct-dev session ({title[:60]})" if title else "active local direct-dev session"
+    branch = _resolve_local_base_branch(repo, base_branch)
+    if not branch:
+        return None
+    current_res = command(["git", "-C", str(repo), "branch", "--show-current"])
+    current_branch = current_res.stdout.strip() if current_res.returncode == 0 else ""
+    if current_branch != branch:
+        return None
+    dirty = command(["git", "-C", str(repo), "status", "--porcelain"])
+    if dirty.returncode == 0 and (dirty.stdout.strip() or _git_operation_in_progress(repo)):
+        return f"local {branch} working tree has uncommitted changes"
+    remote_ref = f"refs/remotes/origin/{branch}"
+    local_ref = f"refs/heads/{branch}"
+    counts = command(["git", "-C", str(repo), "rev-list", "--left-right", "--count", f"{local_ref}...{remote_ref}"])
+    if counts.returncode == 0:
+        parts = counts.stdout.strip().split()
+        if len(parts) == 2:
+            try:
+                ahead = int(parts[0])
+                if ahead > 0:
+                    return f"local {branch} has {ahead} unpushed commit(s)"
+            except ValueError:
+                pass
+    return None
+
+
 def sync_local_base_branch(
     repo: Path,
     base_branch: str | None = None,
@@ -2209,6 +2355,8 @@ def sync_local_base_branch(
     """
     if not repo.is_dir():
         return {"status": "skipped", "reason": "repository path not found"}
+    if active_local_dev_lock(repo) is not None:
+        return {"status": "local-dev-skipped", "reason": "active local direct-dev session"}
     if fetch:
         fetched = command(["git", "-C", str(repo), "fetch", "origin"])
         if fetched.returncode != 0:
@@ -2482,6 +2630,17 @@ def reconcile_pull_requests(
                               summary=failure, **extra)
                 updated.append({"url": attempt["url"], "status": "needs-human", "pr_url": pr_url, "summary": failure})
                 continue
+        base_branch_for_guard = str(pr.get("baseRefName") or "").strip() or None
+        busy_reason = local_main_busy_reason(Path(repository["repo_path"]), base_branch_for_guard, at=current)
+        if busy_reason:
+            updated.append({
+                "url": attempt["url"],
+                "status": "pr-open",
+                "pr_url": pr_url,
+                "deferred_merge": True,
+                "reason": f"auto-merge deferred: {busy_reason}",
+            })
+            continue
         try:
             merge_github_pr(pr_url, merge_method)
         except WatcherError as exc:
@@ -2659,7 +2818,10 @@ def reconcile_workers(
                                   if item["repository"] == attempt["repository"])
             if receipt is None:
                 receipt = recover_receipt_from_repair_ledger(repository, attempt)
-            status, summary, evidence = verified_receipt(receipt, repository, attempt, output=receipt_output)
+            worker_mode = config.get("policy", {}).get("worker_mode", "standard")
+            status, summary, evidence = verified_receipt(
+                receipt, repository, attempt, output=receipt_output, worker_mode=worker_mode
+            )
         if status == "ready-for-review" and repository is not None:
             publication = config.get("policy", {}).get("publication", "auto-merge")
             if publication in {"pr-only", "auto-merge"}:

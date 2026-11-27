@@ -6,6 +6,8 @@ export type SlashCommandId =
   | 'polish'
   | 'handoff'
   | 'direct'
+  | 'local'
+  | 'lite'
   | 'agent'
   | 'refresh'
   | 'issues'
@@ -64,6 +66,22 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
     aliases: ['fast'],
     label: '快速直提',
     description: '跳过整理直接创建 GitHub Issue (/direct 描述)',
+    takesArg: true
+  },
+  {
+    id: 'local',
+    name: '/local',
+    aliases: ['l', 'main', 'dev'],
+    label: '本地直改',
+    description: '直接在当前分支新开对话开发并自动对齐远端 (/local 描述)',
+    takesArg: true
+  },
+  {
+    id: 'lite',
+    name: '/lite',
+    aliases: ['solo', 'mode'],
+    label: '轻量模式',
+    description: '切换后台单会话轻量模式省 Token (/lite on|off)',
     takesArg: true
   },
   {

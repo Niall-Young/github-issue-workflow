@@ -1,6 +1,8 @@
 export type IssueKind = 'feature' | 'bug' | 'polish'
 
-export type SubmitMode = 'handoff' | 'direct'
+export type SubmitMode = 'handoff' | 'direct' | 'local'
+
+export type WorkerMode = 'standard' | 'lite'
 
 export type BoardFileDescriptor = {
   version: 1
@@ -121,6 +123,7 @@ export type BoardSnapshot = {
   repoPath: string | null
   autopilotInstalled: boolean
   autopilotRunning: boolean
+  workerMode?: WorkerMode | null
   defaultAgent: string | null
   allowedAgents: string[]
   installedAgents: InstalledAgent[]

@@ -7,6 +7,7 @@ import {
   buildAutopilotInstallArgs,
   buildHandoffPrompt,
   buildIssueBody,
+  buildLocalDevPrompt,
   buildSystemHealthAlerts,
   extractTerminalQuestion,
   fetchGithubPullRequests,
@@ -432,6 +433,29 @@ test('findAutopilotConfigForRepo reads agent and policy settings and buildAutopi
       'npm test',
       '--no-require-ci'
     ])
+
+    const liteArgs = buildAutopilotInstallArgs({
+      adminScript: '/opt/autopilot_admin.py',
+      repoPath: '/Users/demo/project',
+      defaultAgent: 'codex',
+      allowedAgents: ['codex'],
+      workerMode: 'lite',
+      existing: found
+    })
+    assert.ok(liteArgs.includes('--worker-mode'))
+    assert.equal(liteArgs[liteArgs.indexOf('--worker-mode') + 1], 'lite')
+
+    const localPrompt = buildLocalDevPrompt({
+      repoPath: '/Users/demo/project',
+      branch: 'main',
+      kind: 'bug',
+      title: '修复按钮对齐',
+      lockPath: '/tmp/demo/.git/autopilot-local-dev.lock.json'
+    })
+    assert.ok(localPrompt.includes('单会话本地直改模式'))
+    assert.ok(localPrompt.includes('git pull --rebase origin main'))
+    assert.ok(localPrompt.includes('git push origin main'))
+    assert.ok(localPrompt.includes('/tmp/demo/.git/autopilot-local-dev.lock.json'))
   } finally {
     rmSync(stateRoot, { recursive: true, force: true })
   }

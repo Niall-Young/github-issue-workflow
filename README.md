@@ -33,14 +33,14 @@ An Orca plugin and pure-terminal console for unattended GitHub Issue autopilot: 
 
 #### 1. 纯终端控制台 TUI（`orca-autopilot`）
 - **对话式底部输入框**：固定单行输入，长文本横向滚动，`Shift+Enter` 换行；支持 `Ctrl+V` 粘贴 macOS 剪贴板截图与拖入文件路径，附件以内联 `[Image #1]` / `[File #1]` 标识符展示，按 `Backspace` 可整块删除。
-- **双模式提单与类型切换**：默认以 `✓ handoff 规范提单` 唤起 `github-issue-handoff` 查重并套用模板，也可点击底部状态栏或执行 `/direct` 切换为 `○ direct 快速直提`；按 `Shift+Tab` 或点击可在「新功能 / 修 Bug / 体验优化」间切换。
-- **内联斜杠命令**：输入 `/` 展开 Claude Code 风格命令菜单（`/bug`、`/feature`、`/polish`、`/handoff`、`/direct`、`/agent`、`/refresh`、`/issues`、`/prs`、`/autopilot`、`/stop`、`/paste`、`/clear`、`/quit`），顶部状态徽标支持一键暂停/恢复自动处理循环。
+- **三模式提单/直改与类型切换**：默认以 `✓ handoff 规范提单` 唤起 `github-issue-handoff` 查重并套用模板；可点击底部状态栏或执行 `/direct` 切换为 `○ direct 快速直提`，或执行 `/local` 切换为 `⚡ local 本地直改`（不建 Issue/worktree/独立 Review，直接在当前分支新开单会话开发并自动 commit、rebase、push，同时写入本地直改锁防止与后台自动合并分叉）；按 `Shift+Tab` 或点击可在「新功能 / 修 Bug / 体验优化」间切换。
+- **内联斜杠命令**：输入 `/` 展开 Claude Code 风格命令菜单（`/bug`、`/feature`、`/polish`、`/handoff`、`/direct`、`/local`、`/lite`、`/agent`、`/refresh`、`/issues`、`/prs`、`/autopilot`、`/stop`、`/paste`、`/clear`、`/quit`），其中 `/lite` 可一键切换后台单会话轻量模式省 Token，顶部状态徽标支持一键暂停/恢复自动处理循环。
 - **双视图与「待处理」介入队列**：支持 Issues（进行中 / 已完成）与 PRs（打开中 / 历史、CI 与冲突状态）切换；右侧「待处理」集中汇总 Agent 提问/权限审批、纯文字停顿追问、提单卡死告警、待验收任务、本地分支分叉冲突（「一键自动合并」）以及 `gh` 鉴权/Autopilot 停摆告警，支持一键同意、回复（可附截图/文件）、重试/放弃、重新提单与忽略。
 
 #### 2. 无人值守 Autopilot 闭环
 - **隔离并发调度**：通过 Orca 原生 Automation 每 3 分钟无模型预检一次（仅协调器缺失时恢复），一次入账全部符合策略的 open Issue（含启用前积压），最多 3 个任务在 Orca 子 worktree 中并发执行，不修改用户当前工作树；本地分支领先远端或无上游时自动传入 `--base-branch`。
 - **依赖图与超时保护**：识别正文中的同仓前置依赖（`Blocked by: #1`、`Depends on: #1`、`前置依赖: #1`），前置未完成前自动等待并检测依赖环标记为 `blocked`；运行中持续刷新心跳，超过硬超时（默认 45 分钟）或无输出心跳超时（默认 15 分钟）自动回收 Dispatch 并归档 `.patch`。
-- **双闭环自动合并**：默认采用 `publication: "auto-merge"`——Worker 完成实现、自测与独立 Reviewer 核对后，协调器确定性执行 `pre_merge_commands`、push 并建 PR、轮询 CI 与合并状态；若出现冲突先尝试无冲突合并最新基线，必要时在 `policy.max_conflict_resolutions`（默认 `2` 次）上限内自动派发解冲突 Worker 原地更新 PR；CI 通过后自动 `squash` 合并、关 Issue、清 worktree，并零 token 同步本地分支（`policy.sync_local_branch`，默认 `true`），失败则熔断为 `needs-human` 并保留 `.patch`。也可切换为 `pr-only` 或 `never`。
+- **双闭环自动合并与单会话轻量模式**：默认采用 `publication: "auto-merge"`——Worker 完成实现、自测与独立 Reviewer 核对（可通过 `--worker-mode lite` 或 TUI `/lite` 切换为单会话轻量模式，跳过独立 Reviewer 与账本仪式以节省 Token）后，协调器确定性执行 `pre_merge_commands`、push 并建 PR、轮询 CI 与合并状态；若检测到本地直改锁活跃或本地基线分支存在未提交/未推送改动，会自动暂缓合并避免分叉；若出现冲突先尝试无冲突合并最新基线，必要时在 `policy.max_conflict_resolutions`（默认 `2` 次）上限内自动派发解冲突 Worker 原地更新 PR；CI 通过后自动 `squash` 合并、关 Issue、清 worktree，并零 token 同步本地分支（`policy.sync_local_branch`，默认 `true`），失败则熔断为 `needs-human` 并保留 `.patch`。也可切换为 `pr-only` 或 `never`。
 - **双层防重账本**：SQLite schema v5 以不可变 Issue node ID 防止重复派单，记录前置依赖、所选 Agent、Orca Task/Dispatch/worktree、分支、base/head SHA、PR 链接、合并时间、心跳与失败 `.patch` 路径；未完成的 `failed` attempt 默认最多自动重试至总计 2 次。
 
 #### 3. 四个底层 Agent Skill（可独立使用）
@@ -108,7 +108,8 @@ orca-autopilot
 | `Shift+Tab` | 轮询切换 Issue 类型（新功能 / 修 Bug / 体验优化） |
 | `Ctrl+V` 或拖入文件 | 粘贴 macOS 剪贴板截图或附加文件（生成 `[Image #1]` / `[File #1]`） |
 | `/bug` `/feature` `/polish` | 切换类型或直接附带描述提单 |
-| `/handoff` `/direct` | 切换「Skill 规范提单」与「快速直提」 |
+| `/handoff` `/direct` `/local` | 切换「Skill 规范提单」「快速直提」与「本地直改（自动防分叉）」 |
+| `/lite` | 切换后台单会话轻量模式省 Token（`/lite on\|off`） |
 | `/agent` | 配置默认执行 Agent 与允许的 `agent:<id>` 覆盖列表 |
 | `/autopilot` `/stop` | 开启或暂停当前仓库的自动处理循环 |
 | `/issues` `/prs` `/refresh` `/quit` | 切换视图、手动刷新、退出控制台 |
@@ -236,14 +237,14 @@ Plain-language request (TUI / Skill)
 
 #### 1. Pure-Terminal TUI Console (`orca-autopilot`)
 - **Chat-style persistent composer**: single-row input with horizontal scroll and `Shift+Enter` newlines; supports `Ctrl+V` macOS clipboard screenshot paste and dragged file paths as inline `[Image #1]` / `[File #1]` tokens deleted atomically with `Backspace`.
-- **Dual submission modes & kind cycling**: defaults to `✓ handoff 规范提单` (deduplication + template enforcement via `github-issue-handoff`), switchable to `○ direct 快速直提` via the footer toggle or `/direct`; press `Shift+Tab` or click to cycle through Feature / Bug / Polish.
-- **Inline slash commands**: type `/` for a Claude Code-style menu (`/bug`, `/feature`, `/polish`, `/handoff`, `/direct`, `/agent`, `/refresh`, `/issues`, `/prs`, `/autopilot`, `/stop`, `/paste`, `/clear`, `/quit`), plus clickable header badges to pause or resume the autopilot loop.
+- **Three submission/dev modes & kind cycling**: defaults to `✓ handoff 规范提单` (deduplication + template enforcement via `github-issue-handoff`), switchable via the footer toggle or slash commands to `○ direct 快速直提` (`/direct`) or `⚡ local 本地直改` (`/local`, launching a single-session agent directly on the current local branch with automatic commit/rebase/push and a local-dev merge guard lock); press `Shift+Tab` or click to cycle through Feature / Bug / Polish.
+- **Inline slash commands**: type `/` for a Claude Code-style menu (`/bug`, `/feature`, `/polish`, `/handoff`, `/direct`, `/local`, `/lite`, `/agent`, `/refresh`, `/issues`, `/prs`, `/autopilot`, `/stop`, `/paste`, `/clear`, `/quit`), including `/lite` to toggle single-session lite worker mode, plus clickable header badges to pause or resume the autopilot loop.
 - **Dual views & Needs You queue**: switch between Issues (In Progress / Completed) and Pull Requests (Open / Merged & Closed with CI and conflict indicators); the Needs You pane aggregates agent questions/permission prompts, plain-text pauses, stalled handoff alerts, manual-review tasks, diverged/conflicting local-branch alerts (with one-click auto-merge), and `gh` auth or stalled-Autopilot health alerts with one-click approve, reply (with attachments), retry/discard, resubmit, and dismiss actions.
 
 #### 2. Unattended Autopilot Loop
 - **Isolated concurrent dispatch**: a native Orca Automation prechecks every 3 minutes with zero model turns when healthy, records all eligible open Issues (including backlog created before activation), and runs up to 3 tasks concurrently in Orca child worktrees without touching your active checkout; passes `--base-branch` automatically when the local branch is ahead of upstream or untracked.
 - **Dependency graph & timeout recovery**: parses same-repo prerequisites (`Blocked by: #1`, `Depends on: #1`, `前置依赖: #1`), waits until dependencies are locally `merged`/`accepted` or `CLOSED` on GitHub, and flags cycles as `blocked`; refreshes worker heartbeats continuously and stops/releases timed-out workers (default 45m hard timeout, 15m heartbeat timeout) while archiving diffs to `.patch`.
-- **Dual-loop auto-merge**: defaults to `publication: "auto-merge"`—after implementation, self-testing, and independent review, the coordinator deterministically runs `pre_merge_commands`, pushes the branch, opens a PR, monitors CI and mergeability, attempts clean base merges or bounded conflict-resolution workers (up to `policy.max_conflict_resolutions`, default `2`), auto-merges (`squash` by default), closes the Issue, cleans up the worktree, and syncs the local base branch with zero AI tokens (`policy.sync_local_branch`, default `true`). Failures circuit-break visibly to `needs-human` with a `.patch` archive. `pr-only` and `never` remain configurable.
+- **Dual-loop auto-merge & lite worker mode**: defaults to `publication: "auto-merge"`—after implementation, self-testing, and independent review (or single-session execution without a separate reviewer/ledger ceremony when `--worker-mode lite` or `/lite` is enabled), the coordinator deterministically runs `pre_merge_commands`, pushes the branch, opens a PR, monitors CI and mergeability, defers merging while an active local direct-dev lock exists or the local base branch is dirty/ahead of `origin` to prevent divergence, attempts clean base merges or bounded conflict-resolution workers (up to `policy.max_conflict_resolutions`, default `2`), auto-merges (`squash` by default), closes the Issue, cleans up the worktree, and syncs the local base branch with zero AI tokens (`policy.sync_local_branch`, default `true`). Failures circuit-break visibly to `needs-human` with a `.patch` archive. `pr-only` and `never` remain configurable.
 - **Two-level idempotent ledger**: SQLite schema v5 deduplicates immutable Issue node IDs and tracks dependencies, selected Agents, Orca Task/Dispatch/worktree IDs, branches, base/head SHAs, PR URLs, merge timestamps, heartbeats, and `.patch` archives; unfinished `failed` attempts retry automatically up to 2 total attempts by default.
 
 #### 3. Four Composable Agent Skills
@@ -311,7 +312,8 @@ Launch `orca-autopilot`, type your request in the bottom composer, and press `En
 | `Shift+Tab` | Cycle Issue kind (Feature / Bug / Polish) |
 | `Ctrl+V` or drag files | Paste macOS clipboard screenshot or attach files as `[Image #1]` / `[File #1]` |
 | `/bug` `/feature` `/polish` | Switch kind or submit directly with description |
-| `/handoff` `/direct` | Toggle structured Skill handoff vs. fast direct submission |
+| `/handoff` `/direct` `/local` | Switch structured Skill handoff, fast direct Issue, or local direct-on-branch dev |
+| `/lite` | Toggle single-session lite worker mode to save tokens (`/lite on\|off`) |
 | `/agent` | Configure default execution Agent and allowed `agent:<id>` overrides |
 | `/autopilot` `/stop` | Start or pause the repository's autopilot loop |
 | `/issues` `/prs` `/refresh` `/quit` | Switch views, refresh data, or exit the console |

@@ -2004,6 +2004,127 @@ class IssueWatcherTests(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(remote_head, local_head_after)
 
+    def test_lite_worker_mode_prompt_and_receipt_validation_without_repair_ledger(self) -> None:
+        config = self.config()
+        config["policy"]["worker_mode"] = "lite"
+        run = {
+            "url": "https://github.com/owner/repo/issues/42",
+            "issue_number": 42,
+            "attempt_number": 1,
+            "run_id": str(uuid.uuid4()),
+            "worktree_path": str(self.root / "wt-lite"),
+            "branch": "repair/issue-42-attempt-1",
+            "orca_worktree_id": "wt_lite_1",
+        }
+        prompt = WATCHER.prompt_for(run, config)
+        self.assertIn("lite single-session mode", prompt)
+        self.assertNotIn("Use $github-issue-repair", prompt)
+        self.assertIn("do not spawn an independent reviewer subagent", prompt)
+
+        wt = self.root / "wt-lite"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-b", run["branch"], str(wt)],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        base_sha = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        # No new commit -> rejected even in lite mode
+        receipt_same = {
+            "status": "ready-for-review",
+            "summary": "no-op",
+            "run_id": run["run_id"],
+            "worktree_path": str(wt),
+            "branch": run["branch"],
+            "base_sha": base_sha,
+            "head_sha": base_sha,
+        }
+        status_same, summary_same, _ = WATCHER.verified_receipt(
+            receipt_same, config["repositories"][0], run, worker_mode="lite",
+        )
+        self.assertEqual("needs-human", status_same)
+        self.assertIn("no new commits", summary_same)
+
+        # New clean commit without repair ledger -> accepted in lite mode, rejected in standard mode
+        (wt / "lite.txt").write_text("lite change\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(wt), "add", "lite.txt"], check=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-m", "lite fix"], check=True, stdout=subprocess.PIPE)
+        head_sha = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"], check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        receipt_ok = {**receipt_same, "summary": "lite fix done", "head_sha": head_sha}
+
+        status_std, _, _ = WATCHER.verified_receipt(
+            receipt_ok, config["repositories"][0], run, worker_mode="standard",
+        )
+        self.assertEqual("needs-human", status_std)
+
+        status_lite, summary_lite, fields_lite = WATCHER.verified_receipt(
+            receipt_ok, config["repositories"][0], run, worker_mode="lite",
+        )
+        self.assertEqual("ready-for-review", status_lite)
+        self.assertEqual("lite fix done", summary_lite)
+        self.assertEqual(head_sha, fields_lite["head_sha"])
+
+    def test_reconcile_pull_requests_defers_auto_merge_when_local_main_busy(self) -> None:
+        config = self.config()
+        config["policy"]["publication"] = "auto-merge"
+        config["policy"]["require_ci"] = False
+        ledger = WATCHER.Ledger(self.root / "state.sqlite3", 300)
+        ledger.enqueue(self.issue("I_GUARD1", 90))
+        claimed = ledger.claim_next()
+        ledger.finish(
+            claimed["node_id"], claimed["attempt_number"], "pr-open",
+            pr_number=90, pr_url="https://github.com/owner/repo/pull/90", summary="PR opened",
+        )
+        open_pr = {
+            "number": 90,
+            "url": "https://github.com/owner/repo/pull/90",
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefName": "main",
+            "headRefName": "repair/issue-90",
+        }
+
+        # 1. Active local direct-dev lock defers auto-merge
+        lock_path = WATCHER.git_common_dir(self.repo) / WATCHER.LOCAL_DEV_LOCK_FILENAME
+        lock_path.write_text(json.dumps({
+            "title": "本地直改测试",
+            "branch": "main",
+            "started_at": WATCHER.iso(),
+        }), encoding="utf-8")
+        with mock.patch.object(WATCHER, "github_pr_view", return_value=open_pr), \
+             mock.patch.object(WATCHER, "merge_github_pr") as merge_mock:
+            updated = WATCHER.reconcile_pull_requests(config, ledger)
+        merge_mock.assert_not_called()
+        self.assertEqual(1, len(updated))
+        self.assertTrue(updated[0]["deferred_merge"])
+        self.assertIn("active local direct-dev session", updated[0]["reason"])
+        lock_path.unlink()
+
+        # 2. Dirty local main working tree defers auto-merge
+        dirty_file = self.repo / "uncommitted.txt"
+        dirty_file.write_text("wip\n", encoding="utf-8")
+        with mock.patch.object(WATCHER, "github_pr_view", return_value=open_pr), \
+             mock.patch.object(WATCHER, "merge_github_pr") as merge_mock:
+            updated_dirty = WATCHER.reconcile_pull_requests(config, ledger)
+        merge_mock.assert_not_called()
+        self.assertTrue(updated_dirty[0]["deferred_merge"])
+        self.assertIn("uncommitted changes", updated_dirty[0]["reason"])
+        dirty_file.unlink()
+
+        # 3. Once clean and unlocked, auto-merge proceeds normally
+        with mock.patch.object(WATCHER, "github_pr_view", return_value=open_pr), \
+             mock.patch.object(WATCHER, "merge_github_pr") as merge_mock, \
+             mock.patch.object(WATCHER, "close_github_issue"), \
+             mock.patch.object(WATCHER, "cleanup_attempt"), \
+             mock.patch.object(WATCHER, "sync_local_base_branch", return_value={"status": "up-to-date"}):
+            updated_ok = WATCHER.reconcile_pull_requests(config, ledger)
+        merge_mock.assert_called_once_with("https://github.com/owner/repo/pull/90", "squash")
+        self.assertEqual("merged", updated_ok[0]["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

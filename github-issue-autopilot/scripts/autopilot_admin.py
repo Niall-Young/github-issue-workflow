@@ -231,7 +231,8 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
                  merge_method: str = "squash",
                  pre_merge_commands: list[str] | None = None,
                  require_ci: bool = True,
-                 sync_local_branch: bool = True) -> dict[str, Any]:
+                 sync_local_branch: bool = True,
+                 worker_mode: str = "standard") -> dict[str, Any]:
     return {
         "schema_version": 3,
         "state_db": str(paths["database"]),
@@ -248,6 +249,7 @@ def build_config(repo: Path, metadata: dict[str, Any], login: str, orca: str, la
             "pre_merge_commands": list(pre_merge_commands or []),
             "require_ci": bool(require_ci),
             "sync_local_branch": bool(sync_local_branch),
+            "worker_mode": worker_mode if worker_mode in {"standard", "lite"} else "standard",
             "max_risk": "medium",
         },
         "repositories": [{
@@ -750,7 +752,8 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
             publication: str = "auto-merge",
             merge_method: str = "squash",
             pre_merge_commands: list[str] | None = None,
-            require_ci: bool = True) -> dict[str, Any]:
+            require_ci: bool = True,
+            worker_mode: str = "standard") -> dict[str, Any]:
     repo = repository_root(repo_path)
     login_result = command(["gh", "api", "user", "--jq", ".login"])
     if login_result.returncode:
@@ -773,6 +776,7 @@ def install(repo_path: Path, label: str, default_agent: str, allowed_agents: lis
         merge_method=merge_method,
         pre_merge_commands=pre_merge_commands,
         require_ci=require_ci,
+        worker_mode=worker_mode,
     )
     label_created = ensure_label(metadata["nameWithOwner"], label)
     config_path = Path(paths["config"])
@@ -1138,6 +1142,9 @@ def parser() -> argparse.ArgumentParser:
                                 help="verification command to run in the worktree before PR publication/merge")
     install_parser.add_argument("--no-require-ci", action="store_true",
                                 help="do not wait for GitHub PR status checks before auto-merging")
+    install_parser.add_argument("--worker-mode", choices=("standard", "lite"),
+                                default="standard",
+                                help="worker execution profile: standard (default) or lite (single-session, no separate reviewer)")
     install_parser.add_argument("--disabled", action="store_true",
                                 help="create or update the Orca Automation without enabling it")
     install_parser.add_argument("--no-load", action="store_true",
@@ -1190,6 +1197,7 @@ def main() -> int:
                 merge_method=args.merge_method,
                 pre_merge_commands=args.pre_merge_command,
                 require_ci=not args.no_require_ci,
+                worker_mode=args.worker_mode,
             )
         elif args.operation == "ensure":
             result = ensure_coordinator(args.config)

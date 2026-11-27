@@ -1,11 +1,12 @@
 // Standalone data & action bridge for the terminal TUI.
 // Reuses board-data.ts directly and communicates with Orca via the `orca` CLI.
 
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, extname, join, resolve } from 'node:path'
 import {
   buildAutopilotInstallArgs,
   buildHandoffPrompt,
+  buildLocalDevPrompt,
   buildSystemHealthAlerts,
   createAgentReadyIssue,
   defaultRunner,
@@ -21,6 +22,7 @@ import {
   inspectLocalBranchSync,
   isHandoffSessionTitle,
   listInstalledAgents,
+  LOCAL_DEV_LOCK_FILENAME,
   mergeBoardItems,
   readLedgerIssues,
   resolveGitRepository,
@@ -36,7 +38,8 @@ import type {
   IssueKind,
   NeedsYouItem,
   SavedAttachment,
-  SubmitMode
+  SubmitMode,
+  WorkerMode
 } from '../protocol'
 
 const HANDOFF_BOOT_GRACE_MS = 25_000
@@ -53,11 +56,22 @@ export type PendingHandoff = {
   agent: string
   startedAt: string
   startedMs: number
+  sessionKind?: 'handoff' | 'local'
+  lockPath?: string
   existingIssueNumbers?: number[]
   lastActivityMs?: number
   lastPreview?: string
   exitedWithoutIssue?: boolean
   exitedAt?: string
+}
+
+function tryRemoveLocalDevLock(lockPath?: string) {
+  if (!lockPath) return
+  try {
+    if (existsSync(lockPath)) unlinkSync(lockPath)
+  } catch {
+    // ignore cleanup failures
+  }
 }
 
 type OrcaAgentEntry = {
@@ -568,6 +582,42 @@ export async function loadBoardSnapshot(
       if (k) handledHandoffKeys.add(k)
     }
 
+    if (entry.sessionKind === 'local') {
+      if (!state && !terminalStillOpen) {
+        if (agentState.orcaReachable && now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
+          tryRemoveLocalDevLock(entry.lockPath)
+          pendingHandoffs.delete(terminalId)
+          continue
+        }
+        activeHandoffs.push({
+          id: `local-${effectiveHandle}`,
+          issueNumber: null,
+          title: entry.title,
+          url: '',
+          statusLabel: `本地直改中 (${entry.agent})`,
+          updatedAt: entry.startedAt
+        })
+        continue
+      }
+      if (state === 'done' || state === 'idle') {
+        tryRemoveLocalDevLock(entry.lockPath)
+        pendingHandoffs.delete(terminalId)
+        continue
+      }
+      const waitingLocal = state === 'waiting' || state === 'blocked' || state === 'permission'
+      activeHandoffs.push({
+        id: `local-${effectiveHandle}`,
+        issueNumber: null,
+        title: entry.title,
+        url: '',
+        statusLabel: waitingLocal
+          ? `本地直改等待确认 (${entry.agent})`
+          : `本地直改中 (${entry.agent})`,
+        updatedAt: new Date(resolved?.updatedAt || entry.startedMs).toISOString()
+      })
+      continue
+    }
+
     if (!state && !terminalStillOpen) {
       if (agentState.orcaReachable && now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
         if (hasMatchingNewIssueByTitle(entry)) {
@@ -903,6 +953,7 @@ export async function loadBoardSnapshot(
     repoPath,
     autopilotInstalled: Boolean(autopilot),
     autopilotRunning,
+    workerMode: autopilot?.workerMode ?? null,
     defaultAgent: autopilot?.defaultAgent ?? null,
     allowedAgents: autopilot?.allowedAgents ?? [],
     installedAgents,
@@ -938,6 +989,108 @@ export async function submitIssueFromTui(params: {
   }
 
   const savedAttachments = params.savedAttachments ?? []
+
+  if (params.mode === 'local') {
+    const agent = await resolvePreferredAgent(params.defaultAgent, runner)
+    const branchRes = await runner('git', ['-C', params.repoPath, 'branch', '--show-current'], {
+      timeoutMs: 5_000
+    })
+    const branch = (branchRes.exitCode === 0 ? branchRes.stdout.trim() : '') || 'main'
+    const commonDirRes = await runner(
+      'git',
+      ['-C', params.repoPath, 'rev-parse', '--git-common-dir'],
+      { timeoutMs: 5_000 }
+    )
+    const commonDirRaw = commonDirRes.exitCode === 0 ? commonDirRes.stdout.trim() : ''
+    const commonDir = commonDirRaw ? resolve(params.repoPath, commonDirRaw) : join(params.repoPath, '.git')
+    const lockPath = join(commonDir, LOCAL_DEV_LOCK_FILENAME)
+    const nowMs = Date.now()
+    const startedAt = new Date(nowMs).toISOString()
+    try {
+      mkdirSync(commonDir, { recursive: true })
+      writeFileSync(
+        lockPath,
+        JSON.stringify(
+          {
+            title,
+            branch,
+            repo_path: params.repoPath,
+            agent,
+            started_at: startedAt
+          },
+          null,
+          2
+        ) + '\n',
+        'utf8'
+      )
+    } catch {
+      // Best-effort lock write; coordinator still guards dirty/ahead local branch.
+    }
+
+    const prompt = buildLocalDevPrompt({
+      repoPath: params.repoPath,
+      branch,
+      kind: params.kind,
+      title,
+      details: params.details,
+      savedAttachments,
+      lockPath
+    })
+
+    const launchRes = await runner(
+      'orca',
+      [
+        'agent',
+        'launch',
+        '--agent',
+        agent,
+        '--worktree',
+        `path:${params.repoPath}`,
+        '--surface',
+        'terminal',
+        '--prompt',
+        prompt,
+        '--json'
+      ],
+      { cwd: params.repoPath, timeoutMs: 25_000 }
+    )
+
+    if (launchRes.exitCode !== 0) {
+      tryRemoveLocalDevLock(lockPath)
+      throw new Error(
+        launchRes.stderr.trim() ||
+          launchRes.stdout.trim() ||
+          '无法通过 Orca 启动本地直改 Agent，请确认 Orca 正在运行'
+      )
+    }
+
+    const parsedLaunch = parseAgentLaunchResult(launchRes.stdout)
+    const terminalId = parsedLaunch.terminalId || `local-${Date.now()}`
+    params.pendingHandoffs.set(terminalId, {
+      terminalId,
+      paneKey: parsedLaunch.paneKey,
+      orcaSessionId: parsedLaunch.orcaSessionId,
+      repoPath: params.repoPath,
+      title,
+      agent,
+      startedAt,
+      startedMs: nowMs,
+      sessionKind: 'local',
+      lockPath,
+      lastActivityMs: nowMs
+    })
+
+    return {
+      ok: true,
+      mode: 'local',
+      issueNumber: null,
+      url: '',
+      title,
+      savedAttachments,
+      terminalId,
+      agent
+    }
+  }
 
   if (params.mode === 'direct') {
     // Reuse direct creator; attachments are already saved on disk so embed their paths in details
@@ -1093,6 +1246,7 @@ export async function saveAgentConfig(params: {
   repoPath: string
   defaultAgent: string
   allowedAgents: string[]
+  workerMode?: WorkerMode | null
   runner?: CommandRunner
 }): Promise<string> {
   const runner = params.runner ?? defaultRunner
@@ -1114,6 +1268,7 @@ export async function saveAgentConfig(params: {
     repoPath: params.repoPath,
     defaultAgent: params.defaultAgent.trim(),
     allowedAgents: normalizedAllowed,
+    workerMode: params.workerMode,
     existing
   })
   const res = await runner('python3', args, { timeoutMs: 45_000 })

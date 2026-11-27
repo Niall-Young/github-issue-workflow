@@ -82,6 +82,7 @@ export type AutopilotConfigInfo = {
   mergeMethod: 'squash' | 'merge' | 'rebase' | null
   preMergeCommands: string[]
   requireCi: boolean | null
+  workerMode?: 'standard' | 'lite' | null
   automationId?: string | null
 }
 
@@ -159,6 +160,7 @@ export function findAutopilotConfigForRepo(
           merge_method?: string
           pre_merge_commands?: string[]
           require_ci?: boolean
+          worker_mode?: string
         }
         orca?: { default_agent?: string; allowed_agents?: string[] }
         scheduler?: { backend?: string; automation_id?: string }
@@ -193,6 +195,10 @@ export function findAutopilotConfigForRepo(
           raw.policy?.merge_method === 'rebase'
             ? raw.policy.merge_method
             : null
+        const workerMode =
+          raw.policy?.worker_mode === 'standard' || raw.policy?.worker_mode === 'lite'
+            ? raw.policy.worker_mode
+            : null
         return {
           configPath,
           dbPath,
@@ -219,6 +225,7 @@ export function findAutopilotConfigForRepo(
             ? raw.policy.pre_merge_commands.map((c) => String(c)).filter(Boolean)
             : [],
           requireCi: typeof raw.policy?.require_ci === 'boolean' ? raw.policy.require_ci : null,
+          workerMode,
           automationId: raw.scheduler?.automation_id?.trim() || null
         }
       }
@@ -331,6 +338,7 @@ export function buildAutopilotInstallArgs(params: {
   repoPath: string
   defaultAgent: string
   allowedAgents?: string[]
+  workerMode?: 'standard' | 'lite' | null
   existing?: AutopilotConfigInfo | null
 }): string[] {
   const defaultAgent = params.defaultAgent.trim()
@@ -375,7 +383,54 @@ export function buildAutopilotInstallArgs(params: {
     }
   }
 
+  const effectiveWorkerMode = params.workerMode ?? existing?.workerMode ?? null
+  if (effectiveWorkerMode) {
+    args.push('--worker-mode', effectiveWorkerMode)
+  }
+
   return args
+}
+
+export const LOCAL_DEV_LOCK_FILENAME = 'autopilot-local-dev.lock.json'
+
+export function buildLocalDevPrompt(params: {
+  repoPath: string
+  branch: string
+  kind: IssueKind
+  title: string
+  details?: string
+  savedAttachments?: SavedAttachment[]
+  lockPath: string
+}): string {
+  const kindLabel =
+    params.kind === 'bug' ? '修 Bug' : params.kind === 'polish' ? '体验优化' : '新功能'
+  const lines: string[] = [
+    `请在当前本地仓库（\`${params.repoPath}\`，分支 \`${params.branch}\`）直接完成以下开发任务（单会话本地直改模式）：`,
+    `- 不要创建 GitHub Issue、不要新开 worktree、不要额外启动独立 Reviewer 子 Agent。`,
+    `- 专注在当前会话内完成实现、运行相关测试并保持改动干净。`,
+    '',
+    `## 任务内容`,
+    `- 类型：${kindLabel}`,
+    `- 需求：${params.title.trim()}`
+  ]
+  if (params.details && params.details.trim()) {
+    lines.push(`- 补充说明：`, params.details.trim())
+  }
+  if (params.savedAttachments && params.savedAttachments.length > 0) {
+    lines.push('', `## 附件路径`)
+    for (const att of params.savedAttachments) {
+      lines.push(`- \`${att.path}\` (${att.name})`)
+    }
+  }
+  lines.push(
+    '',
+    `## 完成与防分叉收尾（必须执行）`,
+    `1. 实现并验证通过后，仅暂存并提交本任务改动（不要改动无关文件）。`,
+    `2. 执行 \`git fetch origin\` 与 \`git pull --rebase origin ${params.branch}\`（如有冲突在当前会话顺手解决并重跑测试）。`,
+    `3. 执行 \`git push origin ${params.branch}\`，让本地与远端保持同步，避免与后台 Autopilot 产生分叉。`,
+    `4. 无论成功还是中止退出前，务必删除本地直改锁文件：\`rm -f "${params.lockPath}"\`，以恢复后台 Autopilot 自动合并。`
+  )
+  return lines.join('\n')
 }
 
 export function buildHandoffPrompt(params: {

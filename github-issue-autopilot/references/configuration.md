@@ -33,6 +33,7 @@ Version 3 has this shape:
     "require_ci": true,
     "sync_local_branch": true,
     "max_conflict_resolutions": 2,
+    "worker_mode": "standard",
     "max_risk": "medium"
   },
   "repositories": [
@@ -70,9 +71,14 @@ Version 3 has this shape:
 
 After a worker finishes self-testing and independent review and emits a verified `AUTOPILOT_RESULT`, `policy.publication` controls the handoff:
 
-- `auto-merge` (default): the coordinator runs any configured `policy.pre_merge_commands`, pushes the branch, opens a GitHub PR (`pr-open`), monitors GitHub PR status checks (`require_ci: true`) and mergeability, and automatically merges the PR (`merge_method`: `squash` / `merge` / `rebase`), closes the Issue, cleans up the worktree, deterministically fast-forwards the local base branch (`sync_local_branch: true`, 0 AI tokens; safely skips if dirty or diverged and catches up once clean), and marks the Issue `merged` (immediately unblocking dependent Issues). When an open PR becomes `CONFLICTING`/`DIRTY`, the coordinator first tries a clean merge of the latest base branch in the existing worktree and otherwise automatically queues a bounded conflict-resolution worker (up to `policy.max_conflict_resolutions`, default `2`; `0` disables) that resolves conflicts, verifies tests, and updates the existing PR branch in place. CI failures or conflicts remaining after exhausting `max_conflict_resolutions` stop visibly at `needs-human` with a `.patch` archive instead of force-merging.
+- `auto-merge` (default): the coordinator runs any configured `policy.pre_merge_commands`, pushes the branch, opens a GitHub PR (`pr-open`), monitors GitHub PR status checks (`require_ci: true`) and mergeability, and automatically merges the PR (`merge_method`: `squash` / `merge` / `rebase`), closes the Issue, cleans up the worktree, deterministically fast-forwards the local base branch (`sync_local_branch: true`, 0 AI tokens; safely skips if dirty or diverged and catches up once clean), and marks the Issue `merged` (immediately unblocking dependent Issues). To prevent remote/local divergence while developing directly on the local base branch, auto-merge is automatically deferred (keeping the PR `pr-open`) whenever an active local direct-dev lock (`<git-common-dir>/autopilot-local-dev.lock.json`) exists or the local base branch is dirty or ahead of `origin`. When an open PR becomes `CONFLICTING`/`DIRTY`, the coordinator first tries a clean merge of the latest base branch in the existing worktree and otherwise automatically queues a bounded conflict-resolution worker (up to `policy.max_conflict_resolutions`, default `2`; `0` disables) that resolves conflicts, verifies tests, and updates the existing PR branch in place. CI failures or conflicts remaining after exhausting `max_conflict_resolutions` stop visibly at `needs-human` with a `.patch` archive instead of force-merging.
 - `pr-only`: pushes the branch and opens the PR (`pr-open`), leaving merging to a human.
 - `never`: stops at local `ready-for-review` for manual `accept`.
+
+`policy.worker_mode` selects the worker execution profile:
+
+- `standard` (default): invokes `$github-issue-repair` with full repair-ledger state transitions and an independent fresh-context reviewer.
+- `lite`: runs a single-session worker in the isolated worktree without a separate reviewer subagent or repair-ledger ceremony, cutting per-Issue token usage while preserving worktree isolation, test execution, clean commit checks, and deterministic PR/auto-merge handling.
 
 Manual `accept` remains available for `publication: "never"` workflows; `retry`, `discard`, and `prune` remain available in all modes.
 

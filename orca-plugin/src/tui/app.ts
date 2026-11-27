@@ -343,13 +343,18 @@ export class IssueBoardTui {
         return
       }
       case 'handoff':
-      case 'direct': {
+      case 'direct':
+      case 'local': {
         c.mode = id as SubmitMode
         if (arg.trim()) {
           void this.handleComposerSubmit(arg)
         } else {
           this.render()
         }
+        return
+      }
+      case 'lite': {
+        void this.handleToggleWorkerMode(arg)
         return
       }
       case 'agent':
@@ -1024,6 +1029,42 @@ export class IssueBoardTui {
     } finally {
       this.state.busyIds.delete(item.id)
       this.render()
+    }
+  }
+
+  private async handleToggleWorkerMode(arg: string) {
+    const snap = this.state.snapshot
+    const repoPath = snap?.repoPath || this.targetPath
+    const agent = snap?.defaultAgent || snap?.preferredAgent || 'codex'
+    const allowedAgents = snap?.allowedAgents?.length ? snap.allowedAgents : [agent]
+    const lower = arg.trim().toLowerCase()
+    const nextMode: 'standard' | 'lite' = ['off', 'standard', 'full', '关闭', '标准'].includes(lower)
+      ? 'standard'
+      : ['on', 'lite', 'solo', '开启', '轻量'].includes(lower)
+        ? 'lite'
+        : snap?.workerMode === 'lite'
+          ? 'standard'
+          : 'lite'
+
+    this.state.loading = true
+    this.render()
+    try {
+      await saveAgentConfig({
+        repoPath,
+        defaultAgent: agent,
+        allowedAgents,
+        workerMode: nextMode
+      })
+      if (nextMode === 'lite' && this.state.composer.mode === 'handoff') {
+        this.state.composer.mode = 'direct'
+      }
+      if (this.state.snapshot) {
+        this.state.snapshot.workerMode = nextMode
+      }
+      void this.refresh(true)
+    } catch (err) {
+      this.state.loading = false
+      this.showError(err instanceof Error ? err.message : String(err))
     }
   }
 

@@ -71,7 +71,7 @@ export type TuiState = {
 }
 
 export const ISSUE_KINDS: readonly IssueKind[] = ['feature', 'bug', 'polish']
-export const SUBMIT_MODES: readonly SubmitMode[] = ['handoff', 'direct']
+export const SUBMIT_MODES: readonly SubmitMode[] = ['handoff', 'direct', 'local']
 export const DEFAULT_SUBMIT_MODE: SubmitMode = 'handoff'
 
 export function nextIssueKind(current: IssueKind): IssueKind {
@@ -86,7 +86,8 @@ export function nextSubmitMode(current: SubmitMode): SubmitMode {
 
 const MODE_DISPLAY: Record<SubmitMode, { label: string; style: string }> = {
   handoff: { label: '✓ handoff 规范提单', style: PALETTE.accentBold },
-  direct: { label: '○ direct 快速直提', style: PALETTE.dim }
+  direct: { label: '○ direct 快速直提', style: PALETTE.dim },
+  local: { label: '⚡ local 本地直改', style: PALETTE.green }
 }
 
 const KIND_LABELS: Record<IssueKind, string> = {
@@ -254,7 +255,8 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
     if (snap.autopilotInstalled && snap.autopilotRunning) {
       const badgeStart = col
       const maxBadgeW = Math.max(0, width - col - rightStatusW - 3)
-      const activeW = buf.writeText(col, 0, '● 自动处理', PALETTE.green, maxBadgeW)
+      const activeLabel = snap.workerMode === 'lite' ? '● 自动处理·Lite' : '● 自动处理'
+      const activeW = buf.writeText(col, 0, activeLabel, PALETTE.green, maxBadgeW)
       col += activeW
       const remainW = Math.max(0, maxBadgeW - activeW)
       const stopW =
@@ -549,7 +551,7 @@ function isCommandActive(cmd: SlashCommandDef, composer: ComposerState): boolean
   if (cmd.id === 'bug' || cmd.id === 'feature' || cmd.id === 'polish') {
     return composer.kind === cmd.id
   }
-  if (cmd.id === 'handoff' || cmd.id === 'direct') {
+  if (cmd.id === 'handoff' || cmd.id === 'direct' || cmd.id === 'local') {
     return composer.mode === cmd.id
   }
   return false

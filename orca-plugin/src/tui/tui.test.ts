@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -399,7 +399,8 @@ test('Codex-style footer defaults to handoff and switches distinct labels/styles
   assert.equal(nextIssueKind('bug'), 'polish')
   assert.equal(nextIssueKind('polish'), 'feature')
   assert.equal(nextSubmitMode('handoff'), 'direct')
-  assert.equal(nextSubmitMode('direct'), 'handoff')
+  assert.equal(nextSubmitMode('direct'), 'local')
+  assert.equal(nextSubmitMode('local'), 'handoff')
 
   // IssueBoardTui initializes with 'handoff' by default
   const app = new IssueBoardTui('/tmp/demo-app', { writeOutput: () => {} })
@@ -477,9 +478,13 @@ test('Codex-style footer defaults to handoff and switches distinct labels/styles
   internalApp.dispatchAction('cycle-submit-mode')
   assert.equal(internalApp.state.composer.mode, 'direct')
   internalApp.dispatchAction('cycle-submit-mode')
+  assert.equal(internalApp.state.composer.mode, 'local')
+  internalApp.dispatchAction('cycle-submit-mode')
   assert.equal(internalApp.state.composer.mode, 'handoff')
 
-  // 4. Toggle back to 'handoff' in render state restores highlighted handoff label
+  // 4. Toggle through 'local' and back to 'handoff' in render state restores highlighted handoff label
+  state.composer.mode = nextSubmitMode(state.composer.mode)
+  assert.equal(state.composer.mode, 'local')
   state.composer.mode = nextSubmitMode(state.composer.mode)
   assert.equal(state.composer.mode, 'handoff')
   const backHandoffBuf = renderTui(state, 110, 30)
@@ -1753,4 +1758,100 @@ test('inspectLocalBranchSync and diverged branch alert render one-click sync but
   assert.ok(launch)
   assert.ok(launch.args.includes('--agent'))
   assert.ok(launch.args.includes('codex'))
+})
+
+test('local direct mode and /lite command render badges, manage lock file, and track local sessions', async () => {
+  const localCmd = parseSlashCommand('/local 修复状态栏样式')
+  assert.equal(localCmd?.kind, 'command')
+  if (localCmd?.kind === 'command') {
+    assert.equal(localCmd.command.id, 'local')
+    assert.equal(localCmd.arg, '修复状态栏样式')
+  }
+
+  const liteCmd = parseSlashCommand('/lite on')
+  assert.equal(liteCmd?.kind, 'command')
+  if (liteCmd?.kind === 'command') {
+    assert.equal(liteCmd.command.id, 'lite')
+    assert.equal(liteCmd.arg, 'on')
+  }
+
+  const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const liteState = makeBaseState('')
+  liteState.composer.mode = 'local'
+  liteState.snapshot = {
+    ...makeSampleSnapshot(),
+    autopilotInstalled: true,
+    autopilotRunning: true,
+    workerMode: 'lite'
+  }
+  const buf = renderTui(liteState, 120, 30)
+  const header = strip(buf.renderLines()[0] ?? '')
+  const footer = strip(buf.renderLines()[29] ?? '')
+  assert.match(header, /● 自动处理·Lite/)
+  assert.ok(footer.includes('⚡ local 本地直改'))
+
+  const root = mkdtempSync(join(tmpdir(), 'tui-local-dev-'))
+  try {
+    mkdirSync(join(root, '.git'), { recursive: true })
+    const pending = new Map<string, PendingHandoff>()
+    let launchedPrompt = ''
+    const result = await submitIssueFromTui({
+      repoPath: root,
+      repository: 'acme/demo',
+      autopilotInstalled: true,
+      defaultAgent: 'codex',
+      mode: 'local',
+      kind: 'bug',
+      title: '直接在 main 修一个小样式',
+      pendingHandoffs: pending,
+      runner: async (cmd, args) => {
+        if (cmd === 'git' && args.includes('branch')) {
+          return { exitCode: 0, stdout: 'main\n', stderr: '' }
+        }
+        if (cmd === 'git' && args.includes('--git-common-dir')) {
+          return { exitCode: 0, stdout: '.git\n', stderr: '' }
+        }
+        if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'launch') {
+          const pIdx = args.indexOf('--prompt')
+          launchedPrompt = pIdx >= 0 ? args[pIdx + 1] ?? '' : ''
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              result: {
+                outcome: { kind: 'terminal', handle: 'term_local_1' }
+              }
+            }),
+            stderr: ''
+          }
+        }
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+    })
+    assert.equal(result.mode, 'local')
+    assert.equal(result.terminalId, 'term_local_1')
+    assert.ok(launchedPrompt.includes('单会话本地直改模式'))
+    const lockPath = join(root, '.git', 'autopilot-local-dev.lock.json')
+    assert.equal(existsSync(lockPath), true)
+    assert.equal(pending.get('term_local_1')?.sessionKind, 'local')
+
+    // Once the local session exits past boot grace, loadBoardSnapshot cleans up the lock file
+    await loadBoardSnapshot(
+      root,
+      pending,
+      async (cmd, args) => {
+        if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'list') {
+          return { exitCode: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: '' }
+        }
+        if (cmd === 'orca' && args[0] === 'terminal' && args[1] === 'list') {
+          return { exitCode: 0, stdout: JSON.stringify({ result: { terminals: [] } }), stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: '' }
+      },
+      { nowMs: Date.now() + 60_000 }
+    )
+    assert.equal(existsSync(lockPath), false)
+    assert.equal(pending.size, 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

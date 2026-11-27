@@ -74,7 +74,13 @@ class AutopilotAdminTests(unittest.TestCase):
         self.assertEqual("auto-merge", value["policy"]["publication"])
         self.assertEqual("squash", value["policy"]["merge_method"])
         self.assertTrue(value["policy"]["require_ci"])
+        self.assertEqual("standard", value["policy"]["worker_mode"])
         self.assertEqual([], value["policy"]["pre_merge_commands"])
+        lite_value = ADMIN.build_config(
+            self.repo, {"id": "R_one", "nameWithOwner": "owner/repo"}, "owner", "/bin/orca",
+            "agent-ready", paths, "claude", ["claude"], worker_mode="lite",
+        )
+        self.assertEqual("lite", lite_value["policy"]["worker_mode"])
         self.assertEqual("claude", value["orca"]["default_agent"])
         self.assertEqual(["claude", "codex"], value["orca"]["allowed_agents"])
         self.assertEqual("orca-automation", value["scheduler"]["backend"])

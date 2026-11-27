@@ -10,7 +10,7 @@
     "orca": ">=1.4.259"
   },
   "execution": "trusted-worker",
-  "main": "src/worker.ts",
+  "main": "orca-plugin/src/worker.ts",
   "pluginApi": 1,
   "capabilities": [
     { "kind": "workspace:read" },

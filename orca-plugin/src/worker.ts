@@ -12,7 +12,8 @@ import {
   mergeBoardItems,
   readLedgerIssues,
   resolveGitRepository,
-  resolvePluginRootDir
+  resolvePluginRootDir,
+  syncBundledSkillsAndCli
 } from './board-data'
 import type { NeedsYouItem } from './protocol'
 
@@ -25,6 +26,11 @@ function shellQuote(arg: string): string {
 export default function activate(orca: OrcaWorkerApi) {
   const pluginRoot = resolvePluginRootDir()
   const tuiScriptPath = join(pluginRoot, 'src', 'tui', 'app.ts')
+  try {
+    syncBundledSkillsAndCli(resolve(pluginRoot, '..'))
+  } catch (err) {
+    orca.log(`bundled skills/cli sync skipped: ${String(err)}`)
+  }
   const notifiedIds = new Set<string>()
   const activeBoardTerminals = new Map<string, string>()
   let pollTimer: ReturnType<typeof setInterval> | null = null

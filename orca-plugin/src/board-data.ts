@@ -1,5 +1,17 @@
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -1281,7 +1293,7 @@ export async function ensureBoardAnchorFile(
 }
 
 export function resolvePluginRootDir(): string {
-  // worker.ts lives in <pluginRoot>/src/worker.ts
+  // worker.ts lives in <repoRoot>/orca-plugin/src/worker.ts
   try {
     const fileUrl = import.meta.url
     if (fileUrl.startsWith('file://')) {
@@ -1291,4 +1303,105 @@ export function resolvePluginRootDir(): string {
     // ignore
   }
   return process.cwd()
+}
+
+const BUNDLED_SKILLS = [
+  'github-issue-handoff',
+  'github-issue-repair',
+  'github-issue-autopilot',
+  'github-issue-workflow-update'
+] as const
+
+const AGENT_SKILL_ROOTS: ReadonlyArray<readonly [string, string]> = [
+  ['.claude', '.claude/skills'],
+  ['.codex', '.codex/skills'],
+  ['.agents', '.agents/skills'],
+  ['.gemini/antigravity-cli', '.gemini/antigravity-cli/skills']
+]
+
+export function syncBundledSkillsAndCli(
+  repoRoot: string,
+  options?: { homeDir?: string }
+): { syncedSkillDirs: string[]; installedCliPaths: string[] } {
+  const home = options?.homeDir || homedir()
+  const syncedSkillDirs: string[] = []
+  const installedCliPaths: string[] = []
+
+  const hasAllSkills = BUNDLED_SKILLS.every((skill) =>
+    existsSync(join(repoRoot, skill, 'SKILL.md'))
+  )
+  if (hasAllSkills) {
+    const bundledVersionPath = join(repoRoot, 'github-issue-workflow-update', 'VERSION')
+    const bundledVersion = existsSync(bundledVersionPath)
+      ? readFileSync(bundledVersionPath, 'utf8').trim()
+      : ''
+
+    const targetSkillDirs: string[] = []
+    for (const [markerRel, skillsRel] of AGENT_SKILL_ROOTS) {
+      if (existsSync(join(home, markerRel))) {
+        targetSkillDirs.push(join(home, skillsRel))
+      }
+    }
+    if (targetSkillDirs.length === 0) {
+      targetSkillDirs.push(join(home, '.agents', 'skills'))
+    }
+
+    for (const targetRoot of targetSkillDirs) {
+      const installedVersionPath = join(targetRoot, 'github-issue-workflow-update', 'VERSION')
+      const installedVersion = existsSync(installedVersionPath)
+        ? readFileSync(installedVersionPath, 'utf8').trim()
+        : ''
+      const allPresent = BUNDLED_SKILLS.every((skill) =>
+        existsSync(join(targetRoot, skill, 'SKILL.md'))
+      )
+      if (allPresent && bundledVersion && installedVersion === bundledVersion) {
+        continue
+      }
+      mkdirSync(targetRoot, { recursive: true })
+      for (const skill of BUNDLED_SKILLS) {
+        const src = resolve(repoRoot, skill)
+        const dst = resolve(targetRoot, skill)
+        if (src === dst) continue
+        if (existsSync(dst)) {
+          rmSync(dst, { recursive: true, force: true })
+        }
+        cpSync(src, dst, {
+          recursive: true,
+          filter: (p) => !p.includes('__pycache__') && !p.endsWith('.pyc') && !p.endsWith('.pyo')
+        })
+      }
+      syncedSkillDirs.push(targetRoot)
+    }
+  }
+
+  const cliScript = join(repoRoot, 'scripts', 'orca-autopilot')
+  if (existsSync(cliScript)) {
+    try {
+      chmodSync(cliScript, 0o755)
+    } catch {
+      // ignore chmod failures on read-only mounts
+    }
+    const binDir = join(home, '.local', 'bin')
+    mkdirSync(binDir, { recursive: true })
+    for (const name of ['orca-autopilot', 'orca-board']) {
+      const linkPath = join(binDir, name)
+      let needsLink = false
+      try {
+        lstatSync(linkPath)
+        if (!existsSync(linkPath)) {
+          // broken symlink
+          unlinkSync(linkPath)
+          needsLink = true
+        }
+      } catch {
+        needsLink = true
+      }
+      if (needsLink) {
+        symlinkSync(cliScript, linkPath)
+        installedCliPaths.push(linkPath)
+      }
+    }
+  }
+
+  return { syncedSkillDirs, installedCliPaths }
 }

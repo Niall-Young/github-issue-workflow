@@ -51,7 +51,7 @@ class OrcaAutopilotCliTests(unittest.TestCase):
             fake_src = tmp_path / "source-checkout"
             install_dir = tmp_path / "installed"
             (fake_src / "orca-plugin" / "src" / "tui").mkdir(parents=True)
-            (fake_src / "orca-plugin" / "orca-plugin.json").write_text('{"version": "0.2.1"}\n')
+            (fake_src / "orca-plugin.json").write_text('{"version": "0.2.1"}\n')
             (fake_src / "orca-plugin" / "src" / "tui" / "app.ts").write_text("// tui\n")
             (fake_src / "scripts").mkdir(parents=True)
             shutil.copy2(SCRIPT_PATH, fake_src / "scripts" / "orca-autopilot")
@@ -63,7 +63,7 @@ class OrcaAutopilotCliTests(unittest.TestCase):
             shutil.rmtree(fake_src)
 
             self.assertEqual(dest, install_dir.resolve())
-            self.assertTrue((dest / "orca-plugin" / "orca-plugin.json").is_file())
+            self.assertTrue((dest / "orca-plugin.json").is_file())
             self.assertTrue((dest / "orca-plugin" / "src" / "tui" / "app.ts").is_file())
             self.assertTrue((dest / "scripts" / "orca-autopilot").is_file())
             for skill in self.mod.MANAGED_SKILLS:

@@ -52,13 +52,14 @@ def build(tag: str, commit: str, output: Path, *, full: bool = False) -> tuple[P
     if full:
         root_name = f"{PRODUCT}-full-{tag}"
         plugin = ROOT / "orca-plugin"
-        plugin_manifest = json.loads((plugin / "orca-plugin.json").read_text())
+        plugin_manifest = json.loads((ROOT / "orca-plugin.json").read_text())
         if plugin_manifest["version"] != version:
             raise SystemExit(f"tag {tag} does not match Orca plugin version")
         board_files = [
-            ROOT / "LICENSE", ROOT / "README.md", ROOT / "ROADMAP.md", ROOT / "scripts/orca-autopilot",
-            plugin / "orca-plugin.json", plugin / "README.md", plugin / "tsconfig.json",
-            plugin / plugin_manifest["main"], plugin / "src/tui/app.ts",
+            ROOT / "LICENSE", ROOT / "README.md", ROOT / "ROADMAP.md", ROOT / "orca-plugin.json",
+            ROOT / "scripts/orca-autopilot",
+            plugin / "README.md", plugin / "tsconfig.json",
+            ROOT / plugin_manifest["main"], plugin / "src/tui/app.ts",
             *(plugin / "src").rglob("*.ts"),
         ]
         for path in board_files:

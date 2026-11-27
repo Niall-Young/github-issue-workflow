@@ -22,7 +22,8 @@ import {
   parseGithubRepoFromRemote,
   resolvePreferredAgent,
   saveAttachmentsLocally,
-  summarizePrChecks
+  summarizePrChecks,
+  syncBundledSkillsAndCli
 } from './board-data'
 
 test('parseGithubRepoFromRemote handles SSH and HTTPS GitHub URLs', () => {
@@ -616,4 +617,40 @@ test('buildSystemHealthAlerts flags gh auth failures and stalled autopilot polli
   assert.equal(stalledAlerts.length, 1)
   assert.equal(stalledAlerts[0]?.id, 'alert-autopilot-stalled')
   assert.ok(stalledAlerts[0]?.reason.includes('#77'))
+})
+
+test('syncBundledSkillsAndCli installs all four skills and CLI links for native orca plugin install', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'autopilot-sync-'))
+  try {
+    const fakeRepo = join(temp, 'installed-plugin')
+    const fakeHome = join(temp, 'home')
+    mkdirSync(join(fakeHome, '.claude'), { recursive: true })
+    mkdirSync(join(fakeHome, '.codex'), { recursive: true })
+    mkdirSync(join(fakeRepo, 'scripts'), { recursive: true })
+    writeFileSync(join(fakeRepo, 'scripts', 'orca-autopilot'), '#!/usr/bin/env python3\n', 'utf8')
+    for (const skill of [
+      'github-issue-handoff',
+      'github-issue-repair',
+      'github-issue-autopilot',
+      'github-issue-workflow-update'
+    ]) {
+      mkdirSync(join(fakeRepo, skill), { recursive: true })
+      writeFileSync(join(fakeRepo, skill, 'SKILL.md'), `# ${skill}\n`, 'utf8')
+    }
+    writeFileSync(join(fakeRepo, 'github-issue-workflow-update', 'VERSION'), '0.2.1\n', 'utf8')
+
+    const first = syncBundledSkillsAndCli(fakeRepo, { homeDir: fakeHome })
+    assert.equal(first.syncedSkillDirs.length, 2)
+    assert.equal(first.installedCliPaths.length, 2)
+    assert.equal(existsSync(join(fakeHome, '.claude', 'skills', 'github-issue-handoff', 'SKILL.md')), true)
+    assert.equal(existsSync(join(fakeHome, '.codex', 'skills', 'github-issue-autopilot', 'SKILL.md')), true)
+    assert.equal(existsSync(join(fakeHome, '.local', 'bin', 'orca-autopilot')), true)
+
+    // Second call with same version is a fast no-op
+    const second = syncBundledSkillsAndCli(fakeRepo, { homeDir: fakeHome })
+    assert.equal(second.syncedSkillDirs.length, 0)
+    assert.equal(second.installedCliPaths.length, 0)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
 })

@@ -13,8 +13,8 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PLUGIN_DIR = REPO_ROOT / "orca-plugin"
-TUI_ENTRY = PLUGIN_DIR / "src" / "tui" / "app.ts"
+PLUGIN_DIR = REPO_ROOT
+TUI_ENTRY = REPO_ROOT / "orca-plugin" / "src" / "tui" / "app.ts"
 DEFAULT_INSTALL_DIR = Path.home() / ".local" / "share" / "orca-autopilot"
 DEFAULT_PLUGIN_KEY = "local.issue-autopilot"
 CLI_NAMES = ("orca-autopilot", "orca-board")
@@ -102,9 +102,14 @@ def install_standalone_files(
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    manifest_src = src_root / "orca-plugin.json"
+    if not manifest_src.is_file():
+        raise RuntimeError(f"未找到插件清单：{manifest_src}")
+    shutil.copy2(manifest_src, target_dir / "orca-plugin.json")
+
     plugin_src = src_root / "orca-plugin"
-    if not (plugin_src / "orca-plugin.json").is_file():
-        raise RuntimeError(f"未找到插件清单：{plugin_src / 'orca-plugin.json'}")
+    if not plugin_src.is_dir():
+        raise RuntimeError(f"未找到插件源码目录：{plugin_src}")
     _copy_dir_clean(plugin_src, target_dir / "orca-plugin")
 
     script_src = src_root / "scripts" / "orca-autopilot"
@@ -408,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.no_plugin:
                 try:
                     ensure_plugin_ready(
-                        plugin_dir=runtime_root / "orca-plugin",
+                        plugin_dir=runtime_root,
                         dev_mode=args.dev,
                     )
                     mode_label = "开发模式" if args.dev else "正式"

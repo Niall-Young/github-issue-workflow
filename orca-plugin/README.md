@@ -21,7 +21,13 @@
 
 ## 一键安装与使用
 
-在仓库根目录（或 Release 完整包解压目录）执行一次安装（会自动独立安装运行文件到 `~/.local/share/orca-autopilot`、安装 4 个内置 Skill 到本机 Agent 运行时，并正式安装 Orca 插件；完成后可删除源码目录，本地开发可加 `--dev`）：
+直接使用 Orca 原生命令安装（首次激活会自动同步 4 个内置 Skill 与终端命令）：
+
+```bash
+orca plugin install Niall-Young/github-issue-workflow
+```
+
+或从本地仓库 / Release 完整包离线独立安装（本地开发可加 `--dev`）：
 
 ```bash
 ./scripts/orca-autopilot --install
@@ -39,7 +45,7 @@ orca-autopilot
 
 ```bash
 bun test ./orca-plugin/src
-orca plugin validate ./orca-plugin --json
-orca plugin test ./orca-plugin --json
-orca plugin check ./orca-plugin --json
+orca plugin validate . --json
+orca plugin test . --json
+orca plugin check . --json
 ```

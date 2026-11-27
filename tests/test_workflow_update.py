@@ -143,7 +143,7 @@ class WorkflowUpdateTests(unittest.TestCase):
             UPDATE.latest_release()
 
     def test_latest_release_accepts_only_official_asset_urls(self) -> None:
-        prefix = ("https://github.com/Niall-Young/github-issue-workflow/"
+        prefix = ("https://github.com/Niall-Young/orca-autopilot/"
                   "releases/download/v0.1.0/")
         archive = "github-issue-workflow-v0.1.0.tar.gz"
         metadata = {
@@ -209,7 +209,7 @@ class WorkflowUpdateTests(unittest.TestCase):
             self.assertEqual(b"ok", UPDATE.request_bytes(UPDATE.RELEASE_API))
             self.assertEqual(
                 b"ok",
-                UPDATE.request_bytes("https://github.com/Niall-Young/github-issue-workflow/releases/download/v0.1.0/a.sha256"),
+                UPDATE.request_bytes("https://github.com/Niall-Young/orca-autopilot/releases/download/v0.1.0/a.sha256"),
             )
         self.assertEqual("Bearer secret-token", captured[0].get_header("Authorization"))
         self.assertIsNone(captured[1].get_header("Authorization"))

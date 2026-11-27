@@ -24,7 +24,7 @@
 直接使用 Orca 原生命令安装（首次激活会自动同步 4 个内置 Skill 与终端命令）：
 
 ```bash
-orca plugin install Niall-Young/github-issue-workflow
+orca plugin install Niall-Young/orca-autopilot
 ```
 
 或从本地仓库 / Release 完整包离线独立安装（本地开发可加 `--dev`）：

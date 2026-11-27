@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-REPOSITORY = "Niall-Young/github-issue-workflow"
+REPOSITORY = "Niall-Young/orca-autopilot"
 RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 PRODUCT = "github-issue-workflow"
 MANAGED_SKILLS = (

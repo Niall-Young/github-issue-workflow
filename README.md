@@ -64,14 +64,14 @@ An Orca plugin and pure-terminal console for unattended GitHub Issue autopilot: 
 无需克隆仓库，直接执行一条 Orca 原生命令并按提示授权即可：
 
 ```sh
-orca plugin install Niall-Young/github-issue-workflow
+orca plugin install Niall-Young/orca-autopilot
 ```
 
 插件首次激活时会自动把内置的 4 个 Agent Skill 同步到本机已检测到的 Agent 运行时（`~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`、`~/.gemini/antigravity-cli/skills`），并在 `~/.local/bin` 创建 `orca-autopilot` 终端命令；后续可直接用 `orca plugin update` 升级。
 
 **方式二：从 Release 完整包或源码离线安装**
 
-从 [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest) 下载 `github-issue-workflow-full-vX.Y.Z.tar.gz`（或 `git clone` 仓库），在目录内执行：
+从 [GitHub Releases](https://github.com/Niall-Young/orca-autopilot/releases/latest) 下载 `github-issue-workflow-full-vX.Y.Z.tar.gz`（或 `git clone` 仓库），在目录内执行：
 
 ```sh
 ./scripts/orca-autopilot --install
@@ -159,7 +159,7 @@ $github-issue-workflow-update 更新 issue-workflow
 ```
 
 - **检查**为只读操作，仅比较当前版本与最新稳定 Release；
-- **更新**从 `Niall-Young/github-issue-workflow` 拉取稳定 Release，校验来源、SHA-256、清单与逐文件哈希后事务式替换四个官方 Skill 并同步已安装的 Autopilot runtime，失败自动回滚（保留配置、SQLite 账本、日志、attempt 历史和 worktree）；
+- **更新**从 `Niall-Young/orca-autopilot` 拉取稳定 Release，校验来源、SHA-256、清单与逐文件哈希后事务式替换四个官方 Skill 并同步已安装的 Autopilot runtime，失败自动回滚（保留配置、SQLite 账本、日志、attempt 历史和 worktree）；
 - 插件与终端控制台的升级可通过下载最新 `github-issue-workflow-full-vX.Y.Z.tar.gz`（或 `git pull`）后重新运行 `./scripts/orca-autopilot --install` 完成。
 
 ### 项目结构
@@ -267,14 +267,14 @@ Plain-language request (TUI / Skill)
 No git clone required—install directly from GitHub and approve once:
 
 ```sh
-orca plugin install Niall-Young/github-issue-workflow
+orca plugin install Niall-Young/orca-autopilot
 ```
 
 On first activation, the plugin automatically syncs all four bundled Skills (`github-issue-handoff`, `github-issue-repair`, `github-issue-autopilot`, `github-issue-workflow-update`) into every detected local Agent skill directory (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`, `~/.gemini/antigravity-cli/skills`) and links `orca-autopilot` into `~/.local/bin`. Future upgrades work directly via `orca plugin update`.
 
 **Option 2: Offline install from a Release bundle or source checkout**
 
-Download `github-issue-workflow-full-vX.Y.Z.tar.gz` from [GitHub Releases](https://github.com/Niall-Young/github-issue-workflow/releases/latest) (or `git clone` the repo) and run:
+Download `github-issue-workflow-full-vX.Y.Z.tar.gz` from [GitHub Releases](https://github.com/Niall-Young/orca-autopilot/releases/latest) (or `git clone` the repo) and run:
 
 ```sh
 ./scripts/orca-autopilot --install
@@ -362,7 +362,7 @@ $github-issue-workflow-update update issue-workflow
 ```
 
 - **Check** is read-only and reports installed vs. latest stable Release versions.
-- **Update** fetches the latest published stable Release from `Niall-Young/github-issue-workflow`, verifies origin, SHA-256, manifest, and per-file hashes, transactionally replaces the four official Skills, and refreshes installed Autopilot runtimes with automatic rollback on failure (preserving configs, SQLite ledgers, logs, attempt history, and worktrees).
+- **Update** fetches the latest published stable Release from `Niall-Young/orca-autopilot`, verifies origin, SHA-256, manifest, and per-file hashes, transactionally replaces the four official Skills, and refreshes installed Autopilot runtimes with automatic rollback on failure (preserving configs, SQLite ledgers, logs, attempt history, and worktrees).
 - To upgrade the Orca plugin and terminal CLI, download the latest `github-issue-workflow-full-vX.Y.Z.tar.gz` (or `git pull`) and re-run `./scripts/orca-autopilot --install`.
 
 ### Project Structure

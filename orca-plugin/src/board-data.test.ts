@@ -28,12 +28,12 @@ import {
 
 test('parseGithubRepoFromRemote handles SSH and HTTPS GitHub URLs', () => {
   assert.equal(
-    parseGithubRepoFromRemote('git@github.com:Niall-Young/github-issue-workflow.git'),
-    'Niall-Young/github-issue-workflow'
+    parseGithubRepoFromRemote('git@github.com:Niall-Young/orca-autopilot.git'),
+    'Niall-Young/orca-autopilot'
   )
   assert.equal(
-    parseGithubRepoFromRemote('https://github.com/Niall-Young/github-issue-workflow.git'),
-    'Niall-Young/github-issue-workflow'
+    parseGithubRepoFromRemote('https://github.com/Niall-Young/orca-autopilot.git'),
+    'Niall-Young/orca-autopilot'
   )
   assert.equal(parseGithubRepoFromRemote('https://gitlab.com/org/repo.git'), null)
 })

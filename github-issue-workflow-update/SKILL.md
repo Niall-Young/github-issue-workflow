@@ -6,7 +6,7 @@ description: Update the installed GitHub Issue Workflow skill bundle from its la
 # GitHub Issue Workflow Update
 
 Use the deterministic updater bundled with this Skill. It manages only the four official
-`Niall-Young/github-issue-workflow` Skill directories in the current Agent runtime.
+`Niall-Young/orca-autopilot` Skill directories in the current Agent runtime.
 
 ## Check
 

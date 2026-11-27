@@ -24,20 +24,22 @@ import {
   hasHandoffCreatedIssue,
   inspectLocalBranchSync,
   isHandoffSessionTitle,
+  looksLikeLocalAttentionNeeded,
+  readLocalDevLock,
   type CommandRunner
 } from '../board-data'
 import {
-  collectOrcaAgentState,
-  detectAutopilotRunning,
   attachLocalFilePaths,
   captureClipboardAttachments,
+  collectOrcaAgentState,
+  detectAutopilotRunning,
   formatDefaultTerminalTitle,
   formatOscTitleSequence,
   loadBoardSnapshot,
   parseAgentLaunchResult,
+  parseLocalFilePaths,
   sanitizeTerminalTitle,
   setOrcaTerminalTitle,
-  parseLocalFilePaths,
   stopAutopilot,
   submitIssueFromTui,
   syncDivergedBranchFromTui,
@@ -1872,8 +1874,9 @@ test('local direct mode and /lite command render badges, manage lock file, and t
     assert.equal(existsSync(lockPath), true)
     assert.equal(pending.get('term_local_1')?.sessionKind, 'local')
 
-    // Once the local session exits past boot grace, loadBoardSnapshot cleans up the lock file
-    await loadBoardSnapshot(
+    // Once the local session exits past boot grace while lock still exists,
+    // loadBoardSnapshot cleans up the stale lock file and surfaces a local-exited alert
+    const exitedSnap = await loadBoardSnapshot(
       root,
       pending,
       async (cmd, args) => {
@@ -1888,7 +1891,13 @@ test('local direct mode and /lite command render badges, manage lock file, and t
       { nowMs: Date.now() + 60_000 }
     )
     assert.equal(existsSync(lockPath), false)
-    assert.equal(pending.size, 0)
+    const exitAlert = exitedSnap.needsYou.find((i) => i.id === 'local-exited-term_local_1')
+    assert.ok(exitAlert && exitAlert.kind === 'system-alert')
+    if (exitAlert && exitAlert.kind === 'system-alert') {
+      assert.equal(exitAlert.badge, '本地直改中断')
+      assert.equal(exitAlert.retryMode, 'local')
+      assert.equal(exitAlert.retryTitle, '直接在 main 修一个小样式')
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -1977,6 +1986,349 @@ test('parseTuiCliArgs and /title slash command support custom terminal tab title
   await (tui as unknown as { handleRenameTerminal(arg: string): Promise<void> }).handleRenameTerminal(
     ''
   )
+  assert.deepEqual(renamedTitles, ['我的 Autopilot', 'Autopilot'])
+  assert.ok(chunks.some((c) => c.includes('\x1b]0;Autopilot\x07')))
+})
+
+test('local direct sessions recover from lock, surface done/stalled/exit issues in needsYou, and discover manual local agents', async () => {
+  // 1. looksLikeLocalAttentionNeeded distinguishes questions/failures from clean completion
+  assert.equal(looksLikeLocalAttentionNeeded('需要我顺便更新快照测试吗？请确认'), true)
+  assert.equal(looksLikeLocalAttentionNeeded('git push rejected: failed to push some refs'), true)
+  assert.equal(looksLikeLocalAttentionNeeded('已完成并推送到 origin/main，全部通过。'), false)
+
+  const root = mkdtempSync(join(tmpdir(), 'tui-local-panel-'))
+  try {
+    mkdirSync(join(root, '.git'), { recursive: true })
+    const lockPath = join(root, '.git', 'autopilot-local-dev.lock.json')
+    const nowMs = Date.now()
+    const startedMs = nowMs - 60_000
+
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        title: '本地修复按钮对齐',
+        branch: 'main',
+        repo_path: root,
+        agent: 'codex',
+        started_at: new Date(startedMs).toISOString(),
+        terminal_id: 'term_local_rec'
+      }),
+      'utf8'
+    )
+
+    const lockInfo = readLocalDevLock(root)
+    assert.equal(lockInfo?.title, '本地修复按钮对齐')
+    assert.equal(lockInfo?.terminalId, 'term_local_rec')
+
+    const makeRunner = (opts: {
+      agents: Array<Record<string, unknown>>
+      terminals: Array<Record<string, unknown>>
+    }): CommandRunner => {
+      return async (cmd, args) => {
+        if (cmd === 'git' && args.includes('--show-toplevel')) {
+          return { exitCode: 0, stdout: `${root}\n`, stderr: '' }
+        }
+        if (cmd === 'git' && args.includes('get-url')) {
+          return { exitCode: 0, stdout: 'https://github.com/acme/demo-local.git\n', stderr: '' }
+        }
+        if (cmd === 'gh' && args[0] === 'issue') {
+          return { exitCode: 0, stdout: '[]', stderr: '' }
+        }
+        if (cmd === 'gh' && args[0] === 'pr') {
+          return { exitCode: 0, stdout: '[]', stderr: '' }
+        }
+        if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'installed') {
+          return { exitCode: 0, stdout: JSON.stringify({ result: { agents: [{ id: 'codex', default: true }] } }), stderr: '' }
+        }
+        if (cmd === 'orca' && args[0] === 'agent' && args[1] === 'list') {
+          return { exitCode: 0, stdout: JSON.stringify({ result: { agents: opts.agents } }), stderr: '' }
+        }
+        if (cmd === 'orca' && args[0] === 'terminal' && args[1] === 'list') {
+          return { exitCode: 0, stdout: JSON.stringify({ result: { terminals: opts.terminals } }), stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: '' }
+      }
+    }
+
+    // 2. After TUI restart (empty pendingHandoffs), lock file hydrates /local session into inProgress
+    const pending = new Map<string, PendingHandoff>()
+    const hydratedSnap = await loadBoardSnapshot(
+      root,
+      pending,
+      makeRunner({
+        agents: [
+          {
+            orcaSessionId: 'sess-local',
+            agent: 'codex',
+            state: 'working',
+            worktreeId: `wt::${root}`,
+            workspace: 'main',
+            paneKey: 't1:l1',
+            title: '本地修复按钮对齐',
+            updatedAt: nowMs
+          }
+        ],
+        terminals: [
+          {
+            handle: 'term_local_rec',
+            worktreeId: `wt::${root}`,
+            worktreePath: root,
+            tabId: 't1',
+            leafId: 'l1',
+            connected: true,
+            lastOutputAt: nowMs,
+            preview: 'Running tests...'
+          }
+        ]
+      }),
+      { nowMs }
+    )
+    assert.equal(hydratedSnap.inProgress.length, 1)
+    assert.equal(hydratedSnap.inProgress[0]?.title, '本地修复按钮对齐')
+    assert.equal(hydratedSnap.inProgress[0]?.statusLabel, '本地直改中 (codex)')
+    assert.equal(hydratedSnap.needsYou.length, 0)
+
+    // 3. When /local stops in done while lock still exists (e.g., tests failed), surface in needsYou
+    const doneWithLockSnap = await loadBoardSnapshot(
+      root,
+      pending,
+      makeRunner({
+        agents: [
+          {
+            orcaSessionId: 'sess-local',
+            agent: 'codex',
+            state: 'done',
+            worktreeId: `wt::${root}`,
+            workspace: 'main',
+            paneKey: 't1:l1',
+            title: '本地修复按钮对齐',
+            lastAssistantMessage: '测试失败：render.test.ts 报错，是否跳过快照检查？',
+            updatedAt: nowMs + 5_000
+          }
+        ],
+        terminals: [
+          {
+            handle: 'term_local_rec',
+            worktreeId: `wt::${root}`,
+            worktreePath: root,
+            tabId: 't1',
+            leafId: 'l1',
+            connected: true,
+            lastOutputAt: nowMs + 5_000,
+            preview: '测试失败：render.test.ts 报错，是否跳过快照检查？'
+          }
+        ]
+      }),
+      { nowMs: nowMs + 5_000 }
+    )
+    assert.equal(doneWithLockSnap.inProgress[0]?.statusLabel, '本地直改等待确认 (codex)')
+    assert.equal(doneWithLockSnap.needsYou.length, 1)
+    assert.equal(doneWithLockSnap.needsYou[0]?.kind, 'agent-question')
+    assert.equal(doneWithLockSnap.needsYou[0]?.title, '本地修复按钮对齐')
+
+    // 4. Stalled /local session (11 minutes no output) surfaces in needsYou
+    const stalledSnap = await loadBoardSnapshot(
+      root,
+      pending,
+      makeRunner({
+        agents: [
+          {
+            orcaSessionId: 'sess-local',
+            agent: 'codex',
+            state: 'working',
+            worktreeId: `wt::${root}`,
+            workspace: 'main',
+            paneKey: 't1:l1',
+            title: '本地修复按钮对齐',
+            updatedAt: nowMs
+          }
+        ],
+        terminals: [
+          {
+            handle: 'term_local_rec',
+            worktreeId: `wt::${root}`,
+            worktreePath: root,
+            tabId: 't1',
+            leafId: 'l1',
+            connected: true,
+            lastOutputAt: nowMs,
+            preview: 'Running tests...'
+          }
+        ]
+      }),
+      { nowMs: nowMs + 11 * 60 * 1000 }
+    )
+    assert.equal(stalledSnap.inProgress[0]?.statusLabel, '本地直改可能卡住 (codex)')
+    assert.equal(stalledSnap.needsYou.length, 1)
+    assert.equal(stalledSnap.needsYou[0]?.kind, 'agent-question')
+
+    // 5. Once lock is removed and agent finishes cleanly, /local clears without false alarm
+    rmSync(lockPath, { force: true })
+    const cleanDoneSnap = await loadBoardSnapshot(
+      root,
+      pending,
+      makeRunner({
+        agents: [
+          {
+            orcaSessionId: 'sess-local',
+            agent: 'codex',
+            state: 'done',
+            worktreeId: `wt::${root}`,
+            workspace: 'main',
+            paneKey: 't1:l1',
+            title: '本地修复按钮对齐',
+            lastAssistantMessage: '已完成并推送到 origin/main，全部通过。',
+            updatedAt: nowMs + 12 * 60 * 1000
+          }
+        ],
+        terminals: [
+          {
+            handle: 'term_local_rec',
+            worktreeId: `wt::${root}`,
+            worktreePath: root,
+            tabId: 't1',
+            leafId: 'l1',
+            connected: true,
+            lastOutputAt: nowMs + 12 * 60 * 1000,
+            preview: '已完成并推送到 origin/main，全部通过。'
+          }
+        ]
+      }),
+      { nowMs: nowMs + 12 * 60 * 1000 }
+    )
+    assert.equal(pending.size, 0)
+    assert.equal(cleanDoneSnap.inProgress.length, 0)
+    assert.equal(cleanDoneSnap.needsYou.length, 0)
+
+    // 6. Manually opened local Agent sessions in primary repoPath appear in inProgress & surface errors in needsYou
+    const manualSnap = await loadBoardSnapshot(
+      root,
+      new Map(),
+      makeRunner({
+        agents: [
+          {
+            orcaSessionId: 'sess-manual-work',
+            agent: 'claude',
+            state: 'working',
+            worktreeId: `wt::${root}`,
+            workspace: 'main',
+            paneKey: 't2:l1',
+            title: '重构配置加载逻辑',
+            updatedAt: nowMs
+          },
+          {
+            orcaSessionId: 'sess-manual-err',
+            agent: 'codex',
+            state: 'done',
+            worktreeId: `wt::${root}`,
+            workspace: 'main',
+            paneKey: 't2:l2',
+            title: '修复本地单测',
+            lastAssistantMessage: '测试失败：3 个用例未通过，请确认是否继续修改？',
+            updatedAt: nowMs
+          },
+          {
+            orcaSessionId: 'sess-manual-clean-done',
+            agent: 'codex',
+            state: 'done',
+            worktreeId: `wt::${root}`,
+            workspace: 'main',
+            paneKey: 't2:l3',
+            title: '已完成的本地改动',
+            lastAssistantMessage: '已完成并推送到 origin/main',
+            updatedAt: nowMs
+          },
+          {
+            orcaSessionId: 'sess-child-wt',
+            agent: 'codex',
+            state: 'working',
+            worktreeId: 'wt::child',
+            workspace: 'issue-99',
+            paneKey: 't3:l1',
+            title: '子 worktree 任务',
+            updatedAt: nowMs
+          }
+        ],
+        terminals: [
+          {
+            handle: 'term_manual_work',
+            worktreeId: `wt::${root}`,
+            worktreePath: root,
+            tabId: 't2',
+            leafId: 'l1',
+            connected: true,
+            lastOutputAt: nowMs
+          },
+          {
+            handle: 'term_manual_err',
+            worktreeId: `wt::${root}`,
+            worktreePath: root,
+            tabId: 't2',
+            leafId: 'l2',
+            connected: true,
+            lastOutputAt: nowMs
+          },
+          {
+            handle: 'term_manual_clean',
+            worktreeId: `wt::${root}`,
+            worktreePath: root,
+            tabId: 't2',
+            leafId: 'l3',
+            connected: true,
+            lastOutputAt: nowMs
+          },
+          {
+            handle: 'term_child_wt',
+            worktreeId: 'wt::child',
+            worktreePath: `${root}-child`,
+            tabId: 't3',
+            leafId: 'l1',
+            connected: true,
+            lastOutputAt: nowMs
+          }
+        ]
+      }),
+      { nowMs }
+    )
+    assert.equal(manualSnap.inProgress.length, 2)
+    assert.ok(manualSnap.inProgress.some((i) => i.title === '重构配置加载逻辑' && i.statusLabel === '本地会话中 (claude)'))
+    assert.ok(manualSnap.inProgress.some((i) => i.title === '修复本地单测' && i.statusLabel === '本地会话需确认 (codex)'))
+    assert.equal(manualSnap.needsYou.length, 1)
+    assert.equal(manualSnap.needsYou[0]?.title, '修复本地单测')
+
+    // 7. renderTui shows "重新直改" for local-exited alert and retry action switches composer to local mode
+    const localAlert = {
+      id: 'local-exited-term_x',
+      kind: 'system-alert' as const,
+      severity: 'error' as const,
+      badge: '本地直改中断',
+      title: '修一下本地样式',
+      reason: '本地直改终端已提前关闭',
+      updatedAt: new Date(nowMs).toISOString(),
+      canDismiss: true,
+      retryTitle: '修一下本地样式',
+      retryMode: 'local' as const
+    }
+    const alertState = makeBaseState('')
+    alertState.snapshot = { ...makeSampleSnapshot(), needsYou: [localAlert] }
+    const alertBuf = renderTui(alertState, 120, 30)
+    const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, '')
+    const renderedText = alertBuf.renderLines().map(strip).join('\n')
+    assert.ok(renderedText.includes('本地直改中断'))
+    assert.ok(renderedText.includes('重新直改'))
+
+    const app = new IssueBoardTui(root, { writeOutput: () => {} }) as unknown as {
+      state: TuiState
+      dispatchAction: (action: string, payload?: unknown) => void
+    }
+    app.state.snapshot = alertState.snapshot
+    app.dispatchAction('retry-handoff-alert', localAlert)
+    assert.equal(app.state.composer.mode, 'local')
+    assert.equal(app.state.composer.text, '修一下本地样式')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('parseLocalFilePaths and attachLocalFilePaths support multi-file, shell-escaped, and file:// pastes without hijacking prose', () => {
   const tmpDir = mkdtempSync(join(tmpdir(), 'orca-tui-multi-attach-'))
@@ -2130,7 +2482,4 @@ test('IssueBoardTui preserves inline attachments across multi-file paste and sla
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
   }
-})
-  assert.deepEqual(renamedTitles, ['我的 Autopilot', 'Autopilot'])
-  assert.ok(chunks.some((c) => c.includes('\x1b]0;Autopilot\x07')))
 })

@@ -618,6 +618,8 @@ export class IssueBoardTui {
         this.dismissedAlertIds.add(alertId)
         if (alertId.startsWith('handoff-exited-')) {
           this.pendingHandoffs.delete(alertId.slice('handoff-exited-'.length))
+        } else if (alertId.startsWith('local-exited-')) {
+          this.pendingHandoffs.delete(alertId.slice('local-exited-'.length))
         }
         if (this.state.snapshot) {
           this.state.snapshot = {
@@ -633,10 +635,12 @@ export class IssueBoardTui {
         const item = payload as Extract<NeedsYouItem, { kind: 'system-alert' }>
         if (item.id.startsWith('handoff-exited-')) {
           this.pendingHandoffs.delete(item.id.slice('handoff-exited-'.length))
+        } else if (item.id.startsWith('local-exited-')) {
+          this.pendingHandoffs.delete(item.id.slice('local-exited-'.length))
         }
         if (item.retryTitle) {
           this.state.composer.text = item.retryTitle
-          this.state.composer.mode = 'handoff'
+          this.state.composer.mode = item.retryMode || 'handoff'
           this.state.composer.slashIndex = 0
         }
         if (this.state.snapshot) {

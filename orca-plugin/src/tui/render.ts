@@ -808,8 +808,9 @@ function renderAttentionPane(
         bx +=
           buf.drawButton(bx, btnY, '一键自动合并', PALETTE.accentBg, 'sync-diverged-branch', item) + 2
       } else if (item.retryTitle) {
+        const retryLabel = item.retryMode === 'local' ? '重新直改' : '重新提单'
         bx +=
-          buf.drawButton(bx, btnY, '重新提单', PALETTE.accentBg, 'retry-handoff-alert', item) + 2
+          buf.drawButton(bx, btnY, retryLabel, PALETTE.accentBg, 'retry-handoff-alert', item) + 2
       } else if (item.canOpenSettings) {
         bx += buf.drawButton(bx, btnY, '打开设置', PALETTE.accentBg, 'open-settings') + 2
       }

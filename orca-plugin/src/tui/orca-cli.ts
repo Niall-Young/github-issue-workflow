@@ -25,8 +25,10 @@ import {
   isHandoffSessionTitle,
   listInstalledAgents,
   LOCAL_DEV_LOCK_FILENAME,
+  looksLikeLocalAttentionNeeded,
   mergeBoardItems,
   readLedgerIssues,
+  readLocalDevLock,
   resolveGitRepository,
   resolvePreferredAgent,
   type AutopilotConfigInfo,
@@ -516,6 +518,58 @@ export async function loadBoardSnapshot(
     })
   }
 
+  const pushLocalExitAlert = (terminalId: string, entry: PendingHandoff) => {
+    entry.exitedWithoutIssue = true
+    entry.exitedAt = entry.exitedAt || new Date(now).toISOString()
+    handoffAlerts.push({
+      id: `local-exited-${terminalId}`,
+      kind: 'system-alert',
+      severity: 'error',
+      badge: '本地直改中断',
+      title: entry.title,
+      reason: '本地直改终端已提前关闭且未完成收尾，已自动清理本地锁。请检查本地改动或重新发起。',
+      updatedAt: entry.exitedAt,
+      canDismiss: true,
+      retryTitle: entry.title,
+      retryMode: 'local'
+    })
+  }
+
+  // Hydrate an active/orphaned /local lock file if the TUI restarted mid-session
+  const diskLocalLock = readLocalDevLock(repoPath)
+  if (diskLocalLock) {
+    const alreadyTracked = Array.from(pendingHandoffs.values()).some(
+      (e) =>
+        e.sessionKind === 'local' &&
+        (e.lockPath === diskLocalLock.lockPath ||
+          (diskLocalLock.terminalId && e.terminalId === diskLocalLock.terminalId) ||
+          (diskLocalLock.paneKey && e.paneKey === diskLocalLock.paneKey) ||
+          (diskLocalLock.orcaSessionId && e.orcaSessionId === diskLocalLock.orcaSessionId))
+    )
+    if (!alreadyTracked) {
+      const parsedStart = diskLocalLock.startedAt ? Date.parse(diskLocalLock.startedAt) : NaN
+      const startedMs = Number.isFinite(parsedStart) ? parsedStart : now
+      const syntheticId =
+        diskLocalLock.terminalId ||
+        diskLocalLock.paneKey ||
+        diskLocalLock.orcaSessionId ||
+        `local-lock-${startedMs}`
+      pendingHandoffs.set(syntheticId, {
+        terminalId: syntheticId,
+        paneKey: diskLocalLock.paneKey,
+        orcaSessionId: diskLocalLock.orcaSessionId,
+        repoPath,
+        title: diskLocalLock.title,
+        agent: diskLocalLock.agent || preferredAgent,
+        startedAt: diskLocalLock.startedAt || new Date(startedMs).toISOString(),
+        startedMs,
+        sessionKind: 'local',
+        lockPath: diskLocalLock.lockPath,
+        lastActivityMs: startedMs
+      })
+    }
+  }
+
   const hasMatchingNewIssueByTitle = (entry: PendingHandoff): boolean => {
     const existingSet = entry.existingIssueNumbers ? new Set(entry.existingIssueNumbers) : null
     const targetTitle = entry.title.trim().toLowerCase()
@@ -531,6 +585,10 @@ export async function loadBoardSnapshot(
   for (const [terminalId, entry] of pendingHandoffs.entries()) {
     if (entry.repoPath !== repoPath) continue
     if (entry.exitedWithoutIssue) {
+      if (entry.sessionKind === 'local') {
+        pushLocalExitAlert(terminalId, entry)
+        continue
+      }
       if (hasMatchingNewIssueByTitle(entry)) {
         pendingHandoffs.delete(terminalId)
         continue
@@ -547,11 +605,30 @@ export async function loadBoardSnapshot(
     let termEntry = agentState.terminalByHandle.get(effectiveHandle)
 
     // Fallback: if launch returned an unrecognized schema and fell back to a synthetic id,
-    // adopt an unclaimed live handoff agent started around the same time instead of false-alarming.
+    // adopt an unclaimed live handoff/local agent started around the same time instead of false-alarming.
     if (!resolved && !termEntry && entry.terminalId.startsWith('handoff-')) {
       const adopted = agentState.handoffAgents.find(
         (a) =>
           a.terminalConnected &&
+          a.updatedAt >= entry.startedMs - 5_000 &&
+          !handledHandoffKeys.has(a.handle) &&
+          !(a.paneKey && handledHandoffKeys.has(a.paneKey)) &&
+          !(a.orcaSessionId && handledHandoffKeys.has(a.orcaSessionId))
+      )
+      if (adopted) {
+        resolved = adopted
+        effectiveHandle = adopted.handle || entry.terminalId
+        termEntry = agentState.terminalByHandle.get(effectiveHandle)
+        if (adopted.handle) entry.terminalId = adopted.handle
+        if (adopted.paneKey) entry.paneKey = adopted.paneKey
+        if (adopted.orcaSessionId) entry.orcaSessionId = adopted.orcaSessionId
+      }
+    } else if (!resolved && !termEntry && entry.sessionKind === 'local' && entry.terminalId.startsWith('local-')) {
+      const adopted = agentState.allAgents.find(
+        (a) =>
+          a.terminalConnected &&
+          !isHandoffSessionTitle(a.title) &&
+          (!a.worktreePath || resolve(a.worktreePath) === resolve(repoPath)) &&
           a.updatedAt >= entry.startedMs - 5_000 &&
           !handledHandoffKeys.has(a.handle) &&
           !(a.paneKey && handledHandoffKeys.has(a.paneKey)) &&
@@ -585,10 +662,16 @@ export async function loadBoardSnapshot(
     }
 
     if (entry.sessionKind === 'local') {
+      const lockStillExists = Boolean(entry.lockPath && existsSync(entry.lockPath))
+
       if (!state && !terminalStillOpen) {
         if (agentState.orcaReachable && now - entry.startedMs > HANDOFF_BOOT_GRACE_MS) {
-          tryRemoveLocalDevLock(entry.lockPath)
-          pendingHandoffs.delete(terminalId)
+          if (lockStillExists) {
+            tryRemoveLocalDevLock(entry.lockPath)
+            pushLocalExitAlert(terminalId, entry)
+          } else {
+            pendingHandoffs.delete(terminalId)
+          }
           continue
         }
         activeHandoffs.push({
@@ -601,12 +684,121 @@ export async function loadBoardSnapshot(
         })
         continue
       }
+
       if (state === 'done' || state === 'idle') {
+        let output = [resolved?.lastAssistantMessage, resolved?.preview, termEntry?.preview]
+          .filter(Boolean)
+          .join('\n')
+        if (!output && effectiveHandle && terminalStillOpen) {
+          const screenText = await readTerminalText(effectiveHandle, runner)
+          if (screenText) output = screenText
+        }
+        const outputNeedsAttention = looksLikeLocalAttentionNeeded(output)
+
+        if (!terminalStillOpen) {
+          if (lockStillExists || outputNeedsAttention) {
+            tryRemoveLocalDevLock(entry.lockPath)
+            pushLocalExitAlert(terminalId, entry)
+          } else {
+            tryRemoveLocalDevLock(entry.lockPath)
+            pendingHandoffs.delete(terminalId)
+          }
+          continue
+        }
+
+        if (lockStillExists || outputNeedsAttention) {
+          if (!output && effectiveHandle) {
+            const screenText = await readTerminalText(effectiveHandle, runner)
+            if (screenText) output = screenText
+          }
+          const existingQuestion = questionsByHandle.get(effectiveHandle)
+          if (existingQuestion) {
+            existingQuestion.title = entry.title
+          } else {
+            const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+              id: `agent-${effectiveHandle}`,
+              kind: 'agent-question',
+              title: entry.title,
+              question: output
+                ? extractTerminalQuestion(output)
+                : '本地直改会话已暂停但尚未完成收尾（本地锁未释放），请查看终端输出并回复或继续。',
+              terminalId: effectiveHandle,
+              workspaceId: resolved?.worktreeId || '',
+              agentName: entry.agent,
+              state: 'waiting',
+              updatedAt: new Date(resolved?.updatedAt || now).toISOString()
+            }
+            allQuestions.push(questionItem)
+            questionsByHandle.set(effectiveHandle, questionItem)
+          }
+          activeHandoffs.push({
+            id: `local-${effectiveHandle}`,
+            issueNumber: null,
+            title: entry.title,
+            url: '',
+            statusLabel: `本地直改等待确认 (${entry.agent})`,
+            updatedAt: new Date(resolved?.updatedAt || entry.startedMs).toISOString()
+          })
+          continue
+        }
+
         tryRemoveLocalDevLock(entry.lockPath)
         pendingHandoffs.delete(terminalId)
         continue
       }
+
       const waitingLocal = state === 'waiting' || state === 'blocked' || state === 'permission'
+      if (waitingLocal) {
+        const existingQuestion = questionsByHandle.get(effectiveHandle)
+        if (existingQuestion) {
+          existingQuestion.title = entry.title
+        }
+      }
+
+      const latestPreview = [resolved?.lastAssistantMessage, resolved?.preview, termEntry?.preview]
+        .filter(Boolean)
+        .join('\n')
+      const reportedActivityMs = Math.max(
+        entry.lastActivityMs ?? entry.startedMs,
+        resolved?.updatedAt ?? 0,
+        termEntry?.lastOutputAt ?? 0
+      )
+      if (latestPreview) {
+        if (entry.lastPreview !== undefined && latestPreview !== entry.lastPreview) {
+          entry.lastActivityMs = Math.max(reportedActivityMs, now)
+        } else {
+          entry.lastActivityMs = reportedActivityMs
+        }
+        entry.lastPreview = latestPreview
+      } else {
+        entry.lastActivityMs = reportedActivityMs
+      }
+
+      const isStalled =
+        !waitingLocal &&
+        terminalStillOpen &&
+        now - (entry.lastActivityMs ?? entry.startedMs) >= HANDOFF_STALL_TIMEOUT_MS
+
+      if (isStalled && !questionsByHandle.has(effectiveHandle)) {
+        const stallMinutes = Math.floor((now - (entry.lastActivityMs ?? entry.startedMs)) / 60_000)
+        const tail = latestPreview
+          ? extractTerminalQuestion(latestPreview)
+          : '终端长时间无新输出，可以直接回复催促或检查终端状态。'
+        const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+          id: `agent-${effectiveHandle}`,
+          kind: 'agent-question',
+          title: entry.title,
+          question: `本地直改任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+          terminalId: effectiveHandle,
+          workspaceId: resolved?.worktreeId || '',
+          agentName: entry.agent,
+          state: 'waiting',
+          updatedAt: new Date(entry.lastActivityMs ?? now).toISOString()
+        }
+        allQuestions.push(questionItem)
+        questionsByHandle.set(effectiveHandle, questionItem)
+      }
+
       activeHandoffs.push({
         id: `local-${effectiveHandle}`,
         issueNumber: null,
@@ -614,7 +806,9 @@ export async function loadBoardSnapshot(
         url: '',
         statusLabel: waitingLocal
           ? `本地直改等待确认 (${entry.agent})`
-          : `本地直改中 (${entry.agent})`,
+          : isStalled
+            ? `本地直改可能卡住 (${entry.agent})`
+            : `本地直改中 (${entry.agent})`,
         updatedAt: new Date(resolved?.updatedAt || entry.startedMs).toISOString()
       })
       continue
@@ -882,6 +1076,16 @@ export async function loadBoardSnapshot(
   const activeRepairRows = ledgerRows.filter(
     (r) => r.status === 'running' || r.status === 'claimed' || r.attempt_status === 'running'
   )
+  const matchActiveRepairRow = (agent: ResolvedOrcaAgent) =>
+    activeRepairRows.find(
+      (r) =>
+        (r.orca_worktree_id && agent.worktreeId && r.orca_worktree_id === agent.worktreeId) ||
+        (r.worktree_path &&
+          agent.worktreePath &&
+          resolve(r.worktree_path) === resolve(agent.worktreePath)) ||
+        agent.title.includes(`#${r.issue_number}`)
+    )
+
   if (activeRepairRows.length > 0) {
     for (const agent of agentState.allAgents) {
       if (!agent.terminalConnected) continue
@@ -889,14 +1093,7 @@ export async function loadBoardSnapshot(
       if (isHandoffSessionTitle(agent.title)) continue
       if (questionsByHandle.has(agent.handle) || handledHandoffKeys.has(agent.handle)) continue
 
-      const matchedRow = activeRepairRows.find(
-        (r) =>
-          (r.orca_worktree_id && agent.worktreeId && r.orca_worktree_id === agent.worktreeId) ||
-          (r.worktree_path &&
-            agent.worktreePath &&
-            resolve(r.worktree_path) === resolve(agent.worktreePath)) ||
-          agent.title.includes(`#${r.issue_number}`)
-      )
+      const matchedRow = matchActiveRepairRow(agent)
       if (!matchedRow) continue
 
       let output = [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
@@ -922,6 +1119,98 @@ export async function loadBoardSnapshot(
       allQuestions.push(questionItem)
       questionsByHandle.set(agent.handle, questionItem)
     }
+  }
+
+  // Also discover manually launched local Agent sessions in the primary repoPath
+  const normalizedRepoPath = resolve(repoPath)
+  for (const agent of agentState.allAgents) {
+    if (!agent.terminalConnected) continue
+    if (
+      handledHandoffKeys.has(agent.handle) ||
+      (agent.paneKey && handledHandoffKeys.has(agent.paneKey)) ||
+      (agent.orcaSessionId && handledHandoffKeys.has(agent.orcaSessionId))
+    ) {
+      continue
+    }
+    if (isHandoffSessionTitle(agent.title)) continue
+    if (matchActiveRepairRow(agent)) continue
+    if (agent.worktreePath && resolve(agent.worktreePath) !== normalizedRepoPath) continue
+    if (now - agent.updatedAt > DISCOVERED_HANDOFF_MAX_AGE_MS) continue
+
+    const effectiveHandle = agent.handle
+    const displayTitle = agent.title || `本地开发会话 (${agent.agent})`
+
+    if (agent.state === 'done' || agent.state === 'idle') {
+      let output = [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
+      if (!output && effectiveHandle) {
+        const screenText = await readTerminalText(effectiveHandle, runner)
+        if (screenText) output = screenText
+      }
+      if (!looksLikeLocalAttentionNeeded(output)) continue
+
+      if (!questionsByHandle.has(effectiveHandle)) {
+        const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+          id: `agent-${effectiveHandle}`,
+          kind: 'agent-question',
+          title: displayTitle,
+          question: extractTerminalQuestion(output),
+          terminalId: effectiveHandle,
+          workspaceId: agent.worktreeId,
+          agentName: agent.agent,
+          state: 'waiting',
+          updatedAt: new Date(agent.updatedAt).toISOString()
+        }
+        allQuestions.push(questionItem)
+        questionsByHandle.set(effectiveHandle, questionItem)
+      }
+
+      activeHandoffs.push({
+        id: `local-${effectiveHandle}`,
+        issueNumber: null,
+        title: displayTitle,
+        url: '',
+        statusLabel: `本地会话需确认 (${agent.agent})`,
+        updatedAt: new Date(agent.updatedAt).toISOString()
+      })
+      continue
+    }
+
+    const waitingLocal =
+      agent.state === 'waiting' || agent.state === 'blocked' || agent.state === 'permission'
+    const isStalled =
+      !waitingLocal && now - agent.updatedAt >= HANDOFF_STALL_TIMEOUT_MS
+    if (isStalled && !questionsByHandle.has(effectiveHandle)) {
+      const stallMinutes = Math.floor((now - agent.updatedAt) / 60_000)
+      const tail = extractTerminalQuestion(
+        [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
+      )
+      const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
+        id: `agent-${effectiveHandle}`,
+        kind: 'agent-question',
+        title: displayTitle,
+        question: `本地会话已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+        terminalId: effectiveHandle,
+        workspaceId: agent.worktreeId,
+        agentName: agent.agent,
+        state: 'waiting',
+        updatedAt: new Date(agent.updatedAt).toISOString()
+      }
+      allQuestions.push(questionItem)
+      questionsByHandle.set(effectiveHandle, questionItem)
+    }
+
+    activeHandoffs.push({
+      id: `local-${effectiveHandle}`,
+      issueNumber: null,
+      title: displayTitle,
+      url: '',
+      statusLabel: waitingLocal
+        ? `本地会话等待确认 (${agent.agent})`
+        : isStalled
+          ? `本地会话可能卡住 (${agent.agent})`
+          : `本地会话中 (${agent.agent})`,
+      updatedAt: new Date(agent.updatedAt).toISOString()
+    })
   }
 
   const healthAlerts = buildSystemHealthAlerts({
@@ -1067,6 +1356,28 @@ export async function submitIssueFromTui(params: {
 
     const parsedLaunch = parseAgentLaunchResult(launchRes.stdout)
     const terminalId = parsedLaunch.terminalId || `local-${Date.now()}`
+    try {
+      writeFileSync(
+        lockPath,
+        JSON.stringify(
+          {
+            title,
+            branch,
+            repo_path: params.repoPath,
+            agent,
+            started_at: startedAt,
+            ...(parsedLaunch.terminalId ? { terminal_id: parsedLaunch.terminalId } : {}),
+            ...(parsedLaunch.paneKey ? { pane_key: parsedLaunch.paneKey } : {}),
+            ...(parsedLaunch.orcaSessionId ? { orca_session_id: parsedLaunch.orcaSessionId } : {})
+          },
+          null,
+          2
+        ) + '\n',
+        'utf8'
+      )
+    } catch {
+      // Best-effort lock metadata update
+    }
     params.pendingHandoffs.set(terminalId, {
       terminalId,
       paneKey: parsedLaunch.paneKey,
@@ -1394,8 +1705,23 @@ function guessMimeType(filePath: string): string {
       return 'image/webp'
     case '.gif':
       return 'image/gif'
+    case '.bmp':
+      return 'image/bmp'
+    case '.svg':
+      return 'image/svg+xml'
+    case '.heic':
+      return 'image/heic'
+    case '.tif':
+    case '.tiff':
+      return 'image/tiff'
     case '.pdf':
       return 'application/pdf'
+    case '.json':
+      return 'application/json'
+    case '.txt':
+    case '.md':
+    case '.log':
+      return 'text/plain'
     default:
       return 'application/octet-stream'
   }
@@ -1589,6 +1915,7 @@ function copyFilesToAttachmentDir(
       path: dest
     })
   }
+  return saved
 }
 
 export function attachLocalFilePaths(
@@ -1729,6 +2056,16 @@ export async function captureClipboardAttachments(
       }
     }
   }
+  return []
+}
+
+export async function captureClipboardImage(
+  repoPath: string,
+  stateRoot = getAutopilotStateRoot(),
+  runner: CommandRunner = defaultRunner
+): Promise<SavedAttachment | null> {
+  const saved = await captureClipboardAttachments(repoPath, stateRoot, runner)
+  return saved[0] ?? null
 }
 
 export function sanitizeTerminalTitle(raw: string): string {
@@ -1772,29 +2109,3 @@ export async function setOrcaTerminalTitle(
     return false
   }
 }
-    case '.bmp':
-      return 'image/bmp'
-    case '.svg':
-      return 'image/svg+xml'
-    case '.heic':
-      return 'image/heic'
-    case '.tif':
-    case '.tiff':
-      return 'image/tiff'
-    case '.json':
-      return 'application/json'
-    case '.txt':
-    case '.md':
-    case '.log':
-      return 'text/plain'
-  return saved
-  return []
-}
-
-export async function captureClipboardImage(
-  repoPath: string,
-  stateRoot = getAutopilotStateRoot(),
-  runner: CommandRunner = defaultRunner
-): Promise<SavedAttachment | null> {
-  const saved = await captureClipboardAttachments(repoPath, stateRoot, runner)
-  return saved[0] ?? null

@@ -70,6 +70,7 @@ export type NeedsYouItem =
       canDismiss: boolean
       canOpenSettings?: boolean
       retryTitle?: string | null
+      retryMode?: SubmitMode | null
       syncBranch?: BranchSyncStatus | null
     }
 

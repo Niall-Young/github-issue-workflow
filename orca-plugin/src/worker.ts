@@ -9,8 +9,10 @@ import {
   hasHandoffCreatedIssue,
   inspectLocalBranchSync,
   isHandoffSessionTitle,
+  looksLikeLocalAttentionNeeded,
   mergeBoardItems,
   readLedgerIssues,
+  readLocalDevLock,
   resolveGitRepository,
   resolvePluginRootDir,
   syncBundledSkillsAndCli
@@ -89,9 +91,11 @@ export default function activate(orca: OrcaWorkerApi) {
     const activeRepairRows = ledgerRows.filter(
       (r) => r.status === 'running' || r.status === 'claimed' || r.attempt_status === 'running'
     )
+    const localLock = readLocalDevLock(rootPath)
 
     const agentQuestions: NeedsYouItem[] = []
     for (const ws of related) {
+      const isPrimaryRepoWs = resolve(ws.path) === rootPath
       try {
         const res = await orca.host.call('agents.list', { workspaceId: ws.id })
         for (const agent of res.agents || []) {
@@ -112,8 +116,16 @@ export default function activate(orca: OrcaWorkerApi) {
               )
             : undefined
           const isRepairDone = Boolean(matchedRepairRow)
+          const isMatchedLocalLock = Boolean(
+            localLock &&
+              isPrimaryRepoWs &&
+              ((localLock.terminalId && localLock.terminalId === agent.terminalId) ||
+                (!localLock.terminalId && !isHandoffDone && !isRepairDone))
+          )
+          const isLocalDoneCandidate =
+            isDoneOrIdle && isPrimaryRepoWs && !isHandoffDone && !isRepairDone
 
-          if (!isExplicitWait && !isHandoffDone && !isRepairDone) continue
+          if (!isExplicitWait && !isHandoffDone && !isRepairDone && !isLocalDoneCandidate) continue
 
           let output = ''
           try {
@@ -142,12 +154,23 @@ export default function activate(orca: OrcaWorkerApi) {
             continue
           }
 
+          if (
+            isLocalDoneCandidate &&
+            !isExplicitWait &&
+            !isMatchedLocalLock &&
+            !looksLikeLocalAttentionNeeded(output)
+          ) {
+            continue
+          }
+
           agentQuestions.push({
             id: `agent-${agent.terminalId}`,
             kind: 'agent-question',
             title: matchedRepairRow
               ? `#${matchedRepairRow.issue_number} ${matchedRepairRow.title}`
-              : agentTitle || `${ws.name} 中的助手需要你确认`,
+              : isMatchedLocalLock && localLock
+                ? localLock.title
+                : agentTitle || `${ws.name} 中的助手需要你确认`,
             question: extractTerminalQuestion(output),
             terminalId: agent.terminalId,
             workspaceId: ws.id,

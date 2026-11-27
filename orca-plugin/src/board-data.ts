@@ -393,6 +393,81 @@ export function buildAutopilotInstallArgs(params: {
 
 export const LOCAL_DEV_LOCK_FILENAME = 'autopilot-local-dev.lock.json'
 
+export type LocalDevLockInfo = {
+  lockPath: string
+  title: string
+  branch?: string
+  repoPath?: string
+  agent?: string
+  startedAt?: string
+  terminalId?: string
+  paneKey?: string
+  orcaSessionId?: string
+}
+
+export function resolveLocalDevLockPathSync(repoPath: string): string {
+  const normalized = resolve(repoPath)
+  const dotGitPath = join(normalized, '.git')
+  try {
+    const stat = lstatSync(dotGitPath)
+    if (stat.isDirectory()) {
+      return join(dotGitPath, LOCAL_DEV_LOCK_FILENAME)
+    }
+    if (stat.isFile()) {
+      const content = readFileSync(dotGitPath, 'utf8')
+      const match = content.match(/^gitdir:\s*(.+)$/m)
+      if (match?.[1]) {
+        const gitDir = resolve(normalized, match[1].trim())
+        const commonDirFile = join(gitDir, 'commondir')
+        if (existsSync(commonDirFile)) {
+          const relCommon = readFileSync(commonDirFile, 'utf8').trim()
+          if (relCommon) {
+            return join(resolve(gitDir, relCommon), LOCAL_DEV_LOCK_FILENAME)
+          }
+        }
+        return join(gitDir, LOCAL_DEV_LOCK_FILENAME)
+      }
+    }
+  } catch {
+    // fallback below
+  }
+  return join(dotGitPath, LOCAL_DEV_LOCK_FILENAME)
+}
+
+export function readLocalDevLock(repoPath: string): LocalDevLockInfo | null {
+  const lockPath = resolveLocalDevLockPathSync(repoPath)
+  if (!existsSync(lockPath)) return null
+  try {
+    const raw = JSON.parse(readFileSync(lockPath, 'utf8')) as {
+      title?: string
+      branch?: string
+      repo_path?: string
+      agent?: string
+      started_at?: string
+      terminal_id?: string
+      pane_key?: string
+      orca_session_id?: string
+    }
+    const title = typeof raw.title === 'string' ? raw.title.trim() : ''
+    if (!title) return null
+    return {
+      lockPath,
+      title,
+      branch: typeof raw.branch === 'string' ? raw.branch.trim() || undefined : undefined,
+      repoPath: typeof raw.repo_path === 'string' ? raw.repo_path.trim() || undefined : undefined,
+      agent: typeof raw.agent === 'string' ? raw.agent.trim() || undefined : undefined,
+      startedAt: typeof raw.started_at === 'string' ? raw.started_at.trim() || undefined : undefined,
+      terminalId:
+        typeof raw.terminal_id === 'string' ? raw.terminal_id.trim() || undefined : undefined,
+      paneKey: typeof raw.pane_key === 'string' ? raw.pane_key.trim() || undefined : undefined,
+      orcaSessionId:
+        typeof raw.orca_session_id === 'string' ? raw.orca_session_id.trim() || undefined : undefined
+    }
+  } catch {
+    return null
+  }
+}
+
 export function buildLocalDevPrompt(params: {
   repoPath: string
   branch: string
@@ -962,6 +1037,42 @@ export function looksLikeDuplicateOrConfirmationQuestion(rawOutput: string): boo
       tail
     )
   return hasQuestion && hasConfirmCue
+}
+
+export function looksLikeLocalAttentionNeeded(rawOutput: string): boolean {
+  if (!rawOutput) return false
+  const clean = stripTerminalAnsi(rawOutput)
+  const lines = clean
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.length > 0 && !TERMINAL_CHROME_PATTERNS.some((pattern) => pattern.test(line))
+    )
+  if (lines.length === 0) return false
+  const tail = lines.slice(-10).join('\n')
+
+  const hasQuestion = /[?？]/.test(tail)
+  const hasConfirmCue =
+    /(?:是否|请确认|要不要|需要我|哪种|如何处理|继续吗|确认一下|怎么处理|选哪|请指示|would\s+you\s+like|should\s+i|please\s+confirm|which\s+option|do\s+you\s+want)/i.test(
+      tail
+    )
+  if (hasQuestion && hasConfirmCue) {
+    return true
+  }
+
+  const lastFew = lines.slice(-4).join('\n')
+  const looksCompleted =
+    /(?:已完成并推送|已推送到|已提交并推送|all\s+tests?\s+pass|successfully\s+pushed|pushed\s+to\s+origin)/i.test(
+      lastFew
+    )
+  if (looksCompleted) {
+    return false
+  }
+
+  return /(?:测试失败|构建失败|推送失败|合并冲突|无法自动|需要人工|权限不足|执行失败|push\s+rejected|failed\s+to\s+push|merge\s+conflict|CONFLICT\s*\(|tests?\s+failed|command\s+failed|fatal:\s)/i.test(
+    tail
+  )
 }
 
 export function hasHandoffCreatedIssue(params: {

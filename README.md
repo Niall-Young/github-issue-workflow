@@ -67,7 +67,7 @@ An Orca plugin and pure-terminal console for unattended GitHub Issue autopilot: 
 orca plugin install Niall-Young/orca-autopilot
 ```
 
-插件首次激活时会自动把内置的 4 个 Agent Skill 同步到本机已检测到的 Agent 运行时（`~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`、`~/.gemini/antigravity-cli/skills`），并在 `~/.local/bin` 创建 `orca-autopilot` 终端命令；后续可直接用 `orca plugin update` 升级。
+插件首次激活时会自动把内置的 4 个 Agent Skill 同步到本机已检测到的 Agent 运行时（`~/.claude/skills`、`~/.codex/skills`、`~/.agents/skills`、`~/.gemini/antigravity-cli/skills`），并在 `~/.local/bin` 创建 `orca-autopilot` 终端命令；后续可直接运行 `orca-autopilot update` 一行命令全量升级（也可使用 `orca plugin update` 升级插件）。
 
 **方式二：从 Release 完整包或源码离线安装**
 
@@ -95,6 +95,16 @@ orca plugin install Niall-Young/orca-autopilot
 ```sh
 orca-autopilot
 ```
+
+#### 一键更新（推荐）
+
+日常升级只需在任意终端执行一行命令：
+
+```sh
+orca-autopilot update
+```
+
+该命令（等价于 `orca-autopilot --update`）会自动从 GitHub 最新稳定 Release 下载并校验 SHA-256，一站式更新运行文件、CLI、全部 4 个内置 Skill、Orca 插件，并刷新已安装仓库的 Autopilot runtime。本地源码调试时可用 `orca-autopilot update --from /path/to/repo` 直接同步。
 
 ### 使用方法
 
@@ -153,16 +163,23 @@ $github-issue-repair https://github.com/owner/repo
 
 ### 更新机制
 
-更新不会在后台自动运行。安装 `github-issue-workflow-update` 后，按需显式调用：
+更新不会在后台自动运行，**最推荐直接通过一行终端命令完成全量更新**：
+
+```sh
+orca-autopilot update
+```
+
+- **一键全量更新（推荐）**：`orca-autopilot update`（等价于 `orca-autopilot --update`）会自动从 `Niall-Young/orca-autopilot` 拉取最新稳定 Release 并校验 SHA-256，一站式更新运行文件、CLI、全部 4 个内置 Skill、Orca 插件，并同步刷新已安装仓库的 Autopilot runtime；本地源码调试时可执行 `orca-autopilot update --from /path/to/repo`。
+- **在 Agent 会话中按需检查或仅更新 Skill**：如果只想只读检查版本，或在对话中更新四个官方 Skill 与已安装的 Autopilot runtime，可显式调用 `github-issue-workflow-update`：
 
 ```sh
 $github-issue-workflow-update 检查 issue-workflow 更新
 $github-issue-workflow-update 更新 issue-workflow
 ```
 
-- **检查**为只读操作，仅比较当前版本与最新稳定 Release；
-- **更新**从 `Niall-Young/orca-autopilot` 拉取稳定 Release，校验来源、SHA-256、清单与逐文件哈希后事务式替换四个官方 Skill 并同步已安装的 Autopilot runtime，失败自动回滚（保留配置、SQLite 账本、日志、attempt 历史和 worktree）；
-- 插件与终端控制台的一键升级可直接运行 `orca-autopilot --update`（或 `orca-autopilot update`），自动从 GitHub 最新稳定 Release 下载并校验 SHA-256，一站式更新运行文件、CLI、全部 4 个内置 Skill、Orca 插件并刷新已安装仓库的 Autopilot runtime；本地源码调试时可用 `orca-autopilot --update --from /path/to/repo` 直接同步。
+  - **检查**为只读操作，仅比较当前版本与最新稳定 Release；
+  - **更新**会校验来源、SHA-256、清单与逐文件哈希后事务式替换四个官方 Skill 并同步已安装的 Autopilot runtime，失败自动回滚（保留配置、SQLite 账本、日志、attempt 历史和 worktree）。
+- **通过 Orca 插件命令升级**：若通过 `orca plugin install` 安装，也可使用 `orca plugin update` 升级插件本身。
 
 ### 项目结构
 
@@ -272,7 +289,7 @@ No git clone required—install directly from GitHub and approve once:
 orca plugin install Niall-Young/orca-autopilot
 ```
 
-On first activation, the plugin automatically syncs all four bundled Skills (`github-issue-handoff`, `github-issue-repair`, `github-issue-autopilot`, `github-issue-workflow-update`) into every detected local Agent skill directory (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`, `~/.gemini/antigravity-cli/skills`) and links `orca-autopilot` into `~/.local/bin`. Future upgrades work directly via `orca plugin update`.
+On first activation, the plugin automatically syncs all four bundled Skills (`github-issue-handoff`, `github-issue-repair`, `github-issue-autopilot`, `github-issue-workflow-update`) into every detected local Agent skill directory (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`, `~/.gemini/antigravity-cli/skills`) and links `orca-autopilot` into `~/.local/bin`. Future full upgrades take a single command via `orca-autopilot update` (or `orca plugin update` for the plugin itself).
 
 **Option 2: Offline install from a Release bundle or source checkout**
 
@@ -300,6 +317,16 @@ Open the console using either entry point:
 ```sh
 orca-autopilot
 ```
+
+#### One-Command Update (Recommended)
+
+Upgrade everything in one command from any terminal:
+
+```sh
+orca-autopilot update
+```
+
+This command (alias for `orca-autopilot --update`) downloads and SHA-256-verifies the latest stable Release bundle from GitHub, updating runtime files, the CLI, all four bundled Skills, the Orca plugin, and installed repository Autopilot runtimes in one shot. For local source checkouts, run `orca-autopilot update --from /path/to/repo`.
 
 ### Usage
 
@@ -358,16 +385,23 @@ $github-issue-repair https://github.com/owner/repo
 
 ### Update Mechanism
 
-Updates never run automatically in the background. After installing `github-issue-workflow-update`, invoke it explicitly:
+Updates never run automatically in the background. **The recommended way is a single terminal command for a full upgrade:**
+
+```sh
+orca-autopilot update
+```
+
+- **One-command full update (recommended)**: `orca-autopilot update` (equivalent to `orca-autopilot --update`) downloads the latest stable Release from `Niall-Young/orca-autopilot`, verifies SHA-256, and updates runtime files, the CLI, all four bundled Skills, the Orca plugin, and installed repository Autopilot runtimes in one step; for local source checkouts, run `orca-autopilot update --from /path/to/repo`.
+- **Check versions or update Skills inside an Agent session**: to run a read-only version check or update the four official Skills and installed Autopilot runtimes from chat, invoke `github-issue-workflow-update` explicitly:
 
 ```sh
 $github-issue-workflow-update check for issue-workflow updates
 $github-issue-workflow-update update issue-workflow
 ```
 
-- **Check** is read-only and reports installed vs. latest stable Release versions.
-- **Update** fetches the latest published stable Release from `Niall-Young/orca-autopilot`, verifies origin, SHA-256, manifest, and per-file hashes, transactionally replaces the four official Skills, and refreshes installed Autopilot runtimes with automatic rollback on failure (preserving configs, SQLite ledgers, logs, attempt history, and worktrees).
-- To upgrade the CLI, plugin, bundled Skills, and installed Autopilot runtimes in one command, run `orca-autopilot --update` (or `orca-autopilot update`), which downloads and SHA-256-verifies the latest stable Release bundle; for local source checkouts, run `orca-autopilot --update --from /path/to/repo`.
+  - **Check** is read-only and reports installed vs. latest stable Release versions.
+  - **Update** verifies origin, SHA-256, manifest, and per-file hashes, transactionally replaces the four official Skills, and refreshes installed Autopilot runtimes with automatic rollback on failure (preserving configs, SQLite ledgers, logs, attempt history, and worktrees).
+- **Orca plugin upgrade**: if installed via `orca plugin install`, you can also upgrade the plugin itself with `orca plugin update`.
 
 ### Project Structure
 

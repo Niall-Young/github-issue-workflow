@@ -43,6 +43,12 @@ orca-autopilot
 
 也可在 Orca 底部状态栏点击 **Autopilot** 或按 `Cmd+Shift+I` 在终端标签页中打开。
 
+日常升级只需在任意终端执行一行命令（自动拉取最新稳定 Release 并校验 SHA-256，一站式更新 CLI、内置 Skill、Orca 插件与已安装仓库的 Autopilot runtime）：
+
+```bash
+orca-autopilot update
+```
+
 ## 验证命令
 
 ```bash

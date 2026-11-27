@@ -2,6 +2,7 @@
 // Every interactive element registers a HitBox so mouse clicks and keyboard
 // navigation share the exact same action dispatch path.
 
+import { pick } from '../i18n'
 import type {
   BoardSnapshot,
   CompletedItem,
@@ -84,16 +85,47 @@ export function nextSubmitMode(current: SubmitMode): SubmitMode {
   return SUBMIT_MODES[(idx + 1) % SUBMIT_MODES.length]
 }
 
-const MODE_DISPLAY: Record<SubmitMode, { label: string; style: string }> = {
-  handoff: { label: '✓ handoff 规范提单', style: PALETTE.accentBold },
-  direct: { label: '○ direct 快速直提', style: PALETTE.dim },
-  local: { label: '⚡ local 本地直改', style: PALETTE.green }
+function getModeDisplay(mode: SubmitMode): { label: string; style: string } {
+  switch (mode) {
+    case 'handoff':
+      return {
+        label: pick({
+          es: '✓ handoff · Issue guiado',
+          en: '✓ handoff · Guided Issue',
+          zh: '✓ handoff 规范提单'
+        }),
+        style: PALETTE.accentBold
+      }
+    case 'direct':
+      return {
+        label: pick({
+          es: '○ direct · Issue directo',
+          en: '○ direct · Quick Issue',
+          zh: '○ direct 快速直提'
+        }),
+        style: PALETTE.dim
+      }
+    case 'local':
+      return {
+        label: pick({
+          es: '⚡ local · Cambio local',
+          en: '⚡ local · Local Edit',
+          zh: '⚡ local 本地直改'
+        }),
+        style: PALETTE.green
+      }
+  }
 }
 
-const KIND_LABELS: Record<IssueKind, string> = {
-  feature: '新功能',
-  bug: '修 Bug',
-  polish: '体验优化'
+function getKindLabel(kind: IssueKind): string {
+  switch (kind) {
+    case 'feature':
+      return pick({ es: 'Nueva función', en: 'Feature', zh: '新功能' })
+    case 'bug':
+      return pick({ es: 'Corregir Bug', en: 'Bug Fix', zh: '修 Bug' })
+    case 'polish':
+      return pick({ es: 'Mejora UX', en: 'Polish', zh: '体验优化' })
+  }
 }
 
 const KIND_STYLES: Record<IssueKind, string> = {
@@ -106,7 +138,7 @@ export function formatRelativeTime(iso: string): string {
   const ts = Date.parse(iso)
   if (!Number.isFinite(ts)) return ''
   const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000))
-  if (diffSec < 60) return '刚刚'
+  if (diffSec < 60) return pick({ es: 'ahora', en: 'now', zh: '刚刚' })
   const diffMin = Math.floor(diffSec / 60)
   if (diffMin < 60) return `${diffMin}m`
   const diffHour = Math.floor(diffMin / 60)
@@ -119,13 +151,27 @@ export function buildMainRows(snapshot: BoardSnapshot | null, tab: 'issues' | 'p
   const rows: ListRow[] = []
   if (tab === 'issues') {
     if (snapshot.inProgress.length > 0) {
-      rows.push({ kind: 'section', label: `进行中 · ${snapshot.inProgress.length}` })
+      rows.push({
+        kind: 'section',
+        label: pick({
+          es: `En curso · ${snapshot.inProgress.length}`,
+          en: `In Progress · ${snapshot.inProgress.length}`,
+          zh: `进行中 · ${snapshot.inProgress.length}`
+        })
+      })
       for (const item of snapshot.inProgress) {
         rows.push({ kind: 'inProgress', item })
       }
     }
     if (snapshot.completed.length > 0) {
-      rows.push({ kind: 'section', label: `已完成 · 可验收 · ${snapshot.completed.length}` })
+      rows.push({
+        kind: 'section',
+        label: pick({
+          es: `Completados · Para revisar · ${snapshot.completed.length}`,
+          en: `Completed · Ready · ${snapshot.completed.length}`,
+          zh: `已完成 · 可验收 · ${snapshot.completed.length}`
+        })
+      })
       for (const item of snapshot.completed) {
         rows.push({ kind: 'completed', item })
       }
@@ -134,13 +180,27 @@ export function buildMainRows(snapshot: BoardSnapshot | null, tab: 'issues' | 'p
     const openPrs = snapshot.pullRequests.filter((p) => p.state === 'OPEN')
     const closedPrs = snapshot.pullRequests.filter((p) => p.state !== 'OPEN')
     if (openPrs.length > 0) {
-      rows.push({ kind: 'section', label: `打开中 PR · ${openPrs.length}` })
+      rows.push({
+        kind: 'section',
+        label: pick({
+          es: `PRs abiertos · ${openPrs.length}`,
+          en: `Open PRs · ${openPrs.length}`,
+          zh: `打开中 PR · ${openPrs.length}`
+        })
+      })
       for (const item of openPrs) {
         rows.push({ kind: 'pr', item })
       }
     }
     if (closedPrs.length > 0) {
-      rows.push({ kind: 'section', label: `历史 PR · ${closedPrs.length}` })
+      rows.push({
+        kind: 'section',
+        label: pick({
+          es: `Historial de PRs · ${closedPrs.length}`,
+          en: `PR History · ${closedPrs.length}`,
+          zh: `历史 PR · ${closedPrs.length}`
+        })
+      })
       for (const item of closedPrs) {
         rows.push({ kind: 'pr', item })
       }
@@ -237,10 +297,10 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   const repoLabel = snap?.repository ? ` ${snap.repository}` : ''
   const agentName = snap?.defaultAgent || snap?.preferredAgent || 'Agent'
   const syncText = state.loading
-    ? '同步中…'
+    ? pick({ es: 'Sincronizando…', en: 'Syncing…', zh: '同步中…' })
     : snap
-      ? formatRelativeTime(snap.syncedAt) || '刚刚'
-      : '加载中…'
+      ? formatRelativeTime(snap.syncedAt) || pick({ es: 'ahora', en: 'now', zh: '刚刚' })
+      : pick({ es: 'Cargando…', en: 'Loading…', zh: '加载中…' })
   const rightStatus = `${agentName} · ${syncText}`
   const rightStatusW = stringDisplayWidth(rightStatus)
 
@@ -255,12 +315,18 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
     if (snap.autopilotInstalled && snap.autopilotRunning) {
       const badgeStart = col
       const maxBadgeW = Math.max(0, width - col - rightStatusW - 3)
-      const activeLabel = snap.workerMode === 'lite' ? '● 自动处理·Lite' : '● 自动处理'
+      const activeLabel =
+        snap.workerMode === 'lite'
+          ? pick({ es: '● Autopilot·Lite', en: '● Autopilot·Lite', zh: '● 自动处理·Lite' })
+          : pick({ es: '● Autopilot activo', en: '● Autopilot On', zh: '● 自动处理' })
       const activeW = buf.writeText(col, 0, activeLabel, PALETTE.green, maxBadgeW)
       col += activeW
       const remainW = Math.max(0, maxBadgeW - activeW)
+      const pauseLabel = pick({ es: ' [Pausar]', en: ' [Pause]', zh: ' [关闭]' })
       const stopW =
-        remainW >= 7 ? buf.writeText(col, 0, ' [关闭]', PALETTE.dim, remainW) : 0
+        remainW >= stringDisplayWidth(pauseLabel)
+          ? buf.writeText(col, 0, pauseLabel, PALETTE.dim, remainW)
+          : 0
       col += stopW
       const totalW = activeW + stopW
       if (totalW > 0) {
@@ -270,7 +336,11 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
       const autoW = buf.writeText(
         col,
         0,
-        '○ 已暂停自动处理 [开启]',
+        pick({
+          es: '○ Autopilot en pausa [Activar]',
+          en: '○ Autopilot Paused [Enable]',
+          zh: '○ 已暂停自动处理 [开启]'
+        }),
         PALETTE.amber,
         Math.max(0, width - col - rightStatusW - 3)
       )
@@ -282,7 +352,11 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
       const autoW = buf.writeText(
         col,
         0,
-        '○ 未开启自动处理',
+        pick({
+          es: '○ Autopilot desactivado [Activar]',
+          en: '○ Autopilot Off [Enable]',
+          zh: '○ 未开启自动处理'
+        }),
         PALETTE.amber,
         Math.max(0, width - col - rightStatusW - 3)
       )
@@ -292,7 +366,12 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
       }
     }
   } else if (state.loading) {
-    col += buf.writeText(col, 0, '◌ 同步中…', PALETTE.amber)
+    col += buf.writeText(
+      col,
+      0,
+      pick({ es: '◌ Sincronizando…', en: '◌ Syncing…', zh: '◌ 同步中…' }),
+      PALETTE.amber
+    )
   }
 
   const rightXStart = Math.max(col + 1, width - rightStatusW - 1)
@@ -359,7 +438,11 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
     buf.drawLinkButton(
       tabX,
       contentTop,
-      `待处理 ${attCount}`,
+      pick({
+        es: `Pendientes ${attCount}`,
+        en: `Needs You ${attCount}`,
+        zh: `待处理 ${attCount}`
+      }),
       state.activePane === 'attention' ? PALETTE.tabActive : PALETTE.tabInactive,
       'focus-pane',
       'attention'
@@ -379,7 +462,14 @@ export function renderTui(state: TuiState, width: number, height: number): Scree
   // ── Right Pane: Needs You (desktop split) ─────────────────────────────────
   if (splitMode) {
     const attCount = snap?.needsYou.length ?? 0
-    const attTitle = attCount > 0 ? `● 待处理 ${attCount}` : '待处理'
+    const attTitle =
+      attCount > 0
+        ? pick({
+            es: `● Pendientes ${attCount}`,
+            en: `● Needs You ${attCount}`,
+            zh: `● 待处理 ${attCount}`
+          })
+        : pick({ es: 'Pendientes', en: 'Needs You', zh: '待处理' })
     const attStyle = attCount > 0 ? PALETTE.accentBold : PALETTE.dim
     buf.writeText(rightX + 2, contentTop, attTitle, attStyle, rightW - 3)
     buf.addHitBox(rightX, contentTop, rightW, contentHeight, 'focus-pane', 'attention')
@@ -461,7 +551,7 @@ function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number
   let cx = 1
 
   if (!isLocalMode) {
-    const kindText = `● ${KIND_LABELS[c.kind]}`
+    const kindText = `● ${getKindLabel(c.kind)}`
     const kindW = buf.writeText(cx, y, kindText, KIND_STYLES[c.kind], Math.max(0, width - cx - 1))
     if (kindW > 0) {
       buf.addHitBox(cx, y, kindW, 1, 'cycle-issue-kind')
@@ -473,7 +563,7 @@ function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number
     if (!isLocalMode) {
       cx += buf.writeText(cx, y, ' · ', PALETTE.dim, Math.max(0, width - cx - 1))
     }
-    const modeDisplay = MODE_DISPLAY[c.mode]
+    const modeDisplay = getModeDisplay(c.mode)
     const modeW = buf.writeText(
       cx,
       y,
@@ -489,7 +579,17 @@ function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number
 
   if (c.followUpOf !== null && cx < width - 6) {
     cx += buf.writeText(cx, y, ' · ', PALETTE.dim, Math.max(0, width - cx - 1))
-    cx += buf.writeText(cx, y, `追提 #${c.followUpOf}`, PALETTE.amber, Math.max(0, width - cx - 1))
+    cx += buf.writeText(
+      cx,
+      y,
+      pick({
+        es: `Seguimiento #${c.followUpOf}`,
+        en: `Follow-up #${c.followUpOf}`,
+        zh: `追提 #${c.followUpOf}`
+      }),
+      PALETTE.amber,
+      Math.max(0, width - cx - 1)
+    )
   }
 
   const rightBudget = Math.max(0, width - cx - 3)
@@ -503,7 +603,11 @@ function renderFooterStatusBar(buf: ScreenBuffer, state: TuiState, width: number
   }
 
   if (!isLocalMode) {
-    const rightHint = '⇧Tab 切换'
+    const rightHint = pick({
+      es: '⇧Tab cambiar tipo · clic en modo',
+      en: '⇧Tab switch kind',
+      zh: '⇧Tab 切换'
+    })
     const rightHintW = stringDisplayWidth(rightHint)
     if (rightHintW <= rightBudget) {
       buf.writeText(width - rightHintW - 1, y, rightHint, PALETTE.dim, rightHintW)
@@ -533,14 +637,30 @@ function renderBottomComposer(
 
   if (c.submitting) {
     buf.writeText(promptX, y + 1, '◌', PALETTE.amber, 2)
-    buf.writeText(textAreaX, y + 1, '正在提交…', PALETTE.amber, textAreaW)
+    buf.writeText(
+      textAreaX,
+      y + 1,
+      pick({ es: 'Enviando…', en: 'Submitting…', zh: '正在提交…' }),
+      PALETTE.amber,
+      textAreaW
+    )
     return
   }
 
   buf.writeText(promptX, y + 1, '❯', isActive ? PALETTE.accentBold : PALETTE.dim, 2)
 
   if (!c.text) {
-    buf.writeText(textAreaX, y + 1, '输入需求，或 / 命令…', PALETTE.dim, textAreaW)
+    buf.writeText(
+      textAreaX,
+      y + 1,
+      pick({
+        es: 'Escribí qué necesitás hacer, o / para ver comandos…',
+        en: 'Describe a task, or type / for commands…',
+        zh: '输入需求，或 / 命令…'
+      }),
+      PALETTE.dim,
+      textAreaW
+    )
     if (isActive) {
       buf.setCursor(textAreaX, y + 1)
     }
@@ -582,7 +702,7 @@ function renderSlashMenu(
     buf.writeText(
       3,
       slashTop + 1,
-      '无匹配命令',
+      pick({ es: 'Sin comandos coincidentes', en: 'No matching commands', zh: '无匹配命令' }),
       PALETTE.muted,
       Math.max(4, width - 4)
     )
@@ -654,10 +774,10 @@ function renderMainList(
   const rows = buildMainRows(snap, state.activeTab)
   if (rows.length === 0) {
     const emptyMsg = state.loading
-      ? '同步中…'
+      ? pick({ es: 'Sincronizando…', en: 'Syncing…', zh: '同步中…' })
       : state.activeTab === 'issues'
-        ? '暂无任务'
-        : '暂无 PR'
+        ? pick({ es: 'Sin tareas activas', en: 'No issues yet', zh: '暂无任务' })
+        : pick({ es: 'Sin Pull Requests', en: 'No pull requests', zh: '暂无 PR' })
     buf.writeText(x, y + 1, emptyMsg, PALETTE.dim, w)
     return
   }
@@ -752,7 +872,13 @@ function renderAttentionPane(
 ) {
   const items = state.snapshot?.needsYou ?? []
   if (items.length === 0) {
-    buf.writeText(x, y + 1, '✓ 暂无待处理', PALETTE.dim, w)
+    buf.writeText(
+      x,
+      y + 1,
+      pick({ es: '✓ Sin pendientes', en: '✓ All caught up', zh: '✓ 暂无待处理' }),
+      PALETTE.dim,
+      w
+    )
     return
   }
 
@@ -771,12 +897,24 @@ function renderAttentionPane(
 
     const cardTitle =
       item.kind === 'agent-question'
-        ? `${item.agentName} 提问`
+        ? pick({
+            es: `${item.agentName} pregunta`,
+            en: `${item.agentName} asks`,
+            zh: `${item.agentName} 提问`
+          })
         : item.kind === 'system-alert'
           ? item.badge
           : item.rawStatus === 'ready-for-review' || item.rawStatus === 'pr-open'
-            ? `#${item.issueNumber} 待验收`
-            : `#${item.issueNumber} 需关注`
+            ? pick({
+                es: `#${item.issueNumber} Para revisar`,
+                en: `#${item.issueNumber} Ready for review`,
+                zh: `#${item.issueNumber} 待验收`
+              })
+            : pick({
+                es: `#${item.issueNumber} Requiere atención`,
+                en: `#${item.issueNumber} Needs attention`,
+                zh: `#${item.issueNumber} 需关注`
+              })
     const titleStyle =
       item.kind === 'agent-question'
         ? PALETTE.accentBold
@@ -799,35 +937,110 @@ function renderAttentionPane(
     const btnY = curY + 2 + wrapped.length
     let bx = x + 2
     if (busy) {
-      buf.writeText(bx, btnY, '处理中…', PALETTE.amber, w - 4)
+      buf.writeText(
+        bx,
+        btnY,
+        pick({ es: 'Procesando…', en: 'Working…', zh: '处理中…' }),
+        PALETTE.amber,
+        w - 4
+      )
     } else if (item.kind === 'agent-question') {
-      bx += buf.drawButton(bx, btnY, '同意继续', PALETTE.accentBg, 'approve-agent', item) + 2
-      buf.drawLinkButton(bx, btnY, '[回复]', PALETTE.muted, 'open-reply', item)
+      bx +=
+        buf.drawButton(
+          bx,
+          btnY,
+          pick({ es: 'Aprobar y seguir', en: 'Approve & continue', zh: '同意继续' }),
+          PALETTE.accentBg,
+          'approve-agent',
+          item
+        ) + 2
+      buf.drawLinkButton(
+        bx,
+        btnY,
+        pick({ es: '[Responder]', en: '[Reply]', zh: '[回复]' }),
+        PALETTE.muted,
+        'open-reply',
+        item
+      )
     } else if (item.kind === 'system-alert') {
       if (item.syncBranch) {
         bx +=
-          buf.drawButton(bx, btnY, '一键自动合并', PALETTE.accentBg, 'sync-diverged-branch', item) + 2
+          buf.drawButton(
+            bx,
+            btnY,
+            pick({ es: 'Auto-fusionar rama', en: 'Auto-merge branch', zh: '一键自动合并' }),
+            PALETTE.accentBg,
+            'sync-diverged-branch',
+            item
+          ) + 2
       } else if (item.retryTitle) {
-        const retryLabel = item.retryMode === 'local' ? '重新直改' : '重新提单'
+        const retryLabel =
+          item.retryMode === 'local'
+            ? pick({ es: 'Reintentar local', en: 'Retry local', zh: '重新直改' })
+            : pick({ es: 'Reintentar envío', en: 'Retry handoff', zh: '重新提单' })
         bx +=
           buf.drawButton(bx, btnY, retryLabel, PALETTE.accentBg, 'retry-handoff-alert', item) + 2
       } else if (item.canOpenSettings) {
-        bx += buf.drawButton(bx, btnY, '打开设置', PALETTE.accentBg, 'open-settings') + 2
+        bx +=
+          buf.drawButton(
+            bx,
+            btnY,
+            pick({ es: 'Ajustes', en: 'Settings', zh: '打开设置' }),
+            PALETTE.accentBg,
+            'open-settings'
+          ) + 2
       }
       if (item.canDismiss) {
-        buf.drawLinkButton(bx, btnY, '[忽略]', PALETTE.muted, 'dismiss-alert', item.id)
+        buf.drawLinkButton(
+          bx,
+          btnY,
+          pick({ es: '[Ignorar]', en: '[Dismiss]', zh: '[忽略]' }),
+          PALETTE.muted,
+          'dismiss-alert',
+          item.id
+        )
       }
     } else {
       if (item.canRetry) {
-        bx += buf.drawButton(bx, btnY, '重试', PALETTE.accentBg, 'issue-retry', item) + 2
+        bx +=
+          buf.drawButton(
+            bx,
+            btnY,
+            pick({ es: 'Reintentar', en: 'Retry', zh: '重试' }),
+            PALETTE.accentBg,
+            'issue-retry',
+            item
+          ) + 2
       }
       if (item.canDiscard) {
-        bx += buf.drawLinkButton(bx, btnY, '[放弃]', PALETTE.muted, 'issue-discard', item) + 2
+        bx +=
+          buf.drawLinkButton(
+            bx,
+            btnY,
+            pick({ es: '[Descartar]', en: '[Discard]', zh: '[放弃]' }),
+            PALETTE.muted,
+            'issue-discard',
+            item
+          ) + 2
       }
       if (item.prUrl) {
-        buf.drawLinkButton(bx, btnY, '[打开 PR]', PALETTE.muted, 'open-url', item.prUrl)
+        buf.drawLinkButton(
+          bx,
+          btnY,
+          pick({ es: '[Abrir PR]', en: '[Open PR]', zh: '[打开 PR]' }),
+          PALETTE.muted,
+          'open-url',
+          item.prUrl
+        )
       } else if (item.url) {
-        buf.drawLinkButton(bx, btnY, '[打开]', PALETTE.muted, 'open-url', item.url)
+        buf.drawLinkButton(
+          bx,
+          btnY,
+          pick({ es: '[Abrir]', en: '[Open]', zh: '[打开]' }),
+          PALETTE.muted,
+          'open-url',
+          item.url
+        )
       }
     }
 
@@ -851,8 +1064,19 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
   buf.addHitBox(0, 0, width, height, 'close-modal')
 
   const titleMap = {
-    settings: '配置执行 Agent',
-    reply: modal.type === 'reply' ? `回复 ${modal.item.agentName}` : '回复助手'
+    settings: pick({
+      es: 'Configurar Agente Ejecutor',
+      en: 'Configure Execution Agent',
+      zh: '配置执行 Agent'
+    }),
+    reply:
+      modal.type === 'reply'
+        ? pick({
+            es: `Responder a ${modal.item.agentName}`,
+            en: `Reply to ${modal.item.agentName}`,
+            zh: `回复 ${modal.item.agentName}`
+          })
+        : pick({ es: 'Responder', en: 'Reply', zh: '回复助手' })
   }
 
   buf.drawBox(mx, my, mw, mh, {
@@ -879,7 +1103,11 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
     buf.writeText(
       ix,
       my + 2,
-      '↑↓ 选择 · Enter 设为默认 · Space 切换允许',
+      pick({
+        es: '↑↓ elegir · Enter predeterminado · Espacio permitir',
+        en: '↑↓ select · Enter set default · Space toggle allowed',
+        zh: '↑↓ 选择 · Enter 设为默认 · Space 切换允许'
+      }),
       PALETTE.dim,
       iw
     )
@@ -894,7 +1122,10 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
       const prefix = isCur ? '❯ ' : '  '
       let cx = ix
       cx += buf.writeText(cx, rowY, prefix, isCur ? PALETTE.accentBold : PALETTE.dim)
-      const line = `${isDef ? '★ 默认' : '  可选'}  [${isAllowed ? 'x' : ' '}]  ${id}`
+      const defTag = isDef
+        ? pick({ es: '★ Predet.', en: '★ Default', zh: '★ 默认' })
+        : pick({ es: '  Opcional', en: '  Allowed', zh: '  可选' })
+      const line = `${defTag}  [${isAllowed ? 'x' : ' '}]  ${id}`
       buf.writeText(cx, rowY, line, st, iw - (cx - ix))
       buf.addHitBox(ix, rowY, iw, 1, 'settings-click-agent', i)
     }
@@ -904,11 +1135,19 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
       buf.drawButton(
         fx,
         footerY,
-        modal.saving ? '保存中…' : '保存',
+        modal.saving
+          ? pick({ es: 'Guardando…', en: 'Saving…', zh: '保存中…' })
+          : pick({ es: 'Guardar', en: 'Save', zh: '保存' }),
         PALETTE.accentBg,
         'settings-save'
       ) + 2
-    buf.drawLinkButton(fx, footerY, '[取消]', PALETTE.muted, 'close-modal')
+    buf.drawLinkButton(
+      fx,
+      footerY,
+      pick({ es: '[Cancelar]', en: '[Cancel]', zh: '[取消]' }),
+      PALETTE.muted,
+      'close-modal'
+    )
     return
   }
 
@@ -922,7 +1161,9 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
     const inputX = ix + 2
     const inputY = inputTop + 1
     const inputW = Math.max(1, iw - 2)
-    const rLines = modal.text ? wrapTextToWidth(modal.text, inputW, 2) : ['输入回复…']
+    const rLines = modal.text
+      ? wrapTextToWidth(modal.text, inputW, 2)
+      : [pick({ es: 'Escribí tu respuesta…', en: 'Type your reply…', zh: '输入回复…' })]
     rLines.forEach((l, i) =>
       writeLineWithAttachmentTokens(
         buf,
@@ -947,12 +1188,27 @@ function renderModal(buf: ScreenBuffer, state: TuiState, width: number, height: 
       buf.drawButton(
         fx,
         footerY,
-        modal.sending ? '发送中…' : '发送',
+        modal.sending
+          ? pick({ es: 'Enviando…', en: 'Sending…', zh: '发送中…' })
+          : pick({ es: 'Enviar', en: 'Send', zh: '发送' }),
         PALETTE.accentBg,
         'reply-submit'
       ) + 2
-    fx += buf.drawLinkButton(fx, footerY, '[贴图 ^V]', PALETTE.muted, 'reply-paste-image') + 2
-    buf.drawLinkButton(fx, footerY, '[取消]', PALETTE.muted, 'close-modal')
+    fx +=
+      buf.drawLinkButton(
+        fx,
+        footerY,
+        pick({ es: '[Pegar ^V]', en: '[Paste ^V]', zh: '[贴图 ^V]' }),
+        PALETTE.muted,
+        'reply-paste-image'
+      ) + 2
+    buf.drawLinkButton(
+      fx,
+      footerY,
+      pick({ es: '[Cancelar]', en: '[Cancel]', zh: '[取消]' }),
+      PALETTE.muted,
+      'close-modal'
+    )
     return
   }
 }

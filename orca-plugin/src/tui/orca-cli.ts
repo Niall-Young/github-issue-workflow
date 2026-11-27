@@ -5,6 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, statSync, unlinkSync, writeFileSyn
 import { homedir } from 'node:os'
 import { basename, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { pick } from '../i18n'
 import {
   buildAutopilotInstallArgs,
   buildHandoffPrompt,
@@ -391,12 +392,22 @@ export async function collectOrcaAgentState(
         }
       }
       if (!question) {
-        question = '后台助手正在等待你的确认或输入，可以直接回复指示，或点击「同意继续」。'
+        question = pick({
+          es: 'El agente espera tu confirmación. Podés responderle directamente o pulsar «Aprobar y seguir».',
+          en: 'Background agent is waiting for your input. Reply directly or click "Approve & continue".',
+          zh: '后台助手正在等待你的确认或输入，可以直接回复指示，或点击「同意继续」。'
+        })
       }
       questions.push({
         id: `agent-${handle || agent.orcaSessionId || Math.random().toString(36).slice(2)}`,
         kind: 'agent-question',
-        title: resolved.title || `${resolved.workspace} 中的助手需要你确认`,
+        title:
+          resolved.title ||
+          pick({
+            es: `El agente en ${resolved.workspace} necesita tu confirmación`,
+            en: `Agent in ${resolved.workspace} needs your confirmation`,
+            zh: `${resolved.workspace} 中的助手需要你确认`
+          }),
         question,
         terminalId: handle,
         workspaceId: resolved.worktreeId,
@@ -509,9 +520,13 @@ export async function loadBoardSnapshot(
       id: `handoff-exited-${terminalId}`,
       kind: 'system-alert',
       severity: 'error',
-      badge: '提单中断',
+      badge: pick({ es: 'Envío interrumpido', en: 'Handoff Interrupted', zh: '提单中断' }),
       title: entry.title,
-      reason: '提单终端已提前关闭且未检测到新 Issue，可能因 CLI 报错、网络中断或误关终端导致。',
+      reason: pick({
+        es: 'La terminal de creación de Issue se cerró sin generar un Issue nuevo (posible error de CLI, red o cierre manual).',
+        en: 'Handoff terminal closed before creating an Issue (possible CLI/network error or manual close).',
+        zh: '提单终端已提前关闭且未检测到新 Issue，可能因 CLI 报错、网络中断或误关终端导致。'
+      }),
       updatedAt: entry.exitedAt,
       canDismiss: true,
       retryTitle: entry.title
@@ -525,9 +540,13 @@ export async function loadBoardSnapshot(
       id: `local-exited-${terminalId}`,
       kind: 'system-alert',
       severity: 'error',
-      badge: '本地直改中断',
+      badge: pick({ es: 'Cambio local interrumpido', en: 'Local Edit Interrupted', zh: '本地直改中断' }),
       title: entry.title,
-      reason: '本地直改终端已提前关闭且未完成收尾，已自动清理本地锁。请检查本地改动或重新发起。',
+      reason: pick({
+        es: 'La terminal de cambio local se cerró antes de finalizar; se limpió el bloqueo local. Revisá tus cambios o reintentá.',
+        en: 'Local direct-edit terminal closed early; local lock was cleaned up. Check local diff or retry.',
+        zh: '本地直改终端已提前关闭且未完成收尾，已自动清理本地锁。请检查本地改动或重新发起。'
+      }),
       updatedAt: entry.exitedAt,
       canDismiss: true,
       retryTitle: entry.title,
@@ -679,7 +698,11 @@ export async function loadBoardSnapshot(
           issueNumber: null,
           title: entry.title,
           url: '',
-          statusLabel: `本地直改中 (${entry.agent})`,
+          statusLabel: pick({
+            es: `Cambio local (${entry.agent})`,
+            en: `Local edit (${entry.agent})`,
+            zh: `本地直改中 (${entry.agent})`
+          }),
           updatedAt: entry.startedAt
         })
         continue
@@ -721,7 +744,11 @@ export async function loadBoardSnapshot(
               title: entry.title,
               question: output
                 ? extractTerminalQuestion(output)
-                : '本地直改会话已暂停但尚未完成收尾（本地锁未释放），请查看终端输出并回复或继续。',
+                : pick({
+                    es: 'La sesión local está en pausa con el bloqueo aún activo; revisá la terminal y respondé o continuá.',
+                    en: 'Local session paused before releasing lock; inspect terminal output and reply or continue.',
+                    zh: '本地直改会话已暂停但尚未完成收尾（本地锁未释放），请查看终端输出并回复或继续。'
+                  }),
               terminalId: effectiveHandle,
               workspaceId: resolved?.worktreeId || '',
               agentName: entry.agent,
@@ -736,7 +763,11 @@ export async function loadBoardSnapshot(
             issueNumber: null,
             title: entry.title,
             url: '',
-            statusLabel: `本地直改等待确认 (${entry.agent})`,
+            statusLabel: pick({
+              es: `Cambio local esperando (${entry.agent})`,
+              en: `Local edit waiting (${entry.agent})`,
+              zh: `本地直改等待确认 (${entry.agent})`
+            }),
             updatedAt: new Date(resolved?.updatedAt || entry.startedMs).toISOString()
           })
           continue
@@ -783,12 +814,20 @@ export async function loadBoardSnapshot(
         const stallMinutes = Math.floor((now - (entry.lastActivityMs ?? entry.startedMs)) / 60_000)
         const tail = latestPreview
           ? extractTerminalQuestion(latestPreview)
-          : '终端长时间无新输出，可以直接回复催促或检查终端状态。'
+          : pick({
+              es: 'Sin salida nueva hace rato; podés responder o revisar la terminal.',
+              en: 'No new terminal output for a while; reply or inspect terminal.',
+              zh: '终端长时间无新输出，可以直接回复催促或检查终端状态。'
+            })
         const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
           id: `agent-${effectiveHandle}`,
           kind: 'agent-question',
           title: entry.title,
-          question: `本地直改任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+          question: pick({
+            es: `Cambio local sin salida nueva hace ${stallMinutes} min:\n${tail}`,
+            en: `Local task has had no output for ${stallMinutes}m:\n${tail}`,
+            zh: `本地直改任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`
+          }),
           terminalId: effectiveHandle,
           workspaceId: resolved?.worktreeId || '',
           agentName: entry.agent,
@@ -805,10 +844,22 @@ export async function loadBoardSnapshot(
         title: entry.title,
         url: '',
         statusLabel: waitingLocal
-          ? `本地直改等待确认 (${entry.agent})`
+          ? pick({
+              es: `Cambio local esperando (${entry.agent})`,
+              en: `Local edit waiting (${entry.agent})`,
+              zh: `本地直改等待确认 (${entry.agent})`
+            })
           : isStalled
-            ? `本地直改可能卡住 (${entry.agent})`
-            : `本地直改中 (${entry.agent})`,
+            ? pick({
+                es: `Cambio local demorado (${entry.agent})`,
+                en: `Local edit stalled (${entry.agent})`,
+                zh: `本地直改可能卡住 (${entry.agent})`
+              })
+            : pick({
+                es: `Cambio local (${entry.agent})`,
+                en: `Local edit (${entry.agent})`,
+                zh: `本地直改中 (${entry.agent})`
+              }),
         updatedAt: new Date(resolved?.updatedAt || entry.startedMs).toISOString()
       })
       continue
@@ -828,7 +879,11 @@ export async function loadBoardSnapshot(
         issueNumber: null,
         title: entry.title,
         url: '',
-        statusLabel: `Skill 整理提单中 (${entry.agent})`,
+        statusLabel: pick({
+          es: `Redactando Issue (${entry.agent})`,
+          en: `Drafting Issue (${entry.agent})`,
+          zh: `Skill 整理提单中 (${entry.agent})`
+        }),
         updatedAt: entry.startedAt
       })
       continue
@@ -896,7 +951,11 @@ export async function loadBoardSnapshot(
         issueNumber: null,
         title: entry.title,
         url: '',
-        statusLabel: `Skill 等待确认 (${entry.agent})`,
+        statusLabel: pick({
+          es: `Esperando confirmación (${entry.agent})`,
+          en: `Awaiting confirmation (${entry.agent})`,
+          zh: `Skill 等待确认 (${entry.agent})`
+        }),
         updatedAt: new Date(resolved?.updatedAt || entry.startedMs).toISOString()
       })
       continue
@@ -940,12 +999,20 @@ export async function loadBoardSnapshot(
       const stallMinutes = Math.floor((now - (entry.lastActivityMs ?? entry.startedMs)) / 60_000)
       const tail = latestPreview
         ? extractTerminalQuestion(latestPreview)
-        : '终端长时间无新输出，可以直接回复催促或检查终端状态。'
+        : pick({
+            es: 'Sin salida nueva hace rato; podés responder o revisar la terminal.',
+            en: 'No new terminal output for a while; reply or inspect terminal.',
+            zh: '终端长时间无新输出，可以直接回复催促或检查终端状态。'
+          })
       const questionItem: Extract<NeedsYouItem, { kind: 'agent-question' }> = {
         id: `agent-${effectiveHandle}`,
         kind: 'agent-question',
         title: entry.title,
-        question: `提单任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+        question: pick({
+          es: `Creación de Issue sin salida nueva hace ${stallMinutes} min:\n${tail}`,
+          en: `Issue handoff has had no output for ${stallMinutes}m:\n${tail}`,
+          zh: `提单任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`
+        }),
         terminalId: effectiveHandle,
         workspaceId: resolved?.worktreeId || '',
         agentName: entry.agent,
@@ -962,10 +1029,22 @@ export async function loadBoardSnapshot(
       title: entry.title,
       url: '',
       statusLabel: waitingConfirmation
-        ? `Skill 等待确认 (${entry.agent})`
+        ? pick({
+            es: `Esperando confirmación (${entry.agent})`,
+            en: `Awaiting confirmation (${entry.agent})`,
+            zh: `Skill 等待确认 (${entry.agent})`
+          })
         : isStalled
-          ? `Skill 可能卡住 (${entry.agent})`
-          : `Skill 整理提单中 (${entry.agent})`,
+          ? pick({
+              es: `Redacción demorada (${entry.agent})`,
+              en: `Handoff stalled (${entry.agent})`,
+              zh: `Skill 可能卡住 (${entry.agent})`
+            })
+          : pick({
+              es: `Redactando Issue (${entry.agent})`,
+              en: `Drafting Issue (${entry.agent})`,
+              zh: `Skill 整理提单中 (${entry.agent})`
+            }),
       updatedAt: entry.startedAt
     })
   }
@@ -983,7 +1062,13 @@ export async function loadBoardSnapshot(
     if (now - agent.updatedAt > DISCOVERED_HANDOFF_MAX_AGE_MS) continue
 
     const effectiveHandle = agent.handle
-    const displayTitle = agent.title || 'Skill 规范提单任务'
+    const displayTitle =
+      agent.title ||
+      pick({
+        es: 'Redacción guiada de Issue',
+        en: 'Guided Issue handoff',
+        zh: 'Skill 规范提单任务'
+      })
 
     if (agent.state === 'done' || agent.state === 'idle') {
       let output = [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
@@ -1028,7 +1113,11 @@ export async function loadBoardSnapshot(
         issueNumber: null,
         title: displayTitle,
         url: '',
-        statusLabel: `Skill 等待确认 (${agent.agent})`,
+        statusLabel: pick({
+          es: `Esperando confirmación (${agent.agent})`,
+          en: `Awaiting confirmation (${agent.agent})`,
+          zh: `Skill 等待确认 (${agent.agent})`
+        }),
         updatedAt: new Date(agent.updatedAt).toISOString()
       })
       continue
@@ -1047,7 +1136,11 @@ export async function loadBoardSnapshot(
         id: `agent-${effectiveHandle}`,
         kind: 'agent-question',
         title: displayTitle,
-        question: `提单任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+        question: pick({
+          es: `Creación de Issue sin salida nueva hace ${stallMinutes} min:\n${tail}`,
+          en: `Issue handoff has had no output for ${stallMinutes}m:\n${tail}`,
+          zh: `提单任务已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`
+        }),
         terminalId: effectiveHandle,
         workspaceId: agent.worktreeId,
         agentName: agent.agent,
@@ -1064,10 +1157,22 @@ export async function loadBoardSnapshot(
       title: displayTitle,
       url: '',
       statusLabel: waitingConfirmation
-        ? `Skill 等待确认 (${agent.agent})`
+        ? pick({
+            es: `Esperando confirmación (${agent.agent})`,
+            en: `Awaiting confirmation (${agent.agent})`,
+            zh: `Skill 等待确认 (${agent.agent})`
+          })
         : isStalled
-          ? `Skill 可能卡住 (${agent.agent})`
-          : `Skill 整理提单中 (${agent.agent})`,
+          ? pick({
+              es: `Redacción demorada (${agent.agent})`,
+              en: `Handoff stalled (${agent.agent})`,
+              zh: `Skill 可能卡住 (${agent.agent})`
+            })
+          : pick({
+              es: `Redactando Issue (${agent.agent})`,
+              en: `Drafting Issue (${agent.agent})`,
+              zh: `Skill 整理提单中 (${agent.agent})`
+            }),
       updatedAt: new Date(agent.updatedAt).toISOString()
     })
   }
@@ -1138,7 +1243,13 @@ export async function loadBoardSnapshot(
     if (now - agent.updatedAt > DISCOVERED_HANDOFF_MAX_AGE_MS) continue
 
     const effectiveHandle = agent.handle
-    const displayTitle = agent.title || `本地开发会话 (${agent.agent})`
+    const displayTitle =
+      agent.title ||
+      pick({
+        es: `Sesión local (${agent.agent})`,
+        en: `Local session (${agent.agent})`,
+        zh: `本地开发会话 (${agent.agent})`
+      })
 
     if (agent.state === 'done' || agent.state === 'idle') {
       let output = [agent.lastAssistantMessage, agent.preview].filter(Boolean).join('\n')
@@ -1169,7 +1280,11 @@ export async function loadBoardSnapshot(
         issueNumber: null,
         title: displayTitle,
         url: '',
-        statusLabel: `本地会话需确认 (${agent.agent})`,
+        statusLabel: pick({
+          es: `Sesión local requiere atención (${agent.agent})`,
+          en: `Local session needs review (${agent.agent})`,
+          zh: `本地会话需确认 (${agent.agent})`
+        }),
         updatedAt: new Date(agent.updatedAt).toISOString()
       })
       continue
@@ -1188,7 +1303,11 @@ export async function loadBoardSnapshot(
         id: `agent-${effectiveHandle}`,
         kind: 'agent-question',
         title: displayTitle,
-        question: `本地会话已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`,
+        question: pick({
+          es: `Sesión local sin salida nueva hace ${stallMinutes} min:\n${tail}`,
+          en: `Local session has had no output for ${stallMinutes}m:\n${tail}`,
+          zh: `本地会话已超过 ${stallMinutes} 分钟无新输出，可能已卡住：\n${tail}`
+        }),
         terminalId: effectiveHandle,
         workspaceId: agent.worktreeId,
         agentName: agent.agent,
@@ -1205,10 +1324,22 @@ export async function loadBoardSnapshot(
       title: displayTitle,
       url: '',
       statusLabel: waitingLocal
-        ? `本地会话等待确认 (${agent.agent})`
+        ? pick({
+            es: `Sesión local esperando (${agent.agent})`,
+            en: `Local session waiting (${agent.agent})`,
+            zh: `本地会话等待确认 (${agent.agent})`
+          })
         : isStalled
-          ? `本地会话可能卡住 (${agent.agent})`
-          : `本地会话中 (${agent.agent})`,
+          ? pick({
+              es: `Sesión local demorada (${agent.agent})`,
+              en: `Local session stalled (${agent.agent})`,
+              zh: `本地会话可能卡住 (${agent.agent})`
+            })
+          : pick({
+              es: `Sesión local activa (${agent.agent})`,
+              en: `Local session active (${agent.agent})`,
+              zh: `本地会话中 (${agent.agent})`
+            }),
       updatedAt: new Date(agent.updatedAt).toISOString()
     })
   }
@@ -1276,7 +1407,13 @@ export async function submitIssueFromTui(params: {
   const runner = params.runner ?? defaultRunner
   const title = params.title.trim()
   if (!title) {
-    throw new Error('请输入任务标题或问题描述')
+    throw new Error(
+      pick({
+        es: 'Ingresá un título o descripción de la tarea',
+        en: 'Please enter a task title or description',
+        zh: '请输入任务标题或问题描述'
+      })
+    )
   }
 
   const savedAttachments = params.savedAttachments ?? []
@@ -1350,7 +1487,11 @@ export async function submitIssueFromTui(params: {
       throw new Error(
         launchRes.stderr.trim() ||
           launchRes.stdout.trim() ||
-          '无法通过 Orca 启动本地直改 Agent，请确认 Orca 正在运行'
+          pick({
+            es: 'No se pudo iniciar el agente de cambio local en Orca; verificá que Orca esté abierto',
+            en: 'Failed to launch local direct-edit Agent via Orca; ensure Orca is running',
+            zh: '无法通过 Orca 启动本地直改 Agent，请确认 Orca 正在运行'
+          })
       )
     }
 
@@ -1411,7 +1552,11 @@ export async function submitIssueFromTui(params: {
         ? [
             params.details?.trim() || '',
             '',
-            '本地附件路径：',
+            pick({
+              es: 'Rutas de adjuntos locales:',
+              en: 'Local attachment paths:',
+              zh: '本地附件路径：'
+            }),
             ...savedAttachments.map((a) => `- ${a.path} (${a.name})`)
           ]
             .filter(Boolean)
@@ -1468,7 +1613,11 @@ export async function submitIssueFromTui(params: {
     throw new Error(
       launchRes.stderr.trim() ||
         launchRes.stdout.trim() ||
-        '无法通过 Orca 启动 Skill 提单 Agent，请确认 Orca 正在运行，或切换为「快速直提」模式'
+        pick({
+          es: 'No se pudo iniciar el agente en Orca; verificá que Orca esté corriendo o cambiá a modo «direct»',
+          en: 'Failed to launch Skill handoff Agent via Orca; ensure Orca is running or switch to "direct" mode',
+          zh: '无法通过 Orca 启动 Skill 提单 Agent，请确认 Orca 正在运行，或切换为「快速直提」模式'
+        })
     )
   }
 
@@ -1511,11 +1660,17 @@ export async function replyToAgentTerminal(
 ): Promise<void> {
   const baseText = message.trim()
   if (!baseText && attachments.length === 0) {
-    throw new Error('回复内容或附件不能为空')
+    throw new Error(
+      pick({
+        es: 'La respuesta o los adjuntos no pueden estar vacíos',
+        en: 'Reply message or attachments cannot be empty',
+        zh: '回复内容或附件不能为空'
+      })
+    )
   }
   const attachmentNote =
     attachments.length > 0
-      ? `\n附件路径：\n${attachments.map((a) => `- ${a.path}`).join('\n')}`
+      ? `\n${pick({ es: 'Adjuntos:', en: 'Attachments:', zh: '附件路径：' })}\n${attachments.map((a) => `- ${a.path}`).join('\n')}`
       : ''
   const payload = `${baseText}${attachmentNote}`.trim()
   const res = await runner(
@@ -1524,7 +1679,11 @@ export async function replyToAgentTerminal(
     { timeoutMs: 10_000 }
   )
   if (res.exitCode !== 0) {
-    throw new Error(res.stderr.trim() || res.stdout.trim() || '发送回复失败')
+    throw new Error(
+      res.stderr.trim() ||
+        res.stdout.trim() ||
+        pick({ es: 'Error al enviar la respuesta', en: 'Failed to send reply', zh: '发送回复失败' })
+    )
   }
 }
 
@@ -1539,7 +1698,13 @@ export async function runIssueAdminAction(
     (autopilot && autopilot.runtimeAdminPath) ||
     findBundledAutopilotAdmin(resolvePluginRootFromTui())
   if (!adminScript) {
-    throw new Error('未找到 autopilot_admin.py，请先安装 github-issue-autopilot')
+    throw new Error(
+      pick({
+        es: 'No se encontró autopilot_admin.py; verificá la instalación de github-issue-autopilot',
+        en: 'autopilot_admin.py not found; please install github-issue-autopilot first',
+        zh: '未找到 autopilot_admin.py，请先安装 github-issue-autopilot'
+      })
+    )
   }
   const res = await runner('python3', [
     adminScript,
@@ -1550,7 +1715,15 @@ export async function runIssueAdminAction(
     issueUrl
   ])
   if (res.exitCode !== 0) {
-    throw new Error(res.stderr.trim() || res.stdout.trim() || `执行 ${action} 失败`)
+    throw new Error(
+      res.stderr.trim() ||
+        res.stdout.trim() ||
+        pick({
+          es: `Falló la acción ${action}`,
+          en: `Failed to execute ${action}`,
+          zh: `执行 ${action} 失败`
+        })
+    )
   }
 }
 
@@ -1567,7 +1740,13 @@ export async function saveAgentConfig(params: {
     findBundledAutopilotAdmin(resolvePluginRootFromTui()) ||
     (existing && existing.runtimeAdminPath)
   if (!adminScript) {
-    throw new Error('未找到 autopilot_admin.py，请先确认已安装 github-issue-autopilot')
+    throw new Error(
+      pick({
+        es: 'No se encontró autopilot_admin.py; verificá la instalación de github-issue-autopilot',
+        en: 'autopilot_admin.py not found; please verify github-issue-autopilot installation',
+        zh: '未找到 autopilot_admin.py，请先确认已安装 github-issue-autopilot'
+      })
+    )
   }
   const normalizedAllowed = Array.from(
     new Set([
@@ -1585,9 +1764,21 @@ export async function saveAgentConfig(params: {
   })
   const res = await runner('python3', args, { timeoutMs: 45_000 })
   if (res.exitCode !== 0) {
-    throw new Error(res.stderr.trim() || res.stdout.trim() || '保存 Agent 配置失败')
+    throw new Error(
+      res.stderr.trim() ||
+        res.stdout.trim() ||
+        pick({
+          es: 'Error al guardar la configuración del agente',
+          en: 'Failed to save Agent configuration',
+          zh: '保存 Agent 配置失败'
+        })
+    )
   }
-  return `已更新执行 Agent 为 ${params.defaultAgent.trim()}（允许：${normalizedAllowed.join(', ')}）`
+  return pick({
+    es: `Agente predeterminado actualizado a ${params.defaultAgent.trim()} (permitidos: ${normalizedAllowed.join(', ')})`,
+    en: `Updated default Agent to ${params.defaultAgent.trim()} (allowed: ${normalizedAllowed.join(', ')})`,
+    zh: `已更新执行 Agent 为 ${params.defaultAgent.trim()}（允许：${normalizedAllowed.join(', ')}）`
+  })
 }
 
 export async function stopAutopilot(params: {
@@ -1600,7 +1791,13 @@ export async function stopAutopilot(params: {
     findBundledAutopilotAdmin(resolvePluginRootFromTui()) ||
     (existing && existing.runtimeAdminPath)
   if (!adminScript) {
-    throw new Error('未找到 autopilot_admin.py，请先确认已安装 github-issue-autopilot')
+    throw new Error(
+      pick({
+        es: 'No se encontró autopilot_admin.py; verificá la instalación de github-issue-autopilot',
+        en: 'autopilot_admin.py not found; please verify github-issue-autopilot installation',
+        zh: '未找到 autopilot_admin.py，请先确认已安装 github-issue-autopilot'
+      })
+    )
   }
   const res = await runner(
     'python3',
@@ -1608,9 +1805,21 @@ export async function stopAutopilot(params: {
     { timeoutMs: 30_000 }
   )
   if (res.exitCode !== 0) {
-    throw new Error(res.stderr.trim() || res.stdout.trim() || '暂停自动处理循环失败')
+    throw new Error(
+      res.stderr.trim() ||
+        res.stdout.trim() ||
+        pick({
+          es: 'Error al pausar el bucle de Autopilot',
+          en: 'Failed to pause Autopilot loop',
+          zh: '暂停自动处理循环失败'
+        })
+    )
   }
-  return '已暂停自动处理循环（保留状态，可随时重新开启）'
+  return pick({
+    es: 'Autopilot pausado (se conserva el estado y puede reactivarse en cualquier momento)',
+    en: 'Autopilot paused (state preserved; can be re-enabled anytime)',
+    zh: '已暂停自动处理循环（保留状态，可随时重新开启）'
+  })
 }
 
 export async function syncDivergedBranchFromTui(params: {
@@ -1634,7 +1843,11 @@ export async function syncDivergedBranchFromTui(params: {
       if (rebaseRes.exitCode === 0) {
         return {
           mode: 'auto-rebase',
-          message: `已自动将本地 ${branch} 变基同步到 ${remoteRef}`
+          message: pick({
+            es: `Rama local ${branch} sincronizada por rebase con ${remoteRef}`,
+            en: `Rebased local ${branch} onto ${remoteRef}`,
+            zh: `已自动将本地 ${branch} 变基同步到 ${remoteRef}`
+          })
         }
       }
       await runner('git', ['-C', params.repoPath, 'rebase', '--abort'], { timeoutMs: 5_000 })
@@ -1642,15 +1855,35 @@ export async function syncDivergedBranchFromTui(params: {
   }
 
   const agent = await resolvePreferredAgent(params.defaultAgent, runner)
-  const prompt = [
-    `当前仓库（${params.repoPath}）的本地分支 \`${branch}\` 与远端 \`${remoteRef}\` 分叉（本地领先 ${params.syncBranch.ahead} 个提交、落后 ${params.syncBranch.behind} 个提交）。`,
-    '请帮用户全自动安全同步，不要丢弃用户的任何未提交改动或本地提交：',
-    '1. 先检查 `git status` 与 `git log --left-right --oneline HEAD...origin/' + branch + '`。',
-    '2. 若有未提交改动先妥善保存（如 `git stash push -u`），再执行 `git fetch origin` 与 `git rebase origin/' + branch + '`（若不适合 rebase 可改用 `git merge origin/' + branch + '`）。',
-    '3. 逐一解决所有冲突，同时保留本地与远端的有效改动。',
-    '4. 冲突解完后恢复之前的暂存改动（如有），并运行仓库测试验证通过。',
-    '5. 若工作区干净且测试全部通过，把同步后的 `' + branch + '` 推送到 `origin`，让后续自动同步恢复正常；若遇到需要人工拍板的语义冲突，向用户简明说明。'
-  ].join('\n')
+  const prompt = pick({
+    es: [
+      `La rama local \`${branch}\` del repositorio (${params.repoPath}) divergió de \`${remoteRef}\` (${params.syncBranch.ahead} commit(s) adelante y ${params.syncBranch.behind} atrás).`,
+      'Sincronizá la rama de forma segura sin perder cambios locales ni commits propios:',
+      '1. Revisá `git status` y `git log --left-right --oneline HEAD...origin/' + branch + '`.',
+      '2. Si hay cambios sin commitear, guardalos con `git stash push -u`, luego ejecutá `git fetch origin` y `git rebase origin/' + branch + '` (o `git merge` si corresponde).',
+      '3. Resolvé conflictos preservando los cambios válidos de ambos lados.',
+      '4. Restaurá el stash si había y ejecutá los tests del repositorio.',
+      '5. Si todo pasa limpio, hacé `git push origin ' + branch + '`; si hay un conflicto semántico que requiera decisión del usuario, explicalo brevemente.'
+    ].join('\n'),
+    en: [
+      `Local branch \`${branch}\` in (${params.repoPath}) diverged from \`${remoteRef}\` (${params.syncBranch.ahead} ahead, ${params.syncBranch.behind} behind).`,
+      'Safely sync the branch without losing uncommitted edits or local commits:',
+      '1. Inspect `git status` and `git log --left-right --oneline HEAD...origin/' + branch + '`.',
+      '2. Stash uncommitted edits if any, then `git fetch origin` and `git rebase origin/' + branch + '` (or `git merge` when appropriate).',
+      '3. Resolve conflicts preserving valid local and remote changes.',
+      '4. Restore stashed edits and run repository tests.',
+      '5. Push `' + branch + '` to `origin` once clean and green; ask concisely if a semantic conflict needs a human call.'
+    ].join('\n'),
+    zh: [
+      `当前仓库（${params.repoPath}）的本地分支 \`${branch}\` 与远端 \`${remoteRef}\` 分叉（本地领先 ${params.syncBranch.ahead} 个提交、落后 ${params.syncBranch.behind} 个提交）。`,
+      '请帮用户全自动安全同步，不要丢弃用户的任何未提交改动或本地提交：',
+      '1. 先检查 `git status` 与 `git log --left-right --oneline HEAD...origin/' + branch + '`。',
+      '2. 若有未提交改动先妥善保存（如 `git stash push -u`），再执行 `git fetch origin` 与 `git rebase origin/' + branch + '`（若不适合 rebase 可改用 `git merge origin/' + branch + '`）。',
+      '3. 逐一解决所有冲突，同时保留本地与远端的有效改动。',
+      '4. 冲突解完后恢复之前的暂存改动（如有），并运行仓库测试验证通过。',
+      '5. 若工作区干净且测试全部通过，把同步后的 `' + branch + '` 推送到 `origin`，让后续自动同步恢复正常；若遇到需要人工拍板的语义冲突，向用户简明说明。'
+    ].join('\n')
+  })
 
   const launchRes = await runner(
     'orca',
@@ -1674,13 +1907,21 @@ export async function syncDivergedBranchFromTui(params: {
     throw new Error(
       launchRes.stderr.trim() ||
         launchRes.stdout.trim() ||
-        '无法启动 Agent 自动解冲突，请确认 Orca 正在运行'
+        pick({
+          es: 'No se pudo lanzar el agente para resolver conflictos; verificá que Orca esté corriendo',
+          en: 'Failed to launch Agent to resolve conflicts; ensure Orca is running',
+          zh: '无法启动 Agent 自动解冲突，请确认 Orca 正在运行'
+        })
     )
   }
 
   return {
     mode: 'agent-launched',
-    message: `已启动 ${agent} 自动合并 ${branch} 并解决冲突`
+    message: pick({
+      es: `Se inició ${agent} para fusionar ${branch} y resolver conflictos`,
+      en: `Launched ${agent} to merge ${branch} and resolve conflicts`,
+      zh: `已启动 ${agent} 自动合并 ${branch} 并解决冲突`
+    })
   }
 }
 
@@ -1884,7 +2125,13 @@ function copyFilesToAttachmentDir(
   for (const filePath of filePaths) {
     const st = statSync(filePath)
     if (st.size > MAX_ATTACHMENT_BYTES) {
-      throw new Error(`文件 ${basename(filePath)} 超过 10MB 限制`)
+      throw new Error(
+        pick({
+          es: `El archivo ${basename(filePath)} supera el límite de 10 MB`,
+          en: `File ${basename(filePath)} exceeds 10MB limit`,
+          zh: `文件 ${basename(filePath)} 超过 10MB 限制`
+        })
+      )
     }
   }
   const repoSlug = basename(resolve(repoPath)).replace(/[^\w.-]+/g, '_') || 'project'

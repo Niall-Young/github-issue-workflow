@@ -1,5 +1,6 @@
 import { basename, join, resolve } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
+import { pick } from './i18n'
 import {
   buildSystemHealthAlerts,
   extractTerminalQuestion,
@@ -170,7 +171,12 @@ export default function activate(orca: OrcaWorkerApi) {
               ? `#${matchedRepairRow.issue_number} ${matchedRepairRow.title}`
               : isMatchedLocalLock && localLock
                 ? localLock.title
-                : agentTitle || `${ws.name} 中的助手需要你确认`,
+                : agentTitle ||
+                    pick({
+                      es: `El agente en ${ws.name} necesita tu confirmación`,
+                      en: `Agent in ${ws.name} needs your confirmation`,
+                      zh: `${ws.name} 中的助手需要你确认`
+                    }),
             question: extractTerminalQuestion(output),
             terminalId: agent.terminalId,
             workspaceId: ws.id,
@@ -221,19 +227,38 @@ export default function activate(orca: OrcaWorkerApi) {
       const count = summary.needsYou.length
       await orca.host.call('statusBar.update', {
         id: 'autopilot-status',
-        text: count > 0 ? `Autopilot · ${count} 待处理` : 'Autopilot',
+        text:
+          count > 0
+            ? pick({
+                es: `Autopilot · ${count} pend.`,
+                en: `Autopilot · ${count} pending`,
+                zh: `Autopilot · ${count} 待处理`
+              })
+            : 'Autopilot',
         tone: count > 0 ? 'warning' : 'neutral',
         tooltip:
           count > 0
-            ? `${summary.projectName} 有 ${count} 件事需要你回复或确认（点击打开 Orca Autopilot）`
-            : `在终端打开 ${summary.projectName} 的 Orca Autopilot 控制台 (TUI)`
+            ? pick({
+                es: `${summary.projectName}: ${count} pendiente(s) requieren respuesta o confirmación (clic para abrir Autopilot)`,
+                en: `${summary.projectName}: ${count} item(s) need your reply or confirmation (click to open Autopilot)`,
+                zh: `${summary.projectName} 有 ${count} 件事需要你回复或确认（点击打开 Orca Autopilot）`
+              })
+            : pick({
+                es: `Abrir consola Orca Autopilot de ${summary.projectName} (TUI)`,
+                en: `Open ${summary.projectName} Orca Autopilot console (TUI)`,
+                zh: `在终端打开 ${summary.projectName} 的 Orca Autopilot 控制台 (TUI)`
+              })
       })
 
       for (const item of summary.needsYou) {
         if (!notifiedIds.has(item.id)) {
           notifiedIds.add(item.id)
           void orca.host.call('notifications.show', {
-            title: `${summary.projectName} 需要你确认`,
+            title: pick({
+              es: `${summary.projectName} requiere tu confirmación`,
+              en: `${summary.projectName} needs your confirmation`,
+              zh: `${summary.projectName} 需要你确认`
+            }),
             body: item.title
           })
         }
@@ -247,10 +272,22 @@ export default function activate(orca: OrcaWorkerApi) {
     const { workspaceId, repoPath } = await resolveActiveWorkspace()
     if (!workspaceId || !repoPath) {
       void orca.host.call('notifications.show', {
-        title: '无法打开 Orca Autopilot',
-        body: '请先在 Orca 左侧选择一个项目工作区。'
+        title: pick({
+          es: 'No se pudo abrir Orca Autopilot',
+          en: 'Cannot open Orca Autopilot',
+          zh: '无法打开 Orca Autopilot'
+        }),
+        body: pick({
+          es: 'Seleccioná primero un proyecto o worktree en la barra lateral de Orca.',
+          en: 'Please select a project workspace in the Orca sidebar first.',
+          zh: '请先在 Orca 左侧选择一个项目工作区。'
+        })
       })
-      return '未检测到当前项目工作区'
+      return pick({
+        es: 'No se detectó ningún proyecto activo',
+        en: 'No active project workspace detected',
+        zh: '未检测到当前项目工作区'
+      })
     }
 
     const existingTerminalId = activeBoardTerminals.get(workspaceId)
@@ -258,7 +295,11 @@ export default function activate(orca: OrcaWorkerApi) {
       try {
         const focused = await orca.host.call('terminal.focus', { terminalId: existingTerminalId })
         if (focused.focused) {
-          return `已切换到 ${basename(repoPath)} 的 Orca Autopilot 终端控制台`
+          return pick({
+            es: `Cambiado a la consola Autopilot de ${basename(repoPath)}`,
+            en: `Switched to ${basename(repoPath)} Orca Autopilot console`,
+            zh: `已切换到 ${basename(repoPath)} 的 Orca Autopilot 终端控制台`
+          })
         }
       } catch {
         activeBoardTerminals.delete(workspaceId)
@@ -277,7 +318,11 @@ export default function activate(orca: OrcaWorkerApi) {
     } catch {
       // ignore focus failure on headless host
     }
-    return `已在终端打开 ${basename(repoPath)} 的 Orca Autopilot 控制台`
+    return pick({
+      es: `Consola Orca Autopilot abierta para ${basename(repoPath)}`,
+      en: `Opened ${basename(repoPath)} Orca Autopilot console`,
+      zh: `已在终端打开 ${basename(repoPath)} 的 Orca Autopilot 控制台`
+    })
   }
 
   orca.commands.register('open-autopilot', async () => {

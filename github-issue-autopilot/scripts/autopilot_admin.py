@@ -293,9 +293,21 @@ def orca_json(orca: str, *args: str) -> dict[str, Any]:
     return value
 
 
+def _ps_quote(arg: str) -> str:
+    return "'" + arg.replace("'", "''") + "'"
+
+
+def _shell_join_command(argv: list[str], *, replace_shell: bool = False) -> str:
+    if os.name == "nt":
+        quoted = " ".join(_ps_quote(part) for part in argv)
+        return f"& {quoted}; exit $LASTEXITCODE" if replace_shell else f"& {quoted}"
+    joined = shlex.join(argv)
+    return f"exec {joined}" if replace_shell else joined
+
+
 def scheduler_command(config_path: Path, operation: str) -> str:
     runtime_admin = config_path.parent / "runtime" / "autopilot_admin.py"
-    return shlex.join([sys.executable, str(runtime_admin), operation, "--config", str(config_path)])
+    return _shell_join_command([sys.executable, str(runtime_admin), operation, "--config", str(config_path)])
 
 
 def expected_automation(config: dict[str, Any], config_path: Path,
@@ -373,7 +385,10 @@ def normalized_automation(value: dict[str, Any]) -> dict[str, Any]:
     workspace = first_value(automation, "workspace", "workspaceSelector")
     if isinstance(workspace, dict):
         workspace = first_value(workspace, "selector", "id", "path")
-        if isinstance(workspace, str) and workspace.startswith("/"):
+        if isinstance(workspace, str) and (
+            workspace.startswith("/")
+            or (len(workspace) >= 3 and workspace[1] == ":" and workspace[2] in ("/", "\\"))
+        ):
             workspace = f"path:{workspace}"
     if workspace is None:
         run_context = automation.get("runContext")
@@ -514,7 +529,8 @@ def ensure_coordinator(config_path: Path) -> dict[str, Any]:
     paths = build_paths(repository["repository_id"])
     argv = [sys.executable, str(paths["runtime_watcher"]), "run", "--config", str(config_path)]
     created = orca_json(orca, "terminal", "create", "--worktree", worktree,
-                        "--title", COORDINATOR_TITLE, "--command", f"exec {shlex.join(argv)}")
+                        "--title", COORDINATOR_TITLE, "--command",
+                        _shell_join_command(argv, replace_shell=True))
     terminal = created.get("result", {}).get("terminal", created.get("result", {}))
     return {"status": "started", "terminal": terminal.get("handle")}
 
@@ -598,7 +614,7 @@ def close_coordinators(config: dict[str, Any]) -> int:
 def disable_legacy_launch_agent(paths: dict[str, Path | str]) -> dict[str, Any]:
     plist_path = Path(paths["plist"])
     backup_path = Path(paths["legacy_plist_backup"])
-    domain = f"gui/{os.getuid()}"
+    domain = f"gui/{os.getuid() if hasattr(os, 'getuid') else 0}"
     loaded = command(["launchctl", "print", f"{domain}/{paths['launch_label']}"]).returncode == 0
     if loaded:
         stopped = command(["launchctl", "bootout", domain, str(plist_path)])
@@ -737,7 +753,7 @@ def restore_legacy_launch_agent(paths: dict[str, Path | str], was_loaded: bool) 
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(backup_path, plist_path)
     if was_loaded and plist_path.exists():
-        domain = f"gui/{os.getuid()}"
+        domain = f"gui/{os.getuid() if hasattr(os, 'getuid') else 0}"
         command(["launchctl", "bootout", domain, str(plist_path)])
         checked(["launchctl", "bootstrap", domain, str(plist_path)])
         checked(["launchctl", "kickstart", f"{domain}/{paths['launch_label']}"])
@@ -942,7 +958,7 @@ def launch_agent_health(info: dict[str, Any]) -> dict[str, Any]:
             health["errors"].append("LaunchAgent plist does not match the installed configuration")
     else:
         health["errors"].append("LaunchAgent plist is missing")
-    domain = f"gui/{os.getuid()}"
+    domain = f"gui/{os.getuid() if hasattr(os, 'getuid') else 0}"
     loaded = command(["launchctl", "print", f"{domain}/{paths['launch_label']}"])
     health["loaded"] = loaded.returncode == 0
     if not health["loaded"]:
@@ -1023,7 +1039,7 @@ def stop(repo_path: Path | None = None, repository: str | None = None,
                 "state_preserved": True, "automation_id": identifier,
                 "automation_enabled": False}
     paths = build_paths(info["repository_id"])
-    domain = f"gui/{os.getuid()}"
+    domain = f"gui/{os.getuid() if hasattr(os, 'getuid') else 0}"
     plist_path = Path(paths["plist"])
     disabled_path = Path(paths["root"]) / "disabled.plist"
     if plist_path.exists():

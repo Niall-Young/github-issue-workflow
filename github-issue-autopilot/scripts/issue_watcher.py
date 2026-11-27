@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 CONFIG_VERSIONS = {2, 3}
@@ -254,16 +254,49 @@ def find_dependency_cycle(start: int, graph: dict[int, list[int]]) -> list[int] 
 class Ledger:
     """SQLite queue with immutable Issue identities and per-attempt history."""
 
+    _open_connections: set[sqlite3.Connection] = set()
+
     def __init__(self, path: Path, lease_seconds: int, max_attempts: int = 2) -> None:
         self.path = path
         self.lease_seconds = lease_seconds
         self.max_attempts = max_attempts
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, timeout=30, isolation_level=None)
+        self._open_connections.add(self.connection)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
+        self._closed = False
         self._initialize()
+
+    def close(self) -> None:
+        conn = getattr(self, "connection", None)
+        if conn is not None:
+            self._open_connections.discard(conn)
+            if not getattr(self, "_closed", True):
+                self._closed = True
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+
+    def __del__(self) -> None:
+        self.close()
+
+    @classmethod
+    def close_all(cls) -> None:
+        for conn in list(cls._open_connections):
+            cls._open_connections.discard(conn)
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+    def __enter__(self) -> "Ledger":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     def _initialize(self) -> None:
         self.connection.executescript(
@@ -574,7 +607,7 @@ class Ledger:
         if any(not isinstance(fields.get(name), str) or not fields[name] for name in required):
             raise OrcaIdentityError("Orca dispatch evidence is incomplete")
         worktree = Path(fields["worktree_path"])
-        if not worktree.is_absolute():
+        if not (worktree.is_absolute() or PurePosixPath(fields["worktree_path"]).is_absolute()):
             raise OrcaIdentityError("Orca worktree path must be absolute")
         fields.setdefault("last_heartbeat", iso())
         self._update(node_id, attempt, "running", fields, "orca_dispatched", validate_orca=True)
@@ -612,7 +645,7 @@ class Ledger:
             raise WatcherError("unsupported Orca identity field")
         if not isinstance(value, str) or not value:
             raise OrcaIdentityError(f"Orca {name} is missing")
-        if name == "worktree_path" and not Path(value).is_absolute():
+        if name == "worktree_path" and not (Path(value).is_absolute() or PurePosixPath(value).is_absolute()):
             raise OrcaIdentityError("Orca worktree path must be absolute")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -2893,9 +2926,18 @@ def work_available(config: dict[str, Any], ledger: Ledger, run_id: str) -> list[
                                          is_dependency_satisfied=checker)]
 
 
+def _is_executable_cli(cli_path: str | Path) -> bool:
+    target = Path(cli_path)
+    if not target.is_file():
+        return False
+    if os.name == "nt":
+        return target.suffix.lower() in {".exe", ".cmd", ".bat", ".com", ".ps1"}
+    return os.access(target, os.X_OK)
+
+
 def doctor(config: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"gh": shutil.which("gh") is not None,
-        "orca": Path(config["orca"]["cli"]).is_file() and os.access(config["orca"]["cli"], os.X_OK),
+        "orca": _is_executable_cli(config["orca"]["cli"]),
         "repositories": []}
     result["gh_auth"] = result["gh"] and command(
         ["gh", "api", "user", "--silent"]
@@ -3001,75 +3043,78 @@ def main() -> int:
         else:
             ledger = Ledger(config["state_db"], config["lease_timeout_seconds"],
                             int(config.get("max_attempts", 2)))
-            if args.command_name == "status":
-                result, code = ledger.snapshot(), 0
-            elif args.command_name == "retry":
-                repository = repository_for_issue(config, args.issue_url)
-                number = ledger.retry(args.issue_url, repository["repo_path"], args.discard_worktree,
-                                      config["orca"]["cli"])
-                result, code = {"status": "retry-pending", "url": args.issue_url,
-                                "next_attempt": number}, 0
-            elif args.command_name == "discard":
-                repository = repository_for_issue(config, args.issue_url)
-                result, code = ledger.discard(args.issue_url, repository["repo_path"],
-                                              config["orca"]["cli"]), 0
-            elif args.command_name == "accept":
-                repository = repository_for_issue(config, args.issue_url)
-                result, code = ledger.accept(args.issue_url, repository["repo_path"], args.target_branch,
-                                             config["orca"]["cli"]), 0
-            elif args.command_name == "prune":
-                repository = config["repositories"][0]
-                result, code = ledger.prune(
-                    repository["repo_path"], older_than_hours=args.older_than_hours,
-                    dry_run=args.dry_run, orca_cli=config["orca"]["cli"],
-                ), 0
-            elif args.command_name == "poll":
-                result, code = poll(config, ledger), 0
-            elif args.command_name == "work":
-                run_id = ensure_orca_run(config, ledger)
-                result, code = {
-                    "completed": reconcile_workers(config, ledger),
-                    "pull_requests": reconcile_pull_requests(config, ledger),
-                    "started": work_available(config, ledger, run_id),
-                }, 0
-            elif args.command_name == "once":
-                run_id = ensure_orca_run(config, ledger)
-                result, code = {
-                    "detection": poll(config, ledger),
-                    "completed": reconcile_workers(config, ledger),
-                    "pull_requests": reconcile_pull_requests(config, ledger),
-                }, 0
-                result["started"] = work_available(config, ledger, run_id)
-            else:
-                run_id = None
-                code = 0
-                while True:
-                    missing = runtime_workspace_error(config)
-                    if missing:
-                        result = pause_for_missing_workspace(config, missing)
-                        break
-                    try:
-                        active_scheduler = scheduler_enabled(config)
-                    except WatcherError as exc:
-                        result = {"status": "scheduler-unavailable", "error": str(exc)}
-                        code = 2
-                        break
-                    if not active_scheduler:
-                        result = {"status": "scheduler-paused"}
-                        break
-                    try:
-                        run_id = run_id or ensure_orca_run(config, ledger)
-                        value = {
-                            "detection": poll(config, ledger),
-                            "completed": reconcile_workers(config, ledger),
-                            "pull_requests": reconcile_pull_requests(config, ledger),
-                        }
-                        value["started"] = work_available(config, ledger, run_id)
-                        print(json.dumps(value, ensure_ascii=False), flush=True)
-                    except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
-                        print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False),
-                              file=sys.stderr, flush=True)
-                    time.sleep(config["poll_interval_seconds"])
+            try:
+                if args.command_name == "status":
+                    result, code = ledger.snapshot(), 0
+                elif args.command_name == "retry":
+                    repository = repository_for_issue(config, args.issue_url)
+                    number = ledger.retry(args.issue_url, repository["repo_path"], args.discard_worktree,
+                                          config["orca"]["cli"])
+                    result, code = {"status": "retry-pending", "url": args.issue_url,
+                                    "next_attempt": number}, 0
+                elif args.command_name == "discard":
+                    repository = repository_for_issue(config, args.issue_url)
+                    result, code = ledger.discard(args.issue_url, repository["repo_path"],
+                                                  config["orca"]["cli"]), 0
+                elif args.command_name == "accept":
+                    repository = repository_for_issue(config, args.issue_url)
+                    result, code = ledger.accept(args.issue_url, repository["repo_path"], args.target_branch,
+                                                 config["orca"]["cli"]), 0
+                elif args.command_name == "prune":
+                    repository = config["repositories"][0]
+                    result, code = ledger.prune(
+                        repository["repo_path"], older_than_hours=args.older_than_hours,
+                        dry_run=args.dry_run, orca_cli=config["orca"]["cli"],
+                    ), 0
+                elif args.command_name == "poll":
+                    result, code = poll(config, ledger), 0
+                elif args.command_name == "work":
+                    run_id = ensure_orca_run(config, ledger)
+                    result, code = {
+                        "completed": reconcile_workers(config, ledger),
+                        "pull_requests": reconcile_pull_requests(config, ledger),
+                        "started": work_available(config, ledger, run_id),
+                    }, 0
+                elif args.command_name == "once":
+                    run_id = ensure_orca_run(config, ledger)
+                    result, code = {
+                        "detection": poll(config, ledger),
+                        "completed": reconcile_workers(config, ledger),
+                        "pull_requests": reconcile_pull_requests(config, ledger),
+                    }, 0
+                    result["started"] = work_available(config, ledger, run_id)
+                else:
+                    run_id = None
+                    code = 0
+                    while True:
+                        missing = runtime_workspace_error(config)
+                        if missing:
+                            result = pause_for_missing_workspace(config, missing)
+                            break
+                        try:
+                            active_scheduler = scheduler_enabled(config)
+                        except WatcherError as exc:
+                            result = {"status": "scheduler-unavailable", "error": str(exc)}
+                            code = 2
+                            break
+                        if not active_scheduler:
+                            result = {"status": "scheduler-paused"}
+                            break
+                        try:
+                            run_id = run_id or ensure_orca_run(config, ledger)
+                            value = {
+                                "detection": poll(config, ledger),
+                                "completed": reconcile_workers(config, ledger),
+                                "pull_requests": reconcile_pull_requests(config, ledger),
+                            }
+                            value["started"] = work_available(config, ledger, run_id)
+                            print(json.dumps(value, ensure_ascii=False), flush=True)
+                        except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
+                            print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False),
+                                  file=sys.stderr, flush=True)
+                        time.sleep(config["poll_interval_seconds"])
+            finally:
+                ledger.close()
     except (WatcherError, OSError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2

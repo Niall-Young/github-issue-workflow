@@ -324,7 +324,20 @@ def install_cli(
         link_path = target_bin / name
         if link_path.is_symlink() or link_path.exists():
             link_path.unlink()
-        link_path.symlink_to(source)
+        try:
+            link_path.symlink_to(source)
+        except OSError:
+            if os.name != "nt":
+                raise
+            link_path.write_text(
+                f'#!/usr/bin/env sh\nexec python "{source.as_posix()}" "$@"\n',
+                encoding="utf-8",
+            )
+            cmd_path = link_path.with_suffix(".cmd")
+            cmd_path.write_text(
+                f'@echo off\r\n"{sys.executable}" "{source}" %*\r\n',
+                encoding="utf-8",
+            )
         installed.append(link_path)
     return installed
 

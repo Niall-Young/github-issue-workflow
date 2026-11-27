@@ -5,12 +5,15 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "orca-autopilot"
@@ -351,6 +354,216 @@ class OrcaAutopilotCliTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("refresh-runtimes", calls[0])
         self.assertIn("--all", calls[0])
+
+    def test_http_get_bytes_uses_gh_auth_token_only_for_api_github(self):
+        captured_requests = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"tag_name": "v0.9.0"}'
+
+        def fake_urlopen(req, timeout=30):
+            captured_requests.append((req.full_url, dict(req.header_items())))
+            return FakeResponse()
+
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(self.mod.shutil, "which", return_value="/usr/local/bin/gh"), \
+             mock.patch.object(
+                 self.mod.subprocess,
+                 "run",
+                 return_value=make_proc(0, stdout="gho_secret_token_123\n"),
+             ) as run_mock, \
+             mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.mod._http_get_bytes("https://api.github.com/repos/Niall-Young/orca-autopilot/releases/latest")
+            self.mod._http_get_bytes("https://github.com/Niall-Young/orca-autopilot/releases/download/v0.9.0/file.tar.gz")
+            self.mod._http_get_bytes("https://objects.githubusercontent.com/some-asset")
+
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(run_mock.call_args.args[0], ["/usr/local/bin/gh", "auth", "token"])
+        self.assertEqual(run_mock.call_args.kwargs.get("timeout"), 10)
+
+        api_headers = {k.lower(): v for k, v in captured_requests[0][1].items()}
+        gh_web_headers = {k.lower(): v for k, v in captured_requests[1][1].items()}
+        obj_headers = {k.lower(): v for k, v in captured_requests[2][1].items()}
+        self.assertEqual(api_headers.get("authorization"), "Bearer gho_secret_token_123")
+        self.assertNotIn("authorization", gh_web_headers)
+        self.assertNotIn("authorization", obj_headers)
+
+    def test_http_get_bytes_prefers_env_tokens_without_invoking_gh(self):
+        captured_headers = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def fake_urlopen(req, timeout=30):
+            captured_headers.append({k.lower(): v for k, v in req.header_items()})
+            return FakeResponse()
+
+        for env_key, env_val in (("GITHUB_TOKEN", "env_github_tok"), ("GH_TOKEN", "env_gh_tok")):
+            env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+            env[env_key] = env_val
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(self.mod.subprocess, "run") as run_mock, \
+                 mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=fake_urlopen):
+                self.mod._http_get_bytes("https://api.github.com/repos/Niall-Young/orca-autopilot/releases/latest")
+                run_mock.assert_not_called()
+            self.assertEqual(captured_headers[-1].get("authorization"), f"Bearer {env_val}")
+
+    def test_http_get_bytes_degrades_gracefully_when_gh_missing_unauthenticated_or_timeout(self):
+        captured_headers = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def fake_urlopen(req, timeout=30):
+            captured_headers.append({k.lower(): v for k, v in req.header_items()})
+            return FakeResponse()
+
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+
+        # Case 1: gh not installed
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(self.mod.shutil, "which", return_value=None), \
+             mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.mod._http_get_bytes("https://api.github.com/repos/Niall-Young/orca-autopilot/releases/latest")
+        self.assertNotIn("authorization", captured_headers[-1])
+
+        # Case 2: gh auth token returns non-zero (not logged in)
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(self.mod.shutil, "which", return_value="/usr/local/bin/gh"), \
+             mock.patch.object(self.mod.subprocess, "run", return_value=make_proc(1, stderr="not logged in")), \
+             mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.mod._http_get_bytes("https://api.github.com/repos/Niall-Young/orca-autopilot/releases/latest")
+        self.assertNotIn("authorization", captured_headers[-1])
+
+        # Case 3: gh auth token times out
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(self.mod.shutil, "which", return_value="/usr/local/bin/gh"), \
+             mock.patch.object(
+                 self.mod.subprocess,
+                 "run",
+                 side_effect=subprocess.TimeoutExpired(cmd=["gh", "auth", "token"], timeout=10),
+             ), \
+             mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.mod._http_get_bytes("https://api.github.com/repos/Niall-Young/orca-autopilot/releases/latest")
+        self.assertNotIn("authorization", captured_headers[-1])
+
+    def test_http_get_bytes_403_rate_limit_error_is_actionable_and_hides_token(self):
+        secret = "gho_super_secret_should_never_leak"
+        err = urllib.error.HTTPError(
+            url="https://api.github.com/repos/Niall-Young/orca-autopilot/releases/latest",
+            code=403,
+            msg="rate limit exceeded",
+            hdrs={},
+            fp=None,
+        )
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+        env["GITHUB_TOKEN"] = secret
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(self.mod.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._http_get_bytes("https://api.github.com/repos/Niall-Young/orca-autopilot/releases/latest")
+        message = str(ctx.exception)
+        self.assertIn("gh auth login", message)
+        self.assertIn("GITHUB_TOKEN", message)
+        self.assertNotIn(secret, message)
+
+    def test_fetch_latest_release_bundle_falls_back_to_https_redirect_on_403_with_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            tar_buf = io.BytesIO()
+            with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
+                manifest_bytes = b'{"version": "0.9.1"}\n'
+                info = tarfile.TarInfo("github-issue-workflow-full-v0.9.1/orca-plugin.json")
+                info.size = len(manifest_bytes)
+                tar.addfile(info, io.BytesIO(manifest_bytes))
+            archive_bytes = tar_buf.getvalue()
+            sha = hashlib.sha256(archive_bytes).hexdigest()
+            archive_name = "github-issue-workflow-full-v0.9.1.tar.gz"
+            checksum_name = f"{archive_name}.sha256"
+
+            requested_urls = []
+
+            def fake_fetcher(url: str) -> bytes:
+                requested_urls.append(url)
+                if url.startswith("https://api.github.com/"):
+                    raise RuntimeError(f"下载失败（{url}）：HTTP Error 403: rate limit exceeded")
+                if url == f"https://github.com/Niall-Young/orca-autopilot/releases/download/v0.9.1/{archive_name}":
+                    return archive_bytes
+                if url == f"https://github.com/Niall-Young/orca-autopilot/releases/download/v0.9.1/{checksum_name}":
+                    return f"{sha}  {archive_name}\n".encode("utf-8")
+                raise AssertionError(f"Unexpected URL: {url}")
+
+            extracted, tag = self.mod.fetch_latest_release_bundle(
+                tmp_path,
+                fetcher=fake_fetcher,
+                latest_tag_resolver=lambda repo: "v0.9.1",
+            )
+            self.assertEqual(tag, "v0.9.1")
+            self.assertTrue((extracted / "orca-plugin.json").is_file())
+            self.assertEqual(self.mod.read_installed_version(extracted), "0.9.1")
+            self.assertTrue(all(u.startswith("https://") for u in requested_urls))
+
+            # Fallback failure must still produce actionable 403 guidance
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.fetch_latest_release_bundle(
+                    tmp_path / "fail",
+                    fetcher=fake_fetcher,
+                    latest_tag_resolver=lambda repo: (_ for _ in ()).throw(RuntimeError("network down")),
+                )
+            self.assertIn("gh auth login", str(ctx.exception))
+            self.assertIn("GITHUB_TOKEN", str(ctx.exception))
+
+    def test_resolve_latest_release_tag_via_redirect_enforces_https_github(self):
+        class FakeOpener:
+            def __init__(self, location: str):
+                self.location = location
+
+            def open(self, req, timeout=30):
+                raise urllib.error.HTTPError(
+                    url=req.full_url,
+                    code=302,
+                    msg="Found",
+                    hdrs={"Location": self.location},
+                    fp=None,
+                )
+
+        with mock.patch.object(
+            self.mod.urllib.request,
+            "build_opener",
+            return_value=FakeOpener("https://github.com/Niall-Young/orca-autopilot/releases/tag/v0.9.2"),
+        ):
+            tag = self.mod._resolve_latest_release_tag_via_redirect("Niall-Young/orca-autopilot")
+            self.assertEqual(tag, "v0.9.2")
+
+        with mock.patch.object(
+            self.mod.urllib.request,
+            "build_opener",
+            return_value=FakeOpener("http://github.com/Niall-Young/orca-autopilot/releases/tag/v0.9.2"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.mod._resolve_latest_release_tag_via_redirect("Niall-Young/orca-autopilot")
 
 
 if __name__ == "__main__":

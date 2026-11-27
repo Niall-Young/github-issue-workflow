@@ -29,12 +29,15 @@ import {
 import {
   collectOrcaAgentState,
   detectAutopilotRunning,
+  attachLocalFilePaths,
+  captureClipboardAttachments,
   formatDefaultTerminalTitle,
   formatOscTitleSequence,
   loadBoardSnapshot,
   parseAgentLaunchResult,
   sanitizeTerminalTitle,
   setOrcaTerminalTitle,
+  parseLocalFilePaths,
   stopAutopilot,
   submitIssueFromTui,
   syncDivergedBranchFromTui,
@@ -1974,6 +1977,160 @@ test('parseTuiCliArgs and /title slash command support custom terminal tab title
   await (tui as unknown as { handleRenameTerminal(arg: string): Promise<void> }).handleRenameTerminal(
     ''
   )
+
+test('parseLocalFilePaths and attachLocalFilePaths support multi-file, shell-escaped, and file:// pastes without hijacking prose', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'orca-tui-multi-attach-'))
+  const stateRoot = join(tmpDir, 'state')
+  const repoPath = join(tmpDir, 'demo-repo')
+  const dirA = join(tmpDir, 'dir a')
+  const dirB = join(tmpDir, 'dir b')
+  mkdirSync(repoPath, { recursive: true })
+  mkdirSync(dirA, { recursive: true })
+  mkdirSync(dirB, { recursive: true })
+
+  try {
+    const img1 = join(dirA, 'shot (1).png')
+    const img2 = join(dirB, 'shot (1).png')
+    const doc1 = join(dirA, 'notes.pdf')
+    writeFileSync(img1, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]))
+    writeFileSync(img2, Buffer.from([0x89, 0x50, 0x4e, 0x47, 4, 5, 6]))
+    writeFileSync(doc1, Buffer.from('%PDF-1.4\n'))
+
+    // Shell-escaped single path with parentheses & spaces
+    const escapedSingle = img1.replace(/([ ()])/g, '\\$1')
+    assert.deepEqual(parseLocalFilePaths(escapedSingle), [img1])
+
+    // file:// URI
+    const fileUri = `file://${encodeURI(img1)}`
+    assert.deepEqual(parseLocalFilePaths(fileUri), [img1])
+
+    // Multiple quoted paths (including duplicate basenames across directories)
+    const multiInput = `'${img1}' '${img2}' '${doc1}'`
+    const saved = attachLocalFilePaths(repoPath, multiInput, stateRoot)
+    assert.equal(saved.length, 3)
+    assert.equal(saved[0].mimeType, 'image/png')
+    assert.equal(saved[1].mimeType, 'image/png')
+    assert.equal(saved[2].mimeType, 'application/pdf')
+    assert.notEqual(saved[0].path, saved[1].path)
+    assert.equal(existsSync(saved[0].path), true)
+    assert.equal(existsSync(saved[1].path), true)
+    assert.equal(existsSync(saved[2].path), true)
+
+    // Newline-separated paths
+    assert.deepEqual(parseLocalFilePaths(`${img1}\n${doc1}\n`), [img1, doc1])
+
+    // Normal text or mixed text + path must NOT be misclassified as attachments
+    assert.deepEqual(parseLocalFilePaths('为啥这里的 readme 没透出'), [])
+    assert.deepEqual(parseLocalFilePaths(`${img1} 请看一下这个图`), [])
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('captureClipboardAttachments handles Finder files, clipboard images, and local path text', async () => {
+  if (process.platform !== 'darwin') return
+  const tmpDir = mkdtempSync(join(tmpdir(), 'orca-tui-clip-attach-'))
+  const stateRoot = join(tmpDir, 'state')
+  const repoPath = join(tmpDir, 'demo-repo')
+  mkdirSync(repoPath, { recursive: true })
+
+  try {
+    const fileA = join(tmpDir, 'spec.pdf')
+    const fileB = join(tmpDir, 'ui.png')
+    writeFileSync(fileA, Buffer.from('%PDF-1.4\nhello'))
+    writeFileSync(fileB, Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 8, 7]))
+
+    // 1. Finder-copied files (multiple)
+    const filesRunner: CommandRunner = async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ kind: 'files', paths: [fileA, fileB] }),
+      stderr: ''
+    })
+    const fromFiles = await captureClipboardAttachments(repoPath, stateRoot, filesRunner)
+    assert.equal(fromFiles.length, 2)
+    assert.equal(fromFiles[0].name, 'spec.pdf')
+    assert.equal(fromFiles[0].mimeType, 'application/pdf')
+    assert.equal(fromFiles[1].name, 'ui.png')
+    assert.equal(fromFiles[1].mimeType, 'image/png')
+    assert.equal(existsSync(fromFiles[0].path), true)
+    assert.equal(existsSync(fromFiles[1].path), true)
+
+    // 2. Clipboard image saved to disk
+    const imgOut = join(tmpDir, 'clip-shot.png')
+    writeFileSync(imgOut, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 1, 1]))
+    const imgRunner: CommandRunner = async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ kind: 'image', path: imgOut }),
+      stderr: ''
+    })
+    const fromImage = await captureClipboardAttachments(repoPath, stateRoot, imgRunner)
+    assert.equal(fromImage.length, 1)
+    assert.equal(fromImage[0].mimeType, 'image/png')
+    assert.equal(fromImage[0].path, imgOut)
+
+    // 3. Clipboard text containing local file path
+    const textRunner: CommandRunner = async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ kind: 'text', text: `'${fileA}'` }),
+      stderr: ''
+    })
+    const fromText = await captureClipboardAttachments(repoPath, stateRoot, textRunner)
+    assert.equal(fromText.length, 1)
+    assert.equal(fromText[0].name, 'spec.pdf')
+
+    // 4. Empty / non-file text returns empty array
+    const emptyRunner: CommandRunner = async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ kind: 'text', text: '普通剪贴板文本' }),
+      stderr: ''
+    })
+    const fromEmpty = await captureClipboardAttachments(repoPath, stateRoot, emptyRunner)
+    assert.equal(fromEmpty.length, 0)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('IssueBoardTui preserves inline attachments across multi-file paste and slash command mode switches', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'orca-tui-slash-attach-'))
+  const img = join(tmpDir, 'screen.png')
+  const doc = join(tmpDir, 'readme.md')
+  writeFileSync(img, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2]))
+  writeFileSync(doc, '# hello\n')
+
+  try {
+    const tui = new IssueBoardTui(tmpDir, { writeOutput: () => {} })
+    const internal = tui as unknown as {
+      state: TuiState
+      handleEvent: (
+        ev:
+          | { type: 'paste'; text: string }
+          | { type: 'text'; text: string }
+          | { type: 'key'; key: string; raw: string }
+      ) => void
+    }
+
+    // Type "/local " then paste multiple files -> both [Image #1] and [File #2] attached
+    internal.handleEvent({ type: 'text', text: '/local ' })
+    internal.handleEvent({ type: 'paste', text: `'${img}' '${doc}'` })
+    assert.equal(internal.state.composer.attachments.length, 2)
+    assert.equal(internal.state.composer.text, '/local [Image #1] [File #2]')
+
+    // Pressing Enter with only attachment tokens switches to local mode WITHOUT wiping tokens or attachments
+    internal.handleEvent({ type: 'key', key: 'enter', raw: '\r' })
+    assert.equal(internal.state.composer.mode, 'local')
+    assert.equal(internal.state.composer.text, '[Image #1] [File #2]')
+    assert.equal(internal.state.composer.attachments.length, 2)
+
+    // Typing description and fixing a typo with Backspace keeps both attachments intact
+    internal.handleEvent({ type: 'text', text: ' 看下这两个附件a' })
+    internal.handleEvent({ type: 'key', key: 'backspace', raw: '\x7f' })
+    assert.equal(internal.state.composer.text, '[Image #1] [File #2] 看下这两个附件')
+    assert.equal(internal.state.composer.attachments.length, 2)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
   assert.deepEqual(renamedTitles, ['我的 Autopilot', 'Autopilot'])
   assert.ok(chunks.some((c) => c.includes('\x1b]0;Autopilot\x07')))
 })

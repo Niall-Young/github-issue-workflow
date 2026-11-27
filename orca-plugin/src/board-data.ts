@@ -414,7 +414,7 @@ export function buildLocalDevPrompt(params: {
     lines.push(`- 补充说明：`, params.details.trim())
   }
   if (params.savedAttachments && params.savedAttachments.length > 0) {
-    lines.push('', `## 附件路径`)
+    lines.push('', `## 附件路径`, `请先读取/查看以下本地附件（图片或文件）以补充上下文：`)
     for (const att of params.savedAttachments) {
       lines.push(`- \`${att.path}\` (${att.name})`)
     }

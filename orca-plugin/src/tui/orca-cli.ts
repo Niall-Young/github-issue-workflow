@@ -2,7 +2,9 @@
 // Reuses board-data.ts directly and communicates with Orca via the `orca` CLI.
 
 import { copyFileSync, existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, extname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   buildAutopilotInstallArgs,
   buildHandoffPrompt,
@@ -1399,71 +1401,333 @@ function guessMimeType(filePath: string): string {
   }
 }
 
-export function attachLocalFilePath(
+function normalizePathCandidate(raw: string): string | null {
+  let s = raw.trim()
+  if (!s) return null
+  if (s.startsWith('file://')) {
+    try {
+      s = fileURLToPath(s)
+    } catch {
+      return null
+    }
+  }
+  if (s === '~') {
+    s = homedir()
+  } else if (s.startsWith('~/')) {
+    s = join(homedir(), s.slice(2))
+  }
+  return s || null
+}
+
+function isExistingRegularFile(filePath: string): boolean {
+  try {
+    return existsSync(filePath) && statSync(filePath).isFile()
+  } catch {
+    return false
+  }
+}
+
+function tokenizeShellPaths(input: string): string[] | null {
+  const tokens: string[] = []
+  let current = ''
+  let quote: "'" | '"' | null = null
+  let hasToken = false
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i]
+    if (quote === "'") {
+      if (ch === "'") {
+        quote = null
+      } else {
+        current += ch
+      }
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null
+      } else if (ch === '\\' && i + 1 < input.length) {
+        const next = input[i + 1]
+        if (next === '"' || next === '\\' || next === '$' || next === '`') {
+          current += next
+          i += 1
+        } else {
+          current += ch
+        }
+      } else {
+        current += ch
+      }
+      continue
+    }
+
+    if (/\s/.test(ch)) {
+      if (hasToken) {
+        tokens.push(current)
+        current = ''
+        hasToken = false
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      hasToken = true
+      continue
+    }
+    if (ch === '\\' && i + 1 < input.length) {
+      current += input[i + 1]
+      i += 1
+      hasToken = true
+      continue
+    }
+    current += ch
+    hasToken = true
+  }
+
+  if (quote !== null) return null
+  if (hasToken) tokens.push(current)
+  return tokens
+}
+
+function parseSingleFilePath(candidate: string): string | null {
+  const trimmed = candidate.trim()
+  if (!trimmed) return null
+  const unquoted =
+    (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) ||
+    (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2)
+      ? trimmed.slice(1, -1)
+      : trimmed.replace(/\\(.)/g, '$1')
+  const normalized = normalizePathCandidate(unquoted)
+  if (normalized && isExistingRegularFile(normalized)) {
+    return normalized
+  }
+  return null
+}
+
+export function parseLocalFilePaths(rawInput: string): string[] {
+  const trimmed = rawInput.trim()
+  if (!trimmed) return []
+
+  // 1. Try treating the whole input as a single path (supports unquoted paths with literal spaces)
+  const single = parseSingleFilePath(trimmed)
+  if (single) {
+    return [single]
+  }
+
+  // 2. Try newline-separated paths (e.g. Finder "Copy as Pathname" for multiple files with literal spaces)
+  if (/[\r\n]/.test(trimmed)) {
+    const lines = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    if (lines.length > 1) {
+      const linePaths: string[] = []
+      let allValid = true
+      for (const line of lines) {
+        const parsed = parseSingleFilePath(line)
+        if (!parsed) {
+          allValid = false
+          break
+        }
+        linePaths.push(parsed)
+      }
+      if (allValid) return linePaths
+    }
+  }
+
+  // 3. Otherwise split into shell-quoted / escaped / whitespace-separated tokens and require every token to be a real file
+  const tokens = tokenizeShellPaths(trimmed)
+  if (!tokens || tokens.length === 0) return []
+
+  const resolvedPaths: string[] = []
+  for (const token of tokens) {
+    const normalized = normalizePathCandidate(token)
+    if (!normalized || !isExistingRegularFile(normalized)) {
+      return []
+    }
+    resolvedPaths.push(normalized)
+  }
+  return resolvedPaths
+}
+
+function copyFilesToAttachmentDir(
   repoPath: string,
-  rawPath: string,
+  filePaths: readonly string[],
   stateRoot = getAutopilotStateRoot()
-): SavedAttachment | null {
-  const cleaned = rawPath
-    .trim()
-    .replace(/^['"]|['"]$/g, '')
-    .replace(/\\ /g, ' ')
-  if (!cleaned || !existsSync(cleaned)) return null
-  const st = statSync(cleaned)
-  if (!st.isFile()) return null
-  if (st.size > MAX_ATTACHMENT_BYTES) {
-    throw new Error(`文件 ${basename(cleaned)} 超过 10MB 限制`)
+): SavedAttachment[] {
+  if (filePaths.length === 0) return []
+  for (const filePath of filePaths) {
+    const st = statSync(filePath)
+    if (st.size > MAX_ATTACHMENT_BYTES) {
+      throw new Error(`文件 ${basename(filePath)} 超过 10MB 限制`)
+    }
   }
   const repoSlug = basename(resolve(repoPath)).replace(/[^\w.-]+/g, '_') || 'project'
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const targetDir = join(stateRoot, 'attachments', repoSlug, stamp)
   mkdirSync(targetDir, { recursive: true })
-  const dest = join(targetDir, basename(cleaned))
-  copyFileSync(cleaned, dest)
-  return {
-    name: basename(cleaned),
-    mimeType: guessMimeType(dest),
-    size: st.size,
-    path: dest
+
+  const usedNames = new Set<string>()
+  const saved: SavedAttachment[] = []
+  for (const filePath of filePaths) {
+    const origName = basename(filePath)
+    const ext = extname(origName)
+    const stem = ext ? origName.slice(0, -ext.length) : origName
+    let destName = origName
+    let seq = 2
+    while (usedNames.has(destName.toLowerCase()) || existsSync(join(targetDir, destName))) {
+      destName = `${stem}-${seq}${ext}`
+      seq += 1
+    }
+    usedNames.add(destName.toLowerCase())
+    const dest = join(targetDir, destName)
+    copyFileSync(filePath, dest)
+    const st = statSync(dest)
+    saved.push({
+      name: origName,
+      mimeType: guessMimeType(dest),
+      size: st.size,
+      path: dest
+    })
   }
 }
 
-export async function captureClipboardImage(
+export function attachLocalFilePaths(
+  repoPath: string,
+  rawInput: string,
+  stateRoot = getAutopilotStateRoot()
+): SavedAttachment[] {
+  const filePaths = parseLocalFilePaths(rawInput)
+  if (filePaths.length === 0) return []
+  return copyFilesToAttachmentDir(repoPath, filePaths, stateRoot)
+}
+
+export function attachLocalFilePath(
+  repoPath: string,
+  rawPath: string,
+  stateRoot = getAutopilotStateRoot()
+): SavedAttachment | null {
+  const saved = attachLocalFilePaths(repoPath, rawPath, stateRoot)
+  return saved[0] ?? null
+}
+
+export async function captureClipboardAttachments(
   repoPath: string,
   stateRoot = getAutopilotStateRoot(),
   runner: CommandRunner = defaultRunner
-): Promise<SavedAttachment | null> {
-  if (process.platform !== 'darwin') return null
+): Promise<SavedAttachment[]> {
+  if (process.platform !== 'darwin') return []
   const repoSlug = basename(resolve(repoPath)).replace(/[^\w.-]+/g, '_') || 'project'
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const targetDir = join(stateRoot, 'attachments', repoSlug, stamp)
   mkdirSync(targetDir, { recursive: true })
   const outPath = join(targetDir, `clipboard-${Date.now()}.png`)
 
-  // Use AppleScript to save PNG from macOS clipboard without third-party dependencies
-  const script = `
-    try
-      set imgData to the clipboard as «class PNGf»
-      set outFile to open for access POSIX file "${outPath.replace(/"/g, '\\"')}" with write permission
-      set eof of outFile to 0
-      write imgData to outFile
-      close access outFile
-      return "ok"
-    on error
-      return "no-image"
-    end try
+  // Use macOS JXA + AppKit NSPasteboard to inspect copied Finder files, images (PNG/TIFF/JPEG),
+  // or local file path text in priority order without external dependencies.
+  const jxaScript = `
+    ObjC.import("AppKit");
+    function run() {
+      const pb = $.NSPasteboard.generalPasteboard;
+      const paths = [];
+      try {
+        const fileList = pb.propertyListForType("NSFilenamesPboardType");
+        if (fileList && !fileList.isNil()) {
+          const arr = ObjC.unwrap(fileList);
+          if (Array.isArray(arr)) {
+            for (const item of arr) {
+              const p = ObjC.unwrap(item);
+              if (typeof p === "string" && p.length > 0) paths.push(p);
+            }
+          }
+        }
+      } catch (e) {}
+      if (paths.length === 0) {
+        try {
+          const urlStr = ObjC.unwrap(pb.stringForType($.NSPasteboardTypeFileURL));
+          if (typeof urlStr === "string" && urlStr.length > 0) {
+            const nsUrl = $.NSURL.URLWithString($(urlStr));
+            const p = nsUrl && !nsUrl.isNil() ? ObjC.unwrap(nsUrl.path) : "";
+            if (typeof p === "string" && p.length > 0) paths.push(p);
+          }
+        } catch (e) {}
+      }
+      if (paths.length > 0) {
+        return JSON.stringify({ kind: "files", paths });
+      }
+      try {
+        const img = $.NSImage.alloc.initWithPasteboard(pb);
+        if (img && !img.isNil()) {
+          const tiff = img.TIFFRepresentation;
+          if (tiff && !tiff.isNil()) {
+            const rep = $.NSBitmapImageRep.imageRepWithData(tiff);
+            if (rep && !rep.isNil()) {
+              const pngType = typeof $.NSBitmapImageFileTypePNG === "number" ? $.NSBitmapImageFileTypePNG : 4;
+              const png = rep.representationUsingTypeProperties(pngType, $({}));
+              if (png && !png.isNil() && png.writeToFileAtomically($(${JSON.stringify(outPath)}), true)) {
+                return JSON.stringify({ kind: "image", path: ${JSON.stringify(outPath)} });
+              }
+            }
+          }
+        }
+      } catch (e) {}
+      try {
+        const text = ObjC.unwrap(pb.stringForType($.NSPasteboardTypeString));
+        if (typeof text === "string" && text.trim().length > 0) {
+          return JSON.stringify({ kind: "text", text });
+        }
+      } catch (e) {}
+      return JSON.stringify({ kind: "empty" });
+    }
   `
-  const res = await runner('osascript', ['-e', script], { timeoutMs: 5_000 })
-  if (res.exitCode !== 0 || res.stdout.trim() !== 'ok' || !existsSync(outPath)) {
-    return null
-  }
-  const st = statSync(outPath)
-  if (st.size === 0) return null
-  return {
-    name: basename(outPath),
-    mimeType: 'image/png',
-    size: st.size,
-    path: outPath
+
+  const res = await runner('osascript', ['-l', 'JavaScript', '-e', jxaScript], { timeoutMs: 5_000 })
+  if (res.exitCode !== 0) return []
+
+  const stdout = res.stdout.trim()
+  if (!stdout) return []
+
+  try {
+    const parsed = JSON.parse(stdout) as {
+      kind?: string
+      paths?: unknown
+      path?: unknown
+      text?: unknown
+    }
+    if (parsed.kind === 'files' && Array.isArray(parsed.paths)) {
+      const validFiles = parsed.paths
+        .filter((p): p is string => typeof p === 'string' && isExistingRegularFile(p))
+      return copyFilesToAttachmentDir(repoPath, validFiles, stateRoot)
+    }
+    if (parsed.kind === 'image' && typeof parsed.path === 'string' && existsSync(parsed.path)) {
+      const st = statSync(parsed.path)
+      if (st.size === 0) return []
+      return [
+        {
+          name: basename(parsed.path),
+          mimeType: 'image/png',
+          size: st.size,
+          path: parsed.path
+        }
+      ]
+    }
+    if (parsed.kind === 'text' && typeof parsed.text === 'string') {
+      return attachLocalFilePaths(repoPath, parsed.text, stateRoot)
+    }
+  } catch {
+    // Fallback for legacy/mocked runners returning plain "ok"
+    if (stdout === 'ok' && existsSync(outPath)) {
+      const st = statSync(outPath)
+      if (st.size > 0) {
+        return [
+          {
+            name: basename(outPath),
+            mimeType: 'image/png',
+            size: st.size,
+            path: outPath
+          }
+        ]
+      }
+    }
   }
 }
 
@@ -1508,3 +1772,29 @@ export async function setOrcaTerminalTitle(
     return false
   }
 }
+    case '.bmp':
+      return 'image/bmp'
+    case '.svg':
+      return 'image/svg+xml'
+    case '.heic':
+      return 'image/heic'
+    case '.tif':
+    case '.tiff':
+      return 'image/tiff'
+    case '.json':
+      return 'application/json'
+    case '.txt':
+    case '.md':
+    case '.log':
+      return 'text/plain'
+  return saved
+  return []
+}
+
+export async function captureClipboardImage(
+  repoPath: string,
+  stateRoot = getAutopilotStateRoot(),
+  runner: CommandRunner = defaultRunner
+): Promise<SavedAttachment | null> {
+  const saved = await captureClipboardAttachments(repoPath, stateRoot, runner)
+  return saved[0] ?? null

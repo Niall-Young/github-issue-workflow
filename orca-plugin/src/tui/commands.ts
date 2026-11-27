@@ -132,8 +132,8 @@ export const SLASH_COMMANDS: readonly SlashCommandDef[] = [
     id: 'paste',
     name: '/paste',
     aliases: ['img', 'image'],
-    label: '粘贴截图',
-    description: '从 macOS 剪贴板粘贴截图作为附件 (^V)'
+    label: '粘贴附件',
+    description: '从 macOS 剪贴板粘贴图片或文件作为附件 (^V)'
   },
   {
     id: 'title',

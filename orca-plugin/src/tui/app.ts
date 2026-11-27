@@ -5,7 +5,7 @@
 // and macOS clipboard screenshot paste (^V).
 
 import { basename, resolve } from 'node:path'
-import type { IssueKind, NeedsYouItem, SubmitMode } from '../protocol'
+import type { IssueKind, NeedsYouItem, SavedAttachment, SubmitMode } from '../protocol'
 import {
   appendInlineAttachment,
   backspaceWithInlineAttachments,
@@ -21,8 +21,8 @@ import {
 } from './commands'
 import { InputParser, type InputEvent } from './input'
 import {
-  attachLocalFilePath,
-  captureClipboardImage,
+  attachLocalFilePaths,
+  captureClipboardAttachments,
   formatDefaultTerminalTitle,
   formatOscTitleSequence,
   loadBoardSnapshot,
@@ -413,7 +413,7 @@ export class IssueBoardTui {
 
   private executeSlashCommand(id: SlashCommandId, arg: string) {
     const c = this.state.composer
-    c.text = ''
+    const existingTokens = c.attachments.map((a) => a.token).join(' ')
     c.slashIndex = 0
 
     switch (id) {
@@ -424,9 +424,12 @@ export class IssueBoardTui {
         if (c.mode === 'local') {
           c.mode = DEFAULT_SUBMIT_MODE
         }
-        if (arg.trim()) {
+        const cleanedArg = stripInlineAttachmentTokens(arg, c.attachments).trim()
+        if (cleanedArg) {
+          c.text = arg
           void this.handleComposerSubmit(arg)
         } else {
+          c.text = arg.trim() || existingTokens
           this.render()
         }
         return
@@ -435,30 +438,39 @@ export class IssueBoardTui {
       case 'direct':
       case 'local': {
         c.mode = id as SubmitMode
-        if (arg.trim()) {
+        const cleanedArg = stripInlineAttachmentTokens(arg, c.attachments).trim()
+        if (cleanedArg) {
+          c.text = arg
           void this.handleComposerSubmit(arg)
         } else {
+          c.text = arg.trim() || existingTokens
           this.render()
         }
         return
       }
       case 'lite': {
+        c.text = existingTokens
         void this.handleToggleWorkerMode(arg)
         return
       }
       case 'agent':
+        c.text = existingTokens
         this.openSettingsModal()
         return
       case 'refresh':
+        c.text = existingTokens
         void this.refresh()
         return
       case 'issues':
+        c.text = existingTokens
         this.dispatchAction('switch-tab', 'issues')
         return
       case 'prs':
+        c.text = existingTokens
         this.dispatchAction('switch-tab', 'prs')
         return
       case 'autopilot': {
+        c.text = existingTokens
         const lower = arg.trim().toLowerCase()
         if (['off', 'stop', 'pause', 'disable', '关闭', '暂停'].includes(lower)) {
           void this.handleStopAutopilot()
@@ -472,20 +484,25 @@ export class IssueBoardTui {
         return
       }
       case 'stop':
+        c.text = existingTokens
         void this.handleStopAutopilot()
         return
       case 'paste':
+        c.text = existingTokens
         void this.handlePasteClipboardImage()
         return
       case 'title':
+        c.text = existingTokens
         void this.handleRenameTerminal(arg)
         return
       case 'clear':
+        c.text = ''
         c.attachments = []
         c.followUpOf = null
         this.render()
         return
       case 'quit':
+        c.text = ''
         this.quit(0)
         return
     }
@@ -707,11 +724,13 @@ export class IssueBoardTui {
     if (ev.type === 'paste') {
       const repoPath = this.state.snapshot?.repoPath || this.targetPath
       try {
-        const att = attachLocalFilePath(repoPath, ev.text)
-        if (att) {
-          const next = appendInlineAttachment(c.text, c.attachments, att)
-          c.text = next.text
-          c.attachments = next.attachments
+        const attached = attachLocalFilePaths(repoPath, ev.text)
+        if (attached.length > 0) {
+          for (const att of attached) {
+            const next = appendInlineAttachment(c.text, c.attachments, att)
+            c.text = next.text
+            c.attachments = next.attachments
+          }
           c.slashIndex = 0
           this.render()
           return
@@ -947,11 +966,13 @@ export class IssueBoardTui {
       } else if (ev.type === 'paste') {
         const repoPath = this.state.snapshot?.repoPath || this.targetPath
         try {
-          const att = attachLocalFilePath(repoPath, ev.text)
-          if (att) {
-            const next = appendInlineAttachment(modal.text, modal.attachments, att)
-            modal.text = next.text
-            modal.attachments = next.attachments
+          const attached = attachLocalFilePaths(repoPath, ev.text)
+          if (attached.length > 0) {
+            for (const att of attached) {
+              const next = appendInlineAttachment(modal.text, modal.attachments, att)
+              modal.text = next.text
+              modal.attachments = next.attachments
+            }
             this.render()
             return
           }
@@ -970,22 +991,32 @@ export class IssueBoardTui {
 
   private async handlePasteClipboardImage() {
     const repoPath = this.state.snapshot?.repoPath || this.targetPath
-    const att = await captureClipboardImage(repoPath)
-    if (!att) {
-      this.showError('剪贴板中未检测到截图')
+    let attached: SavedAttachment[]
+    try {
+      attached = await captureClipboardAttachments(repoPath)
+    } catch (err) {
+      this.showError(err instanceof Error ? err.message : String(err))
+      return
+    }
+    if (attached.length === 0) {
+      this.showError('剪贴板中未检测到图片或文件')
       return
     }
     if (this.state.modal.type === 'reply') {
-      const next = appendInlineAttachment(this.state.modal.text, this.state.modal.attachments, att)
-      this.state.modal.text = next.text
-      this.state.modal.attachments = next.attachments
+      for (const att of attached) {
+        const next = appendInlineAttachment(this.state.modal.text, this.state.modal.attachments, att)
+        this.state.modal.text = next.text
+        this.state.modal.attachments = next.attachments
+      }
       this.render()
       return
     }
     const c = this.state.composer
-    const next = appendInlineAttachment(c.text, c.attachments, att)
-    c.text = next.text
-    c.attachments = next.attachments
+    for (const att of attached) {
+      const next = appendInlineAttachment(c.text, c.attachments, att)
+      c.text = next.text
+      c.attachments = next.attachments
+    }
     c.slashIndex = 0
     this.render()
   }
